@@ -21,10 +21,22 @@
 //!    `TrappedIon` (one native two-qubit gate), while every *other*
 //!    two-qubit gate that isn't already `Cx` costs more.
 //!
-//! `Rigetti` (`Cz`-native, no native `Cx`) is built by lowering the same
-//! `Cx(a, b, theta)`-shaped intermediate through
-//! `Cx(a, b) == H(b) . Cz(a, b) . H(b)` (already used in `native.rs` for
-//! the trapped-ion target) -- so a `Rigetti` `Rzz` costs 2 `Cz`s, not 1.
+//! `Rigetti` (`Cz`-native, no native `Cx`) lowers the same
+//! `Cx(a,b).Rz(b,theta).Cx(a,b)` intermediate, but *not* by naively
+//! substituting `Cx(a,b) == H(b).Cz(a,b).H(b)` twice (which would cost
+//! 4 `H`'s). Instead it uses a third identity:
+//! 3. `H(b) . Rz(b, theta) . H(b) == Rx(b, theta)` -- exact, because
+//!    conjugating the Pauli `Z` generator by `H` gives `X`
+//!    (`H.Z.H == X`), so conjugating `Rz(theta) = exp(-i*theta*Z/2)` by
+//!    `H` gives `Rx(theta) = exp(-i*theta*X/2)` at the operator-
+//!    exponential level. Substituting this into the naive
+//!    `H.Cz.H . Rz(theta) . H.Cz.H` expansion collapses the *middle*
+//!    `H . Rz(theta) . H` into a single native `Rx` (Rigetti's `Rot`),
+//!    leaving `H(b) . Cz(a,b) . Rx(b,theta) . Cz(a,b) . H(b)` -- 2 `H`'s
+//!    instead of 4, same 2 `Cz`'s as before. `push_rzz`'s `Rigetti` arm
+//!    below builds exactly this shorter form directly, rather than
+//!    calling a generic `Cx`-via-`Cz` helper twice and relying on a
+//!    peephole pass to notice the cancellation after the fact.
 //!
 //! # What's not here: Pasqal (neutral atoms)
 //! Neutral-atom platforms (Pasqal, and analog/digital Rydberg-blockade
@@ -122,6 +134,7 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
                     crate::native::NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
                 });
             }
+            optimize(&mut bc);
             bc
         }
         Backend::IbmQ | Backend::Rigetti => {
@@ -137,6 +150,13 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
                     crate::native::NativeGate::Rzz(a, b, t) => push_rzz(&mut bc, backend, a, b, t),
                 }
             }
+            // The per-gate ZYZ re-expansion above (especially `H` inside
+            // `push_rzz`'s Rigetti arm, and every `Ry` via
+            // `push_ry_via_rx`) is emitted independently of its
+            // neighbors, so plenty of adjacent/commuting single-qubit
+            // rotations are left unmerged. `optimize` cleans that up
+            // without touching the unitary implemented.
+            optimize(&mut bc);
             bc
         }
     }
@@ -151,10 +171,12 @@ fn push_ry_via_rx(bc: &mut BackendCircuit, q: usize, theta: f64) {
     bc.push(BackendGate::Rot(q, -FRAC_PI_2));
 }
 
-/// `Rzz(a, b, theta) == Cx(a, b) . Rz(b, theta) . Cx(a, b)`, further
-/// lowered to `Cz`-only for `Rigetti` via `Cx == H(b) . Cz(a, b) . H(b)`
-/// (with `H` itself expressed as `Rx`/`Rz`, same as every other
-/// single-qubit gate here). See this module's doc comment, identity 2.
+/// `Rzz(a, b, theta) == Cx(a, b) . Rz(b, theta) . Cx(a, b)`. On `IbmQ`
+/// this is used directly (identity 2). On `Rigetti` the *shortened*
+/// form is built directly -- `H(b) . Cz(a,b) . Rx(b,theta) . Cz(a,b) .
+/// H(b)` -- via identity 3 in this module's doc comment, rather than
+/// substituting `Cx(a,b) == H(b).Cz(a,b).H(b)` twice and paying for 4
+/// `H`'s when 2 suffice.
 fn push_rzz(bc: &mut BackendCircuit, backend: Backend, a: usize, b: usize, theta: f64) {
     if theta.abs() < EPS {
         return;
@@ -166,26 +188,24 @@ fn push_rzz(bc: &mut BackendCircuit, backend: Backend, a: usize, b: usize, theta
             bc.push(BackendGate::Cx(a, b));
         }
         Backend::Rigetti => {
-            push_cx_via_cz(bc, a, b);
-            bc.push(BackendGate::Rz(b, theta));
-            push_cx_via_cz(bc, a, b);
+            // H(b).Cz(a,b).H(b) . Rz(b,theta) . H(b).Cz(a,b).H(b)
+            //   == H(b).Cz(a,b) . [H(b).Rz(b,theta).H(b)] . Cz(a,b).H(b)
+            //   == H(b).Cz(a,b) . Rx(b,theta) . Cz(a,b).H(b)     (identity 3)
+            push_h(bc, b);
+            bc.push(BackendGate::Cz(a, b));
+            bc.push(BackendGate::Rot(b, theta)); // Rot == Rx on Rigetti
+            bc.push(BackendGate::Cz(a, b));
+            push_h(bc, b);
         }
         Backend::TrappedIon => unreachable!("push_rzz only called for IbmQ/Rigetti"),
     }
 }
 
-/// `Cx(a, b) == H(b) . Cz(a, b) . H(b)`, with `H` itself lowered by
-/// re-running it through the *same* `native::decompose` +
-/// `push_ry_via_rx` path every other single-qubit gate takes here
-/// (rather than hand-deriving `H`'s specific `Rz`/`Ry` angles a second
-/// time and risking a fresh sign error the way the first version of
-/// `native.rs`'s ZYZ synthesis did).
-fn push_cx_via_cz(bc: &mut BackendCircuit, a: usize, b: usize) {
-    push_h(bc, b);
-    bc.push(BackendGate::Cz(a, b));
-    push_h(bc, b);
-}
-
+/// Lowers a single `H(q)` by re-running it through the *same*
+/// `native::decompose` + `push_ry_via_rx` path every other single-qubit
+/// gate takes here (rather than hand-deriving `H`'s specific `Rz`/`Ry`
+/// angles a second time and risking a fresh sign error the way the
+/// first version of `native.rs`'s ZYZ synthesis did).
 fn push_h(bc: &mut BackendCircuit, q: usize) {
     let mut h_circuit = Circuit::new(q + 1);
     h_circuit.push(Gate::H(q));
@@ -197,6 +217,258 @@ fn push_h(bc: &mut BackendCircuit, q: usize) {
             crate::native::NativeGate::Rzz(..) => unreachable!("H never decomposes to Rzz"),
         }
     }
+}
+
+/// Wraps `theta` into `(-PI, PI]`, so a rotation that's an identity
+/// mod `2*PI` is recognized as such regardless of which multiple of
+/// `2*PI` it happened to accumulate as (e.g. two merged `Rz`'s summing
+/// to `2*PI` are the identity, not "a big rotation").
+fn wrap_angle(theta: f64) -> f64 {
+    use std::f64::consts::PI;
+    let mut t = theta % std::f64::consts::TAU;
+    if t > PI {
+        t -= std::f64::consts::TAU;
+    } else if t <= -PI {
+        t += std::f64::consts::TAU;
+    }
+    t
+}
+
+fn is_identity_angle(theta: f64) -> bool {
+    wrap_angle(theta).abs() < EPS
+}
+
+/// Peephole-optimizes an already-lowered [`BackendCircuit`] in place.
+/// Every gate emitted by [`lower`] comes from an *independent* ZYZ
+/// re-expansion (each `Ry`/`H` re-derives its own `Rz`/`Rot` triple via
+/// [`push_ry_via_rx`] / [`push_h`]), so adjacent single-qubit rotations
+/// on the same wire are frequently left unmerged, `Rz` -- being
+/// diagonal -- is left un-commuted through neighboring two-qubit gates
+/// it could otherwise pass straight through, and repeated two-qubit
+/// gates on the same qubit pair (e.g. from adjacent `Rzz`'s in the
+/// source circuit) are left un-cancelled/un-fused.
+///
+/// This pass does three things, all exact identities (no
+/// approximation, no change to the implemented unitary mod global
+/// phase):
+///
+/// 1. **Adjacent `Rot` fusion.** Two `Rot(q, a)` gates on the same
+///    qubit with nothing else on that qubit between them collapse to
+///    one `Rot(q, a+b)`.
+/// 2. **`Rz` commutation + fusion.** `Rz(q, theta)` is diagonal, so it
+///    commutes exactly with: any gate on a different qubit, `Cz(a,b)`
+///    and `Rzz(a,b,t)` on *either* wire (both fully diagonal), and
+///    `Cx(a,b)` on the control wire `a` (target-side transformation by
+///    `X` doesn't touch the control's diagonal structure). It does
+///    *not* commute with `Rot` on the same qubit, or with `Cx`'s target
+///    wire `b`. Each `Rz` is therefore held as a "pending" rotation per
+///    qubit and floated forward through anything it commutes with,
+///    merging with any other pending `Rz` on that qubit it meets along
+///    the way, and is only emitted (flushed) right before the first
+///    gate on that qubit it *doesn't* commute with.
+/// 3. **Same-pair two-qubit cancellation/fusion.** Two adjacent
+///    `Cz(a,b)` gates cancel (`Cz` is an involution); two adjacent
+///    `Cx(a,b)` gates (same control/target order) cancel likewise; two
+///    adjacent `Rzz(a,b,t1)`/`Rzz(a,b,t2)` fuse into one
+///    `Rzz(a,b,t1+t2)`. "Adjacent" here tolerates anything that itself
+///    commutes with the two-qubit gate sitting between them (disjoint
+///    qubits, or a floated `Rz` on a wire it's diagonal-compatible
+///    with) -- **not** anything that had to be flushed there, since a
+///    flushed gate is a real event that breaks the sandwich. This
+///    matters concretely for `Cx`: `Cx(a,b).Rz(a,t).Cx(a,b)` really
+///    does cancel around the control-side `Rz`, collapsing to just
+///    `Rz(a,t)` -- but `Cx(a,b).Rz(b,t).Cx(a,b)` does **not** cancel;
+///    it equals `Rzz(a,b,t)` (the same identity `push_rzz` builds in
+///    the other direction), so a genuinely-flushed target-side `Rz`
+///    must invalidate the pending cancellation rather than be ignored.
+///
+/// Any rotation that nets out to an identity (mod `2*PI`) is dropped
+/// entirely rather than emitted as a zero-angle gate.
+pub fn optimize(bc: &mut BackendCircuit) {
+    use std::collections::HashMap;
+
+    let mut pending_rz: HashMap<usize, f64> = HashMap::new();
+    // Index into `out` of the most recent `Rot` on a qubit, valid only
+    // while nothing else has touched that qubit since.
+    let mut last_rot: HashMap<usize, usize> = HashMap::new();
+    // Index into `out` of the most recent two-qubit gate on an
+    // unordered qubit pair, valid only while nothing that breaks the
+    // sandwich has touched either wire since.
+    let mut last_2q: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut out: Vec<Option<BackendGate>> = Vec::with_capacity(bc.gates.len());
+
+    fn pair_key(a: usize, b: usize) -> (usize, usize) {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    // A gate that isn't itself part of a same-pair two-qubit
+    // cancellation, but touches `q`, invalidates any two-qubit-gate
+    // pair tracking that involves `q` -- something real just happened
+    // on that wire.
+    fn invalidate_pairs_touching(last_2q: &mut HashMap<(usize, usize), usize>, q: usize) {
+        last_2q.retain(|&k, _| k.0 != q && k.1 != q);
+    }
+
+    // Invalidates every tracked pair touching `a` or `b` *except*
+    // `keep` (the pair `(a,b)` itself, which the caller checks
+    // separately for cancellation/fusion eligibility).
+    fn invalidate_other_pairs(
+        last_2q: &mut HashMap<(usize, usize), usize>,
+        keep: (usize, usize),
+        a: usize,
+        b: usize,
+    ) {
+        last_2q.retain(|&k, _| k == keep || (k.0 != a && k.0 != b && k.1 != a && k.1 != b));
+    }
+
+    fn flush(
+        q: usize,
+        pending_rz: &mut HashMap<usize, f64>,
+        last_rot: &mut HashMap<usize, usize>,
+        last_2q: &mut HashMap<(usize, usize), usize>,
+        out: &mut Vec<Option<BackendGate>>,
+    ) {
+        if let Some(theta) = pending_rz.remove(&q) {
+            if !is_identity_angle(theta) {
+                out.push(Some(BackendGate::Rz(q, wrap_angle(theta))));
+                // A genuinely emitted Rz(q) is a real gate on wire q
+                // now sitting in the output: any two-qubit pair
+                // waiting on "nothing happened on q" (i.e. Cx with q
+                // as target) is no longer eligible to cancel around it.
+                invalidate_pairs_touching(last_2q, q);
+            }
+            last_rot.remove(&q);
+        }
+    }
+
+    for g in bc.gates.drain(..) {
+        match g {
+            BackendGate::Rz(q, theta) => {
+                *pending_rz.entry(q).or_insert(0.0) += theta;
+                // An Rz between two Rot's on the same qubit breaks
+                // their adjacency -- they're no longer eligible to
+                // fuse with each other.
+                last_rot.remove(&q);
+            }
+            BackendGate::Rot(q, theta) => {
+                flush(q, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
+                if let Some(&idx) = last_rot.get(&q) {
+                    if let Some(BackendGate::Rot(_, prev_theta)) = &mut out[idx] {
+                        let merged = *prev_theta + theta;
+                        if is_identity_angle(merged) {
+                            // Leave a hole; the final sweep below strips
+                            // it. (Removing mid-vector here would shift
+                            // every other qubit's recorded indices and
+                            // silently corrupt this pass.)
+                            *prev_theta = 0.0;
+                            last_rot.remove(&q);
+                        } else {
+                            *prev_theta = wrap_angle(merged);
+                        }
+                        continue;
+                    }
+                }
+                out.push(Some(BackendGate::Rot(q, theta)));
+                last_rot.insert(q, out.len() - 1);
+                // A brand-new Rot is a real gate on q: it breaks any
+                // same-pair two-qubit cancellation waiting on q too.
+                invalidate_pairs_touching(&mut last_2q, q);
+            }
+            BackendGate::Cx(a, b) => {
+                // Control wire (a) is diagonal-compatible: pending Rz
+                // floats through untouched. Target wire (b) is not:
+                // flush first (which, if it actually emits, also
+                // invalidates any same-pair Cx-Cx cancellation below --
+                // see the doc comment's Cx caveat).
+                flush(b, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
+                last_rot.remove(&a);
+                last_rot.remove(&b);
+
+                let key = pair_key(a, b);
+                invalidate_other_pairs(&mut last_2q, key, a, b);
+
+                let mut cancelled = false;
+                if let Some(&idx) = last_2q.get(&key) {
+                    if let Some(BackendGate::Cx(pa, pb)) = out[idx] {
+                        // Cx(a,b).Cx(a,b) == I -- but only the *same*
+                        // control/target direction; Cx(a,b).Cx(b,a)
+                        // is a different operator and must not cancel.
+                        if pa == a && pb == b {
+                            out[idx] = None;
+                            last_2q.remove(&key);
+                            cancelled = true;
+                        }
+                    }
+                }
+                if !cancelled {
+                    out.push(Some(BackendGate::Cx(a, b)));
+                    last_2q.insert(key, out.len() - 1);
+                }
+            }
+            BackendGate::Cz(a, b) => {
+                // Fully diagonal: pending Rz on either wire floats
+                // through untouched, and (being an involution) two
+                // adjacent Cz(a,b)'s cancel regardless of the stored
+                // qubit order, since Cz(a,b) == Cz(b,a).
+                last_rot.remove(&a);
+                last_rot.remove(&b);
+
+                let key = pair_key(a, b);
+                invalidate_other_pairs(&mut last_2q, key, a, b);
+
+                let mut cancelled = false;
+                if let Some(&idx) = last_2q.get(&key) {
+                    if matches!(out[idx], Some(BackendGate::Cz(..))) {
+                        out[idx] = None;
+                        last_2q.remove(&key);
+                        cancelled = true;
+                    }
+                }
+                if !cancelled {
+                    out.push(Some(BackendGate::Cz(a, b)));
+                    last_2q.insert(key, out.len() - 1);
+                }
+            }
+            BackendGate::Rzz(a, b, theta) => {
+                last_rot.remove(&a);
+                last_rot.remove(&b);
+
+                let key = pair_key(a, b);
+                invalidate_other_pairs(&mut last_2q, key, a, b);
+
+                let mut fused = false;
+                if let Some(&idx) = last_2q.get(&key) {
+                    if let Some(BackendGate::Rzz(_, _, prev_theta)) = &mut out[idx] {
+                        // Rzz(a,b,t) is symmetric in a,b, so fusing
+                        // regardless of stored qubit order is exact.
+                        *prev_theta = wrap_angle(*prev_theta + theta);
+                        fused = true;
+                    }
+                }
+                if !fused {
+                    out.push(Some(BackendGate::Rzz(a, b, theta)));
+                    last_2q.insert(key, out.len() - 1);
+                }
+            }
+        }
+    }
+
+    for q in pending_rz.keys().copied().collect::<Vec<_>>() {
+        flush(q, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
+    }
+
+    // Strip no-ops: explicit holes left by Cx/Cz cancellation, plus
+    // any Rz/Rot/Rzz whose angle nets out to an identity mod 2*PI.
+    bc.gates = out
+        .into_iter()
+        .flatten()
+        .filter(|g| {
+            !matches!(g,
+                BackendGate::Rz(_, a) | BackendGate::Rot(_, a) | BackendGate::Rzz(_, _, a)
+                if is_identity_angle(*a)
+            )
+        })
+        .collect();
 }
 
 impl Backend {
@@ -334,9 +606,9 @@ mod tests {
 
     #[test]
     fn rigetti_rzz_costs_more_single_qubit_gates_than_ibmq() {
-        // This is where Rigetti actually pays more: each of its 2 Cx's
-        // (via Cx == H.Cz.H) needs 2 bracketing H gates that IbmQ's
-        // native Cx doesn't need at all.
+        // Rigetti still pays more than IbmQ's native Cx (it needs H's
+        // at all), just roughly half of what the naive 4-H expansion
+        // would cost -- see rigetti_rzz_uses_only_two_h_conjugations.
         let mut c = Circuit::new(2);
         c.push(Gate::Rzz(0, 1, 0.5));
         let (ibmq_single, _) = lower(&c, Backend::IbmQ).gate_counts();
@@ -348,6 +620,287 @@ mod tests {
             ibmq_single
         );
     }
+
+    #[test]
+    fn h_rz_h_equals_rx_identity_holds_exactly() {
+        // Direct check of identity 3 in this module's doc comment:
+        // H(0).Rz(0,theta).H(0) should match Rx(0,theta) at fidelity 1,
+        // independent of any circuit that uses it.
+        let mut rng = rand::thread_rng();
+        for _ in 0..8 {
+            let theta: f64 = rng.gen_range(-std::f64::consts::TAU..std::f64::consts::TAU);
+
+            let mut lhs = randomized_register(1);
+            let mut rhs = lhs.clone();
+
+            lhs.apply_hadamard(0).unwrap();
+            lhs.apply_rz(0, theta).unwrap();
+            lhs.apply_hadamard(0).unwrap();
+
+            rhs.apply_rx(0, theta).unwrap();
+
+            let fidelity = lhs.fidelity(&rhs).unwrap();
+            assert!(
+                (fidelity - 1.0).abs() < TOL,
+                "H.Rz(theta).H should equal Rx(theta): fidelity {} at theta {}",
+                fidelity,
+                theta
+            );
+        }
+    }
+
+    #[test]
+    fn rigetti_rzz_uses_only_two_h_conjugations() {
+        // Regression check for the fix: Rigetti's Rzz lowering should
+        // use the shortened H.Cz.Rx.Cz.H form (2 H "sides"), not the
+        // naive 4-H expansion. A single Rzz's push_h call emits at
+        // least one BackendGate::Rz for the H's zyz `beta`/`delta`
+        // component (m_h() always has a nonzero beta), so counting Rz
+        // gates whose surrounding structure came from push_h is fiddly
+        // -- instead this just pins the total single-qubit count to be
+        // meaningfully smaller than double what a naive-4H version
+        // would need, using IbmQ's 1-single-gate Rzz as the cheap
+        // reference point and asserting Rigetti's overhead is bounded
+        // rather than unbounded as circuits with many Rzz gates grow.
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rzz(0, 1, 0.5));
+        let rigetti_single = lower(&c, Backend::Rigetti).gate_counts().0;
+        let one_h_cost = lower(&{
+            let mut hc = Circuit::new(1);
+            hc.push(Gate::H(0));
+            hc
+        }, Backend::Rigetti).gate_counts().0;
+
+        // Exactly 2 H's-worth of single-qubit overhead, plus the 1
+        // Rot(theta) in the middle -- not 4 H's-worth.
+        assert_eq!(
+            rigetti_single,
+            2 * one_h_cost + 1,
+            "expected exactly 2 H-conjugations + 1 Rot(theta) for Rigetti's Rzz, got {} single-qubit gates (1 H costs {})",
+            rigetti_single,
+            one_h_cost
+        );
+    }
+
+    #[test]
+    fn optimize_merges_adjacent_same_axis_rotations() {
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 1);
+        bc.push(BackendGate::Rz(0, 0.3));
+        bc.push(BackendGate::Rz(0, 0.4));
+        optimize(&mut bc);
+        assert_eq!(bc.gates, vec![BackendGate::Rz(0, wrap_angle(0.7))]);
+    }
+
+    #[test]
+    fn optimize_drops_rotations_that_cancel_to_identity() {
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 1);
+        bc.push(BackendGate::Rz(0, 1.2));
+        bc.push(BackendGate::Rz(0, -1.2));
+        optimize(&mut bc);
+        assert!(
+            bc.gates.is_empty(),
+            "opposite Rz's should cancel entirely, got {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_floats_rz_through_diagonal_two_qubit_gates() {
+        // Rz(0) . Cz(0,1) . Rz(0) should collapse the two Rz's into
+        // one, since Rz is diagonal and commutes with Cz on either wire.
+        let mut bc = BackendCircuit::new(Backend::Rigetti, 2);
+        bc.push(BackendGate::Rz(0, 0.3));
+        bc.push(BackendGate::Cz(0, 1));
+        bc.push(BackendGate::Rz(0, 0.4));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![BackendGate::Cz(0, 1), BackendGate::Rz(0, wrap_angle(0.7))],
+            "the two Rz(0)'s should fuse across the commuting Cz: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_does_not_float_rz_through_cx_target_wire() {
+        // Rz(1) . Cx(0,1) . Rz(1) must NOT merge: qubit 1 is Cx's
+        // target, and Rz doesn't commute with the X-conjugation Cx
+        // applies there.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 2);
+        bc.push(BackendGate::Rz(1, 0.3));
+        bc.push(BackendGate::Cx(0, 1));
+        bc.push(BackendGate::Rz(1, 0.4));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![
+                BackendGate::Rz(1, 0.3),
+                BackendGate::Cx(0, 1),
+                BackendGate::Rz(1, 0.4),
+            ],
+            "Rz on Cx's target wire must not merge across the Cx: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_floats_rz_through_cx_control_wire() {
+        // Rz(0) . Cx(0,1) . Rz(0) SHOULD merge: qubit 0 is Cx's
+        // control, which is diagonal-compatible with Rz.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 2);
+        bc.push(BackendGate::Rz(0, 0.3));
+        bc.push(BackendGate::Cx(0, 1));
+        bc.push(BackendGate::Rz(0, 0.4));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![BackendGate::Cx(0, 1), BackendGate::Rz(0, wrap_angle(0.7))],
+            "Rz on Cx's control wire should fuse across the Cx: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_does_not_merge_rot_across_intervening_rz() {
+        // Rot(pi/2) . Rz(theta) . Rot(-pi/2) is a real ZYZ-style
+        // sandwich (e.g. from push_ry_via_rx) -- the two Rot's must
+        // NOT cancel just because their angles are opposite, since
+        // Rz(theta) sits meaningfully between them.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 1);
+        bc.push(BackendGate::Rot(0, FRAC_PI_2));
+        bc.push(BackendGate::Rz(0, 0.6));
+        bc.push(BackendGate::Rot(0, -FRAC_PI_2));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![
+                BackendGate::Rot(0, FRAC_PI_2),
+                BackendGate::Rz(0, 0.6),
+                BackendGate::Rot(0, -FRAC_PI_2),
+            ],
+            "Rot's either side of a real Rz must survive untouched: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_cancels_adjacent_same_direction_cx() {
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 2);
+        bc.push(BackendGate::Cx(0, 1));
+        bc.push(BackendGate::Cx(0, 1));
+        optimize(&mut bc);
+        assert!(
+            bc.gates.is_empty(),
+            "Cx(0,1).Cx(0,1) == I, got {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_does_not_cancel_opposite_direction_cx() {
+        // Cx(0,1) and Cx(1,0) are different operators; they must not
+        // be treated as cancelling.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 2);
+        bc.push(BackendGate::Cx(0, 1));
+        bc.push(BackendGate::Cx(1, 0));
+        optimize(&mut bc);
+        assert_eq!(bc.gates, vec![BackendGate::Cx(0, 1), BackendGate::Cx(1, 0)]);
+    }
+
+    #[test]
+    fn optimize_cancels_cx_pair_around_control_side_rz() {
+        // Cx(0,1).Rz(0,t).Cx(0,1) == Rz(0,t): the control wire (0) is
+        // untouched by the conjugation, so the Cx's cancel around it.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 2);
+        bc.push(BackendGate::Cx(0, 1));
+        bc.push(BackendGate::Rz(0, 0.4));
+        bc.push(BackendGate::Cx(0, 1));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![BackendGate::Rz(0, 0.4)],
+            "Cx's should cancel around a control-side Rz, leaving just the Rz: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_does_not_cancel_cx_pair_around_target_side_rz() {
+        // Cx(0,1).Rz(1,t).Cx(0,1) == Rzz(0,1,t), NOT identity around
+        // Rz(1,t) -- the target wire's Rz does not commute with Cx.
+        // This is the exact trap: naively cancelling here would drop
+        // a real ZZ coupling from the circuit.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 2);
+        bc.push(BackendGate::Cx(0, 1));
+        bc.push(BackendGate::Rz(1, 0.4));
+        bc.push(BackendGate::Cx(0, 1));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![
+                BackendGate::Cx(0, 1),
+                BackendGate::Rz(1, 0.4),
+                BackendGate::Cx(0, 1),
+            ],
+            "Cx's must NOT cancel around a target-side Rz -- this sandwich is Rzz, not identity: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_cancels_adjacent_cz() {
+        let mut bc = BackendCircuit::new(Backend::Rigetti, 2);
+        bc.push(BackendGate::Cz(0, 1));
+        bc.push(BackendGate::Cz(0, 1));
+        optimize(&mut bc);
+        assert!(bc.gates.is_empty(), "Cz(0,1).Cz(0,1) == I, got {:?}", bc.gates);
+    }
+
+    #[test]
+    fn optimize_cancels_cz_pair_around_rz_on_either_wire() {
+        // Cz is fully diagonal, so unlike Cx, a genuine Rz on *either*
+        // wire between two Cz(a,b)'s still allows cancellation.
+        let mut bc = BackendCircuit::new(Backend::Rigetti, 2);
+        bc.push(BackendGate::Cz(0, 1));
+        bc.push(BackendGate::Rz(1, 0.4));
+        bc.push(BackendGate::Cz(0, 1));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![BackendGate::Rz(1, 0.4)],
+            "Cz's should cancel around an Rz on either wire: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_fuses_adjacent_rzz_on_same_pair() {
+        let mut bc = BackendCircuit::new(Backend::TrappedIon, 2);
+        bc.push(BackendGate::Rzz(0, 1, 0.3));
+        bc.push(BackendGate::Rzz(0, 1, 0.5));
+        optimize(&mut bc);
+        assert_eq!(bc.gates, vec![BackendGate::Rzz(0, 1, wrap_angle(0.8))]);
+    }
+
+    #[test]
+    fn optimize_does_not_fuse_rzz_across_an_intervening_rot() {
+        let mut bc = BackendCircuit::new(Backend::TrappedIon, 2);
+        bc.push(BackendGate::Rzz(0, 1, 0.3));
+        bc.push(BackendGate::Rot(0, 0.1));
+        bc.push(BackendGate::Rzz(0, 1, 0.5));
+        optimize(&mut bc);
+        assert_eq!(
+            bc.gates,
+            vec![
+                BackendGate::Rzz(0, 1, 0.3),
+                BackendGate::Rot(0, 0.1),
+                BackendGate::Rzz(0, 1, 0.5),
+            ],
+            "a real Rot between them must block fusion: {:?}",
+            bc.gates
+        );
+    }
+
     #[test]
     fn each_backend_calibration_gives_a_fidelity_estimate() {
         use crate::fidelity::estimate_backend_circuit_fidelity;
