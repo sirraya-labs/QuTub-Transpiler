@@ -121,7 +121,25 @@ impl BackendCircuit {
 const EPS: f64 = 1e-9;
 
 /// Lowers a source-level circuit straight to `backend`'s native gate set.
+///
+/// Routes against `backend`'s [`Backend::coupling_map`] first (see
+/// `coupling.rs`/`route.rs`) -- a no-op for `TrappedIon`, which has
+/// none -- so every two-qubit gate below is already guaranteed to sit
+/// on physical qubits the backend can actually apply a native two-qubit
+/// gate to directly. Everything from here down is unchanged from
+/// before routing existed: it only ever reads `circuit`, so it doesn't
+/// know or care whether `circuit` is the caller's original or an
+/// already-routed one.
 pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
+    let routed_storage;
+    let circuit: &Circuit = match backend.coupling_map(circuit.num_qubits) {
+        Some(coupling) => {
+            routed_storage = crate::route::route(circuit, &coupling);
+            &routed_storage
+        }
+        None => circuit,
+    };
+
     match backend {
         Backend::TrappedIon => {
             // Already-tested path: reuse native.rs verbatim.
@@ -602,6 +620,24 @@ impl Backend {
             Backend::Rigetti => crate::fidelity::PublishedCalibration::rigetti_ankaa3(),
         }
     }
+
+    /// The physical qubit connectivity `lower` routes against before
+    /// doing anything else. `None` for `TrappedIon` -- a trapped-ion
+    /// chain's shared motional mode makes every qubit pair directly
+    /// reachable, so there's nothing to route (see `coupling.rs`'s
+    /// module doc). `IbmQ`/`Rigetti` both get a nearest-neighbor chain,
+    /// a deliberately conservative stand-in for their real (more
+    /// permissive) lattices -- see `coupling.rs` for why a line is safe
+    /// to route against even though it's not either device's literal
+    /// topology.
+    pub fn coupling_map(self, num_qubits: usize) -> Option<crate::coupling::CouplingMap> {
+        match self {
+            Backend::TrappedIon => None,
+            Backend::IbmQ | Backend::Rigetti => {
+                Some(crate::coupling::CouplingMap::linear(num_qubits))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -693,6 +729,56 @@ mod tests {
     #[test]
     fn rigetti_matches_native_path() {
         check_backend_matches(&sample_circuit(), Backend::Rigetti);
+    }
+
+    /// `sample_circuit`'s `Ryy(0, 2)` is already non-adjacent on a
+    /// 3-qubit line, so `ibmq_matches_native_path`/`rigetti_matches_native_path`
+    /// above already exercise routing implicitly. This test makes that
+    /// explicit and checks the routing postcondition directly: on a
+    /// wider, sparser circuit, every two-qubit `BackendGate` `lower`
+    /// emits must land on physical qubits `Backend::coupling_map`
+    /// actually allows to interact directly.
+    #[test]
+    fn lower_routes_distant_gates_onto_adjacent_qubits() {
+        let mut c = Circuit::new(5);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 4))
+            .push(Gate::Cp(1, 3, 0.8))
+            .push(Gate::Ryy(2, 4, 0.5));
+
+        for backend in [Backend::IbmQ, Backend::Rigetti] {
+            let coupling = backend
+                .coupling_map(c.num_qubits)
+                .expect("IbmQ/Rigetti always have a coupling map");
+            let bc = lower(&c, backend);
+            for g in &bc.gates {
+                let pair = match *g {
+                    BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => Some((a, b)),
+                    BackendGate::Rzz(a, b, _) => Some((a, b)),
+                    BackendGate::Rz(..) | BackendGate::Rot(..) => None,
+                };
+                if let Some((a, b)) = pair {
+                    assert!(
+                        coupling.is_adjacent(a, b),
+                        "backend {:?}: two-qubit gate {:?} not on adjacent qubits",
+                        backend,
+                        g
+                    );
+                }
+            }
+            // Routing must not have changed the circuit's action.
+            check_backend_matches(&c, backend);
+        }
+    }
+
+    #[test]
+    fn trapped_ion_lowering_is_unaffected_by_routing() {
+        // TrappedIon has no coupling map, so a distant gate should
+        // lower exactly as it did before routing existed.
+        let mut c = Circuit::new(5);
+        c.push(Gate::Cx(0, 4));
+        assert!(Backend::TrappedIon.coupling_map(c.num_qubits).is_none());
+        check_backend_matches(&c, Backend::TrappedIon);
     }
 
     #[test]
