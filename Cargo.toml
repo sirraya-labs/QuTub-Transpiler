@@ -1,0 +1,11 @@
+[package]
+name = "sirraya-qutub-transpiler"
+version = "0.1.0"
+edition = "2021"
+description = "QASM 2.0 import + native-gate (Rz/Ry/Rzz) decomposition, optimization, and a self-contained fidelity estimate for circuits run on sirraya-qutub."
+
+[dependencies]
+sirraya-qutub = "0.1.13"
+
+[dev-dependencies]
+rand = "0.8"

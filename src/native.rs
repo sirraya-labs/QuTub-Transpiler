@@ -1,0 +1,273 @@
+//! Decomposition into a trapped-ion-style native gate set: arbitrary
+//! single-qubit rotations built from `{Rz, Ry}` (Euler ZYZ form) plus a
+//! single two-qubit entangler, `Rzz` -- `sirraya_qutub`'s
+//! `apply_rz` / `apply_ry` / `apply_rzz`. This is the gate set the
+//! crate's `HardwareCalibration` (Quantinuum Helios, a trapped-ion
+//! device) story is actually about: one single-qubit fidelity number and
+//! one two-qubit fidelity number, which only makes sense once every gate
+//! in the circuit *is* one of those two kinds.
+//!
+//! Every identity below is an exact (not approximate) circuit identity;
+//! `tests/decompositions.rs` checks each one against
+//! `sirraya_qutub::core::QuantumRegister` directly rather than trusting
+//! the algebra alone.
+
+use crate::ir::{Circuit, Gate};
+use std::f64::consts::{FRAC_PI_2, PI};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NativeGate {
+    Rz(usize, f64),
+    Ry(usize, f64),
+    Rzz(usize, usize, f64),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NativeCircuit {
+    pub num_qubits: usize,
+    pub gates: Vec<NativeGate>,
+}
+
+impl NativeCircuit {
+    pub fn new(num_qubits: usize) -> Self {
+        Self {
+            num_qubits,
+            gates: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, g: NativeGate) {
+        self.gates.push(g);
+    }
+
+    pub fn extend(&mut self, other: impl IntoIterator<Item = NativeGate>) {
+        self.gates.extend(other);
+    }
+
+    /// (single_qubit_gate_count, two_qubit_gate_count) -- exactly the two
+    /// numbers `HardwareCalibration`'s fidelity story needs.
+    pub fn gate_counts(&self) -> (usize, usize) {
+        let mut single = 0;
+        let mut two = 0;
+        for g in &self.gates {
+            match g {
+                NativeGate::Rz(..) | NativeGate::Ry(..) => single += 1,
+                NativeGate::Rzz(..) => two += 1,
+            }
+        }
+        (single, two)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Minimal local complex/matrix algebra, kept private to this module so
+// the ZYZ synthesizer below doesn't need to reach into
+// `sirraya_qutub::complex::Complex`'s representation -- it only needs
+// to reproduce the *external* behavior of qutub's own Rz/Ry/named gates,
+// which is documented (and tested) independently of how qutub happens
+// to store a complex number internally.
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+struct C {
+    re: f64,
+    im: f64,
+}
+
+impl C {
+    fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+    fn polar(r: f64, theta: f64) -> Self {
+        Self::new(r * theta.cos(), r * theta.sin())
+    }
+    fn abs(self) -> f64 {
+        (self.re * self.re + self.im * self.im).sqrt()
+    }
+    fn arg(self) -> f64 {
+        self.im.atan2(self.re)
+    }
+}
+impl std::ops::Mul for C {
+    type Output = C;
+    fn mul(self, o: C) -> C {
+        C::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
+    }
+}
+impl std::ops::Sub for C {
+    type Output = C;
+    fn sub(self, o: C) -> C {
+        C::new(self.re - o.re, self.im - o.im)
+    }
+}
+
+type Mat2 = [[C; 2]; 2];
+
+const EPS: f64 = 1e-9;
+
+/// ZYZ Euler decomposition: for any single-qubit unitary `m` (as written
+/// in the *same* matrix convention as `sirraya_qutub`'s own gates --
+/// see the module doc), returns `(delta, gamma, beta)` such that
+/// `Rz(beta) . Ry(gamma) . Rz(delta) == m` up to an unobservable global
+/// phase. `delta` is applied to the qubit first, `beta` last.
+fn zyz_decompose(m: Mat2) -> (f64, f64, f64) {
+    let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    let g = C::polar(1.0, -det.arg() / 2.0); // det(g*m) == 1
+    let v00 = g * m[0][0];
+    let v01 = g * m[0][1];
+
+    let c = v00.abs();
+    let s = v01.abs();
+    let gamma = 2.0 * s.atan2(c);
+
+    // v00 = cos(gamma/2) * e^{-i(beta+delta)/2}
+    // v01 = -sin(gamma/2) * e^{-i(beta-delta)/2}
+    if c < EPS {
+        let beta_minus_delta = -2.0 * (v01 * C::new(-1.0, 0.0)).arg();
+        (0.0, gamma, beta_minus_delta)
+    } else if s < EPS {
+        let beta_plus_delta = -2.0 * v00.arg();
+        (0.0, gamma, beta_plus_delta)
+    } else {
+        let beta_plus_delta = -2.0 * v00.arg();
+        let beta_minus_delta = -2.0 * (v01 * C::new(-1.0, 0.0)).arg();
+        let beta = 0.5 * (beta_plus_delta + beta_minus_delta);
+        let delta = 0.5 * (beta_plus_delta - beta_minus_delta);
+        (delta, gamma, beta)
+    }
+}
+
+fn push_single(nc: &mut NativeCircuit, q: usize, m: Mat2) {
+    let (delta, gamma, beta) = zyz_decompose(m);
+    if delta.abs() > EPS {
+        nc.push(NativeGate::Rz(q, delta));
+    }
+    if gamma.abs() > EPS {
+        nc.push(NativeGate::Ry(q, gamma));
+    }
+    if beta.abs() > EPS {
+        nc.push(NativeGate::Rz(q, beta));
+    }
+}
+
+fn m_h() -> Mat2 {
+    let f = 1.0 / std::f64::consts::SQRT_2;
+    [[C::new(f, 0.0), C::new(f, 0.0)], [C::new(f, 0.0), C::new(-f, 0.0)]]
+}
+fn m_x() -> Mat2 {
+    [[C::new(0.0, 0.0), C::new(1.0, 0.0)], [C::new(1.0, 0.0), C::new(0.0, 0.0)]]
+}
+fn m_y() -> Mat2 {
+    [[C::new(0.0, 0.0), C::new(0.0, -1.0)], [C::new(0.0, 1.0), C::new(0.0, 0.0)]]
+}
+fn m_z() -> Mat2 {
+    [[C::new(1.0, 0.0), C::new(0.0, 0.0)], [C::new(0.0, 0.0), C::new(-1.0, 0.0)]]
+}
+fn m_s() -> Mat2 {
+    [[C::new(1.0, 0.0), C::new(0.0, 0.0)], [C::new(0.0, 0.0), C::new(0.0, 1.0)]]
+}
+fn m_sdg() -> Mat2 {
+    [[C::new(1.0, 0.0), C::new(0.0, 0.0)], [C::new(0.0, 0.0), C::new(0.0, -1.0)]]
+}
+fn m_t() -> Mat2 {
+    [
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::polar(1.0, FRAC_PI_2 / 2.0)],
+    ]
+}
+fn m_tdg() -> Mat2 {
+    [
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::polar(1.0, -FRAC_PI_2 / 2.0)],
+    ]
+}
+fn m_rx(theta: f64) -> Mat2 {
+    let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
+    [[C::new(c, 0.0), C::new(0.0, -s)], [C::new(0.0, -s), C::new(c, 0.0)]]
+}
+
+/// Decomposes a full source-level [`Circuit`] into the native
+/// `{Rz, Ry, Rzz}` gate set.
+pub fn decompose(circuit: &Circuit) -> NativeCircuit {
+    let mut nc = NativeCircuit::new(circuit.num_qubits);
+    for gate in &circuit.gates {
+        decompose_gate(&mut nc, gate);
+    }
+    nc
+}
+
+fn decompose_gate(nc: &mut NativeCircuit, gate: &Gate) {
+    match *gate {
+        Gate::H(q) => push_single(nc, q, m_h()),
+        Gate::X(q) => push_single(nc, q, m_x()),
+        Gate::Y(q) => push_single(nc, q, m_y()),
+        Gate::Z(q) => push_single(nc, q, m_z()),
+        Gate::S(q) => push_single(nc, q, m_s()),
+        Gate::Sdg(q) => push_single(nc, q, m_sdg()),
+        Gate::T(q) => push_single(nc, q, m_t()),
+        Gate::Tdg(q) => push_single(nc, q, m_tdg()),
+        Gate::Rx(q, theta) => push_single(nc, q, m_rx(theta)),
+        Gate::Ry(q, theta) => {
+            if theta.abs() > EPS {
+                nc.push(NativeGate::Ry(q, theta));
+            }
+        }
+        Gate::Rz(q, theta) => {
+            if theta.abs() > EPS {
+                nc.push(NativeGate::Rz(q, theta));
+            }
+        }
+        Gate::Rzz(a, b, theta) => {
+            if theta.abs() > EPS {
+                nc.push(NativeGate::Rzz(a, b, theta));
+            }
+        }
+        Gate::Cp(a, b, lambda) => decompose_cp(nc, a, b, lambda),
+        Gate::Cz(a, b) => decompose_cp(nc, a, b, PI),
+        Gate::Cx(control, target) => {
+            push_single(nc, target, m_h());
+            decompose_cp(nc, control, target, PI);
+            push_single(nc, target, m_h());
+        }
+        Gate::Swap(a, b) => {
+            decompose_gate(nc, &Gate::Cx(a, b));
+            decompose_gate(nc, &Gate::Cx(b, a));
+            decompose_gate(nc, &Gate::Cx(a, b));
+        }
+        Gate::Rxx(a, b, theta) => {
+            // RXX(theta) = (H@H) . RZZ(theta) . (H@H), exact: X = H Z H.
+            push_single(nc, a, m_h());
+            push_single(nc, b, m_h());
+            if theta.abs() > EPS {
+                nc.push(NativeGate::Rzz(a, b, theta));
+            }
+            push_single(nc, a, m_h());
+            push_single(nc, b, m_h());
+        }
+        Gate::Ryy(a, b, theta) => {
+            // RYY(theta) = (Rx(-pi/2)@Rx(-pi/2)) . RZZ(theta) . (Rx(pi/2)@Rx(pi/2)),
+            // exact: Y = Rx(-pi/2) . Z . Rx(-pi/2)^dagger.
+            push_single(nc, a, m_rx(FRAC_PI_2));
+            push_single(nc, b, m_rx(FRAC_PI_2));
+            if theta.abs() > EPS {
+                nc.push(NativeGate::Rzz(a, b, theta));
+            }
+            push_single(nc, a, m_rx(-FRAC_PI_2));
+            push_single(nc, b, m_rx(-FRAC_PI_2));
+        }
+    }
+}
+
+/// CP(a, b, lambda) [diag(1,1,1,e^{i*lambda})] up to global phase ==
+/// Rz(a, lambda/2) . Rz(b, lambda/2) . Rzz(a, b, -lambda/2).
+/// (CZ is the lambda == pi special case.)
+fn decompose_cp(nc: &mut NativeCircuit, a: usize, b: usize, lambda: f64) {
+    let phi = lambda / 2.0;
+    if phi.abs() > EPS {
+        nc.push(NativeGate::Rz(a, phi));
+        nc.push(NativeGate::Rz(b, phi));
+    }
+    if phi.abs() > EPS {
+        nc.push(NativeGate::Rzz(a, b, -phi));
+    }
+}
