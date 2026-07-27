@@ -68,8 +68,16 @@ impl NativeCircuit {
 // to store a complex number internally.
 // ---------------------------------------------------------------------
 
+// `C`/`Mat2` and the handful of matrix builders below are `pub(crate)`
+// (rather than private to this module) so `crate::backend`'s
+// full-run resynthesis pass can reuse the *exact same* ZYZ algebra
+// this module already has tested against the real simulator, instead
+// of re-deriving a second copy of the same math. Everything downstream
+// still only ever touches these through the opaque `Mat2` type and the
+// named constructor/decompose functions -- no field access, no way to
+// build an invalid `C`/`Mat2` from outside this module.
 #[derive(Clone, Copy, Debug)]
-struct C {
+pub(crate) struct C {
     re: f64,
     im: f64,
 }
@@ -100,17 +108,59 @@ impl std::ops::Sub for C {
         C::new(self.re - o.re, self.im - o.im)
     }
 }
+impl std::ops::Add for C {
+    type Output = C;
+    fn add(self, o: C) -> C {
+        C::new(self.re + o.re, self.im + o.im)
+    }
+}
 
-type Mat2 = [[C; 2]; 2];
+pub(crate) type Mat2 = [[C; 2]; 2];
 
 const EPS: f64 = 1e-9;
+
+pub(crate) fn m_identity() -> Mat2 {
+    [
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::new(1.0, 0.0)],
+    ]
+}
+
+/// 2x2 matrix product `a . b` (`b` applied first, `a` last -- same
+/// "rightmost factor is applied first" convention `zyz_decompose`'s
+/// doc comment uses).
+pub(crate) fn matmul(a: Mat2, b: Mat2) -> Mat2 {
+    let mut out = m_identity();
+    for i in 0..2 {
+        for j in 0..2 {
+            out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j];
+        }
+    }
+    out
+}
+
+pub(crate) fn m_rz(theta: f64) -> Mat2 {
+    let h = theta / 2.0;
+    [
+        [C::polar(1.0, -h), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::polar(1.0, h)],
+    ]
+}
+
+pub(crate) fn m_ry(theta: f64) -> Mat2 {
+    let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
+    [
+        [C::new(c, 0.0), C::new(-s, 0.0)],
+        [C::new(s, 0.0), C::new(c, 0.0)],
+    ]
+}
 
 /// ZYZ Euler decomposition: for any single-qubit unitary `m` (as written
 /// in the *same* matrix convention as `sirraya_qutub`'s own gates --
 /// see the module doc), returns `(delta, gamma, beta)` such that
 /// `Rz(beta) . Ry(gamma) . Rz(delta) == m` up to an unobservable global
 /// phase. `delta` is applied to the qubit first, `beta` last.
-fn zyz_decompose(m: Mat2) -> (f64, f64, f64) {
+pub(crate) fn zyz_decompose(m: Mat2) -> (f64, f64, f64) {
     let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
     let g = C::polar(1.0, -det.arg() / 2.0); // det(g*m) == 1
     let v00 = g * m[0][0];
@@ -181,7 +231,7 @@ fn m_tdg() -> Mat2 {
         [C::new(0.0, 0.0), C::polar(1.0, -FRAC_PI_2 / 2.0)],
     ]
 }
-fn m_rx(theta: f64) -> Mat2 {
+pub(crate) fn m_rx(theta: f64) -> Mat2 {
     let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
     [[C::new(c, 0.0), C::new(0.0, -s)], [C::new(0.0, -s), C::new(c, 0.0)]]
 }

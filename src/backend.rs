@@ -154,9 +154,27 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
             // `push_rzz`'s Rigetti arm, and every `Ry` via
             // `push_ry_via_rx`) is emitted independently of its
             // neighbors, so plenty of adjacent/commuting single-qubit
-            // rotations are left unmerged. `optimize` cleans that up
-            // without touching the unitary implemented.
-            optimize(&mut bc);
+            // rotations are left unmerged -- and worse, `optimize`'s
+            // `Rot` fusion only ever merges two *literally adjacent*
+            // `Rot`s; a run like `Rot(pi/2).Rz(theta).Rot(-pi/2)` (one
+            // `push_ry_via_rx` block) sitting next to another such
+            // block from a neighboring source gate is really one
+            // single-qubit unitary wearing up to 6+ gates, and no
+            // adjacent-pair rule ever collapses that. `resynthesize`
+            // (see its doc comment) closes that gap by collapsing the
+            // whole run algebraically instead of pattern-matching
+            // adjacent pairs; running it back-to-back with `optimize`
+            // to a fixed point lets a two-qubit cancellation freed up
+            // by one pass expose a longer single-qubit run for the
+            // other, and vice versa.
+            loop {
+                let before = bc.gates.len();
+                resynthesize(&mut bc);
+                optimize(&mut bc);
+                if bc.gates.len() == before {
+                    break;
+                }
+            }
             bc
         }
     }
@@ -217,6 +235,105 @@ fn push_h(bc: &mut BackendCircuit, q: usize) {
             crate::native::NativeGate::Rzz(..) => unreachable!("H never decomposes to Rzz"),
         }
     }
+}
+
+/// Collapses every maximal run of single-qubit gates (`Rz`/`Rot`) on a
+/// wire -- everything between one two-qubit gate touching that wire
+/// and the next -- into a single canonical `Rz . Rot . Rz` triple (or
+/// fewer gates, dropping any angle that's ~0), regardless of how many
+/// gates the run started as.
+///
+/// This is a strictly stronger version of what `optimize`'s `Rot`
+/// fusion already does for *literally adjacent* same-axis gates: here
+/// the whole run's product matrix is accumulated (via
+/// `crate::native`'s `Mat2`/`matmul`, the same algebra
+/// `tests/decompositions.rs` already validates against the real
+/// simulator) and re-synthesized from scratch, so gates separated by
+/// real intervening `Rz`s -- which `optimize` correctly refuses to
+/// merge across, since an `Rz` genuinely sitting between two `Rot`s is
+/// a real event -- still collapse together here, because collapsing
+/// the *whole run* is exact regardless of what's inside it.
+///
+/// For `IbmQ`/`Rigetti` (native axis `Rx`), the triple is derived from
+/// `crate::native::zyz_decompose`'s `(delta, gamma, beta)` via the
+/// exact identity `Ry(t) == Rz(pi/2) . Rx(t) . Rz(-pi/2)` (conjugating
+/// `Ry` into `Rx` by the same 90-degree-about-Z rotation that maps the
+/// X axis to the Y axis): substituting it into
+/// `Rz(beta).Ry(gamma).Rz(delta) == m` and folding the two adjacent
+/// `Rz`'s into their neighbors gives
+/// `Rz(beta + pi/2) . Rx(gamma) . Rz(delta - pi/2) == m`. For
+/// `TrappedIon` (native axis `Ry`), `zyz_decompose`'s own triple is
+/// used directly with no shift.
+pub fn resynthesize(bc: &mut BackendCircuit) {
+    use crate::native::{m_identity, m_rx, m_ry, m_rz, matmul, zyz_decompose, Mat2};
+    use std::collections::HashMap;
+
+    let backend = bc.backend;
+
+    fn single_qubit_matrix(backend: Backend, g: BackendGate) -> Option<(usize, Mat2)> {
+        match g {
+            BackendGate::Rz(q, a) => Some((q, m_rz(a))),
+            BackendGate::Rot(q, a) => {
+                let m = match backend {
+                    Backend::TrappedIon => m_ry(a),
+                    Backend::IbmQ | Backend::Rigetti => m_rx(a),
+                };
+                Some((q, m))
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_synth(out: &mut Vec<BackendGate>, q: usize, m: Mat2, backend: Backend) {
+        let (delta, gamma, beta) = zyz_decompose(m);
+        let (first_z, mid, last_z) = match backend {
+            Backend::TrappedIon => (delta, gamma, beta),
+            Backend::IbmQ | Backend::Rigetti => (delta - FRAC_PI_2, gamma, beta + FRAC_PI_2),
+        };
+        if !is_identity_angle(first_z) {
+            out.push(BackendGate::Rz(q, wrap_angle(first_z)));
+        }
+        if mid.abs() > EPS {
+            out.push(BackendGate::Rot(q, mid));
+        }
+        if !is_identity_angle(last_z) {
+            out.push(BackendGate::Rz(q, wrap_angle(last_z)));
+        }
+    }
+
+    fn flush(q: usize, acc: &mut HashMap<usize, Mat2>, out: &mut Vec<BackendGate>, backend: Backend) {
+        if let Some(m) = acc.remove(&q) {
+            emit_synth(out, q, m, backend);
+        }
+    }
+
+    let mut acc: HashMap<usize, Mat2> = HashMap::new();
+    let mut out: Vec<BackendGate> = Vec::with_capacity(bc.gates.len());
+
+    for g in bc.gates.drain(..) {
+        if let Some((q, m)) = single_qubit_matrix(backend, g) {
+            let entry = acc.entry(q).or_insert_with(m_identity);
+            *entry = matmul(m, *entry);
+            continue;
+        }
+        match g {
+            BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => {
+                flush(a, &mut acc, &mut out, backend);
+                flush(b, &mut acc, &mut out, backend);
+                out.push(g);
+            }
+            BackendGate::Rzz(a, b, _) => {
+                flush(a, &mut acc, &mut out, backend);
+                flush(b, &mut acc, &mut out, backend);
+                out.push(g);
+            }
+            BackendGate::Rz(..) | BackendGate::Rot(..) => unreachable!("handled above"),
+        }
+    }
+    for q in acc.keys().copied().collect::<Vec<_>>() {
+        flush(q, &mut acc, &mut out, backend);
+    }
+    bc.gates = out;
 }
 
 /// Wraps `theta` into `(-PI, PI]`, so a rotation that's an identity
@@ -679,6 +796,85 @@ mod tests {
             "expected exactly 2 H-conjugations + 1 Rot(theta) for Rigetti's Rzz, got {} single-qubit gates (1 H costs {})",
             rigetti_single,
             one_h_cost
+        );
+    }
+
+    #[test]
+    fn resynthesize_collapses_a_long_single_qubit_run_to_at_most_three_gates() {
+        // H.T.H on one qubit, no two-qubit gate in between: exactly the
+        // case optimize()'s adjacent-pair-only Rot fusion can't
+        // collapse (each H/T contributes its own Rz.Rot.Rz block with
+        // real Rz's between blocks), but the whole run is still one
+        // single-qubit unitary and must resynthesize to <= 3 gates.
+        let mut c = Circuit::new(1);
+        c.push(Gate::H(0)).push(Gate::T(0)).push(Gate::H(0));
+        let bc = lower(&c, Backend::IbmQ);
+        assert!(
+            bc.gates.len() <= 3,
+            "a single-qubit run should resynthesize to at most 3 gates, got {}: {:?}",
+            bc.gates.len(),
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn resynthesize_matches_original_action_on_a_synthetic_multi_block_run() {
+        // Directly build a BackendCircuit out of several independent
+        // Rz/Rot blocks stacked on one qubit -- the shape
+        // push_ry_via_rx/push_h leave behind for several source gates
+        // in a row -- and confirm resynthesize both shrinks it to <= 3
+        // gates and leaves the actual unitary unchanged, checked
+        // against the real simulator the same way every other
+        // correctness check in this crate is.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 1);
+        bc.push(BackendGate::Rot(0, FRAC_PI_2));
+        bc.push(BackendGate::Rz(0, 0.6));
+        bc.push(BackendGate::Rot(0, -FRAC_PI_2));
+        bc.push(BackendGate::Rz(0, 0.2));
+        bc.push(BackendGate::Rot(0, 1.1));
+        bc.push(BackendGate::Rz(0, -0.4));
+
+        let mut direct = randomized_register(1);
+        let mut resynth_reg = direct.clone();
+        apply_backend_circuit(&bc, &mut direct);
+
+        let mut resynthesized = bc.clone();
+        resynthesize(&mut resynthesized);
+        assert!(
+            resynthesized.gates.len() <= 3,
+            "expected the whole run to collapse to <= 3 gates, got {}: {:?}",
+            resynthesized.gates.len(),
+            resynthesized.gates
+        );
+        apply_backend_circuit(&resynthesized, &mut resynth_reg);
+
+        let fidelity = direct.fidelity(&resynth_reg).unwrap();
+        assert!(
+            (fidelity - 1.0).abs() < TOL,
+            "resynthesize changed the circuit's action: fidelity {} (result: {:?})",
+            fidelity,
+            resynthesized.gates
+        );
+    }
+
+    #[test]
+    fn resynthesize_shrinks_the_sample_circuit_on_rigetti() {
+        // The concrete win this pass is for: Rigetti's single-qubit
+        // count on a denser multi-gate circuit should end up bounded
+        // by roughly 3 gates per two-qubit-gate boundary, not grow
+        // with how many source gates happened to land in between.
+        let c = sample_circuit();
+        let bc = lower(&c, Backend::Rigetti);
+        let (single, two) = bc.gate_counts();
+        assert!(
+            single <= 3 * (two + c.num_qubits),
+            "expected single-qubit count ({}) bounded by ~3 per 2Q-gate boundary \
+             ({} two-qubit gates, {} qubits), got a much larger count -- \
+             resynthesize may not be collapsing runs as expected: {:?}",
+            single,
+            two,
+            c.num_qubits,
+            bc.gates
         );
     }
 
