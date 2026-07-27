@@ -1,18 +1,22 @@
 //! Full pipeline demo: QASM text in, source-level optimization,
-//! multi-backend native-gate lowering, a fidelity budget against
-//! published Quantinuum Helios figures, and an actual run against
+//! multi-backend native-gate lowering, a per-backend fidelity budget
+//! against published hardware figures, and an actual run against
 //! `sirraya_qutub::core::QuantumRegister` on every backend.
 //!
 //! Pipeline shown end to end:
 //! `qasm::parse` -> `optimize_ir` (source-level cancellation/reorder)
 //! -> `backend::lower` (per-backend native gate set) -> execution
 //! (`emit::run` for `TrappedIon`, `emit::run_backend` for all three) ->
-//! `estimate_circuit_fidelity` (TrappedIon only, since that's the
-//! backend the published Quantinuum Helios numbers describe).
+//! `estimate_circuit_fidelity` / `estimate_backend_circuit_fidelity`
+//! (each backend estimated against its *own* published calibration via
+//! `Backend::calibration` -- TrappedIon against Quantinuum Helios,
+//! IbmQ against IBM Heron r2, Rigetti against Rigetti Ankaa-3 -- rather
+//! than reusing one backend's numbers for another's gate counts).
 //!
 //! Run with: `cargo run --example full_pipeline`
 
 use sirraya_qutub_transpiler::backend::{lower, Backend, BackendCircuit};
+use sirraya_qutub_transpiler::fidelity::estimate_backend_circuit_fidelity;
 use sirraya_qutub_transpiler::{
     decompose, emit, estimate_circuit_fidelity, optimize, optimize_ir, qasm, PublishedCalibration,
 };
@@ -82,13 +86,21 @@ fn main() -> Result<(), String> {
 
     // --- Multi-backend lowering ------------------------------------------
     // Same source circuit, lowered to each backend's actual native gate
-    // set and executed for real -- not just gate-counted.
+    // set, fidelity-estimated against that backend's own published
+    // calibration, and executed for real -- not just gate-counted.
     for backend in [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti] {
         let bc: BackendCircuit = lower(&circuit, backend);
         let (b_single, b_two) = bc.gate_counts();
         println!(
             "\n[{:?}] lowered: {} single-qubit, {} two-qubit gates",
             backend, b_single, b_two
+        );
+
+        let backend_cal = backend.calibration();
+        let backend_fidelity = estimate_backend_circuit_fidelity(&bc, &backend_cal);
+        println!(
+            "[{:?}] estimated circuit fidelity on {}: {:.6}",
+            backend, backend_cal.name, backend_fidelity
         );
 
         let backend_reg = emit::run_backend(&bc)?;

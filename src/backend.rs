@@ -199,6 +199,22 @@ fn push_h(bc: &mut BackendCircuit, q: usize) {
     }
 }
 
+impl Backend {
+    /// The [`crate::fidelity::PublishedCalibration`] matching this
+    /// backend's modeled hardware, so a `BackendCircuit`'s fidelity can
+    /// be estimated with the right published numbers for the gate set
+    /// it was actually lowered to -- using `TrappedIon`'s
+    /// `quantinuum_helios_2026()` figures against an `IbmQ` gate count
+    /// would silently mix hardware that was never benchmarked together.
+    pub fn calibration(self) -> crate::fidelity::PublishedCalibration {
+        match self {
+            Backend::TrappedIon => crate::fidelity::PublishedCalibration::quantinuum_helios_2026(),
+            Backend::IbmQ => crate::fidelity::PublishedCalibration::ibm_heron_r2(),
+            Backend::Rigetti => crate::fidelity::PublishedCalibration::rigetti_ankaa3(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +347,20 @@ mod tests {
             rigetti_single,
             ibmq_single
         );
+    }
+    #[test]
+    fn each_backend_calibration_gives_a_fidelity_estimate() {
+        use crate::fidelity::estimate_backend_circuit_fidelity;
+        for backend in [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti] {
+            let bc = lower(&sample_circuit(), backend);
+            let cal = backend.calibration();
+            let fidelity = estimate_backend_circuit_fidelity(&bc, &cal);
+            assert!(
+                fidelity > 0.0 && fidelity <= 1.0,
+                "backend {:?}: fidelity estimate {} out of range",
+                backend,
+                fidelity
+            );
+        }
     }
 }
