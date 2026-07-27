@@ -2,10 +2,44 @@
 name = "sirraya-qutub-transpiler"
 version = "0.1.0"
 edition = "2021"
-description = "QASM 2.0 import + native-gate (Rz/Ry/Rzz) decomposition, optimization, and a self-contained fidelity estimate for circuits run on sirraya-qutub."
+description = "QASM 2.0 import + native-gate (Rz/Ry/Rzz) decomposition, optimization, and self-contained fidelity estimates for quantum circuits."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/sirraya/qutub-transpiler"
+homepage = "https://sirraya.org/qutub"
+documentation = "https://docs.rs/sirraya-qutub-transpiler"
+keywords = ["quantum", "compiler", "transpiler", "qasm", "circuit-optimization"]
+categories = ["science", "compilers", "algorithms"]
+authors = ["Sirraya Labs <amir@sirraya.org>"]
+rust-version = "1.70"
+
+[lib]
+name = "sirraya_qutub_transpiler"
+path = "src/lib.rs"
 
 [dependencies]
 sirraya-qutub = "0.1.13"
 
 [dev-dependencies]
 rand = "0.8"
+
+[features]
+default = []
+# Feature flags for optional functionality
+# Uncomment as needed:
+# qiskit = ["sirraya-qutub/qiskit"]  # Qiskit backend integration
+# pyo3 = ["dep:pyo3"]                # Python bindings
+# serde = ["dep:serde"]              # Serialization support
+
+[package.metadata.docs.rs]
+# Documentation settings for docs.rs
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[package.metadata.cargo-machete]
+# Ignore dev-dependencies that might be flagged as unused
+ignore = ["rand"]
+
+[badges]
+# Optional badge configuration
+# maintanence = { status = "actively-developed" }
