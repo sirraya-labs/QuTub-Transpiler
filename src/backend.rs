@@ -82,12 +82,17 @@ pub enum BackendGate {
     Cz(usize, usize),
     /// `TrappedIon`'s native two-qubit gate.
     Rzz(usize, usize, f64),
+    /// Passed through unchanged from `ir::Gate::Measure` on every
+    /// backend -- not a unitary rewrite target, so no lowering
+    /// identity in this module ever targets it.
+    Measure(usize, usize),
 }
 
 #[derive(Debug, Clone)]
 pub struct BackendCircuit {
     pub backend: Backend,
     pub num_qubits: usize,
+    pub num_clbits: usize,
     pub gates: Vec<BackendGate>,
 }
 
@@ -96,6 +101,7 @@ impl BackendCircuit {
         Self {
             backend,
             num_qubits,
+            num_clbits: 0,
             gates: Vec::new(),
         }
     }
@@ -104,7 +110,10 @@ impl BackendCircuit {
     }
 
     /// (single_qubit_gate_count, two_qubit_gate_count) -- the two
-    /// numbers a per-backend fidelity budget needs.
+    /// numbers a per-backend fidelity budget needs. `Measure` is
+    /// excluded from both, for the same reason `NativeCircuit::gate_counts`
+    /// excludes it: it isn't a unitary gate, so a depolarizing-error
+    /// budget shouldn't price it as one.
     pub fn gate_counts(&self) -> (usize, usize) {
         let mut single = 0;
         let mut two = 0;
@@ -112,6 +121,7 @@ impl BackendCircuit {
             match g {
                 BackendGate::Rz(..) | BackendGate::Rot(..) => single += 1,
                 BackendGate::Cx(..) | BackendGate::Cz(..) | BackendGate::Rzz(..) => two += 1,
+                BackendGate::Measure(..) => {}
             }
         }
         (single, two)
@@ -145,11 +155,13 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
             // Already-tested path: reuse native.rs verbatim.
             let native = crate::native::decompose(circuit);
             let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
+            bc.num_clbits = native.num_clbits;
             for g in &native.gates {
                 bc.push(match *g {
                     crate::native::NativeGate::Rz(q, a) => BackendGate::Rz(q, a),
                     crate::native::NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
                     crate::native::NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
+                    crate::native::NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
                 });
             }
             optimize(&mut bc);
@@ -161,11 +173,13 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
             // Rx/Cx (IbmQ) or Rx/Cz (Rigetti).
             let native = crate::native::decompose(circuit);
             let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
+            bc.num_clbits = native.num_clbits;
             for g in &native.gates {
                 match *g {
                     crate::native::NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
                     crate::native::NativeGate::Ry(q, a) => push_ry_via_rx(&mut bc, q, a),
                     crate::native::NativeGate::Rzz(a, b, t) => push_rzz(&mut bc, backend, a, b, t),
+                    crate::native::NativeGate::Measure(q, c) => bc.push(BackendGate::Measure(q, c)),
                 }
             }
             // The per-gate ZYZ re-expansion above (especially `H` inside
@@ -251,6 +265,9 @@ fn push_h(bc: &mut BackendCircuit, q: usize) {
             crate::native::NativeGate::Rz(qq, a) => bc.push(BackendGate::Rz(qq, a)),
             crate::native::NativeGate::Ry(qq, a) => push_ry_via_rx(bc, qq, a),
             crate::native::NativeGate::Rzz(..) => unreachable!("H never decomposes to Rzz"),
+            crate::native::NativeGate::Measure(..) => {
+                unreachable!("H never decomposes to Measure")
+            }
         }
     }
 }
@@ -343,6 +360,13 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
             BackendGate::Rzz(a, b, _) => {
                 flush(a, &mut acc, &mut out, backend);
                 flush(b, &mut acc, &mut out, backend);
+                out.push(g);
+            }
+            BackendGate::Measure(q, _) => {
+                // A real event on wire q: any pending single-qubit
+                // rotation accumulated for it must be emitted first,
+                // the same as for a two-qubit gate touching q.
+                flush(q, &mut acc, &mut out, backend);
                 out.push(g);
             }
             BackendGate::Rz(..) | BackendGate::Rot(..) => unreachable!("handled above"),
@@ -585,6 +609,17 @@ pub fn optimize(bc: &mut BackendCircuit) {
                     last_2q.insert(key, out.len() - 1);
                 }
             }
+            BackendGate::Measure(q, _) => {
+                // A genuine event on wire q: flush any pending Rz
+                // first (Measure isn't diagonal-compatible the way Cz
+                // is -- it's not a unitary at all), and invalidate any
+                // Rot/two-qubit-pair tracking waiting on q, since a
+                // Measure breaks every one of those sandwiches.
+                flush(q, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
+                last_rot.remove(&q);
+                invalidate_pairs_touching(&mut last_2q, q);
+                out.push(Some(g));
+            }
         }
     }
 
@@ -677,6 +712,11 @@ mod tests {
                 BackendGate::Cx(a, b) => reg.apply_cnot(a, b).unwrap(),
                 BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b).unwrap(),
                 BackendGate::Rzz(a, b, t) => reg.apply_rzz(a, b, t).unwrap(),
+                BackendGate::Measure(..) => panic!(
+                    "apply_backend_circuit: Measure execution is blocked on confirming \
+                     sirraya_qutub::core::QuantumRegister's measurement API (see P0.1's \
+                     definition of done) -- no test in this file exercises Measure yet."
+                ),
             }
         }
     }
@@ -756,6 +796,7 @@ mod tests {
                     BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => Some((a, b)),
                     BackendGate::Rzz(a, b, _) => Some((a, b)),
                     BackendGate::Rz(..) | BackendGate::Rot(..) => None,
+                    BackendGate::Measure(..) => None,
                 };
                 if let Some((a, b)) = pair {
                     assert!(
@@ -769,6 +810,64 @@ mod tests {
             // Routing must not have changed the circuit's action.
             check_backend_matches(&c, backend);
         }
+    }
+
+    #[test]
+    fn measure_survives_lowering_on_every_backend() {
+        for backend in [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti] {
+            let mut c = Circuit::new(2);
+            c.num_clbits = 1;
+            c.push(Gate::H(0)).push(Gate::Measure(0, 0));
+            let bc = lower(&c, backend);
+            assert_eq!(bc.num_clbits, 1, "backend {:?}: num_clbits must survive lowering", backend);
+            assert!(
+                matches!(bc.gates.last(), Some(BackendGate::Measure(0, 0))),
+                "backend {:?}: Measure must survive lowering as the last gate, got {:?}",
+                backend,
+                bc.gates
+            );
+        }
+    }
+
+    #[test]
+    fn measure_is_not_counted_in_backend_gate_counts() {
+        let mut c = Circuit::new(1);
+        c.num_clbits = 1;
+        c.push(Gate::Measure(0, 0));
+        let bc = lower(&c, Backend::IbmQ);
+        assert_eq!(bc.gate_counts(), (0, 0), "Measure must not be priced as a unitary gate");
+    }
+
+    #[test]
+    fn resynthesize_flushes_pending_rotation_before_measure() {
+        // Rz then Rot pending on qubit 0, then a Measure: resynthesize
+        // must flush the accumulated single-qubit unitary onto qubit 0
+        // before the Measure, the same way it already does before a
+        // two-qubit gate touching that wire.
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 1);
+        bc.push(BackendGate::Rz(0, 0.3));
+        bc.push(BackendGate::Rot(0, 0.4));
+        bc.push(BackendGate::Measure(0, 0));
+        resynthesize(&mut bc);
+        assert!(
+            matches!(bc.gates.last(), Some(BackendGate::Measure(0, 0))),
+            "Measure must remain the last gate after resynthesize: {:?}",
+            bc.gates
+        );
+        assert!(
+            bc.gates.len() > 1,
+            "the pending Rz/Rot must have been flushed onto qubit 0 before the Measure: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn optimize_never_drops_or_reorders_measure() {
+        let mut bc = BackendCircuit::new(Backend::IbmQ, 1);
+        bc.push(BackendGate::Rz(0, 0.0)); // would be dropped on its own
+        bc.push(BackendGate::Measure(0, 0));
+        optimize(&mut bc);
+        assert_eq!(bc.gates, vec![BackendGate::Measure(0, 0)]);
     }
 
     #[test]

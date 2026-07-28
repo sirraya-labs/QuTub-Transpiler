@@ -111,6 +111,7 @@ pub fn route(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     let mut logical_to_physical: Vec<usize> = (0..num_qubits).collect();
     let mut physical_to_logical: Vec<usize> = (0..num_qubits).collect();
     let mut out = Circuit::new(num_qubits);
+    out.num_clbits = circuit.num_clbits;
 
     for gate in &circuit.gates {
         let qubits = gate.qubits();
@@ -226,6 +227,15 @@ fn remap_single(gate: &Gate, new_q: usize) -> Gate {
         Rx(_, a) => Rx(new_q, a),
         Ry(_, a) => Ry(new_q, a),
         Rz(_, a) => Rz(new_q, a),
+        // NOTE: this arm is NOT compiler-enforced the way every other
+        // Gate match in this crate is -- `remap_single` has (and needs
+        // to keep) a catch-all below for genuinely-unreachable
+        // two-qubit gates, so adding a new single-qubit-shaped Gate
+        // variant in the future and forgetting to add it here will
+        // panic at runtime, not fail to compile. Measure(_, c) keeps
+        // its classical bit `c` fixed and only moves the qubit -- `c`
+        // is not a physical wire and routing never touches it.
+        Measure(_, c) => Measure(new_q, c),
         _ => unreachable!("remap_single called on a two-qubit gate"),
     }
 }
@@ -289,6 +299,13 @@ mod tests {
             Gate::Ryy(a, b, t) => reg.apply_ryy(a, b, t).unwrap(),
             Gate::Rzz(a, b, t) => reg.apply_rzz(a, b, t).unwrap(),
             Gate::Cp(c, t, l) => reg.apply_controlled_phase(c, t, l).unwrap(),
+            Gate::Measure(..) => panic!(
+                "apply_gate: Measure has no fidelity-based test yet -- it needs the \
+                 shot-based statistical methodology called for in the P0.1 roadmap item \
+                 (QuantumRegister::fidelity doesn't apply to a measured bit), not a variant \
+                 of this direct-simulation comparison. None of this file's existing tests \
+                 push a Measure gate, so this arm exists only to satisfy exhaustiveness."
+            ),
         }
     }
 
@@ -400,6 +417,48 @@ mod tests {
             .push(Gate::Cz(0, 2));
         let coupling = CouplingMap::linear(5);
         assert_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn measure_tracks_current_physical_location_mid_circuit() {
+        // Measure is single-qubit-shaped for routing, so it's remapped
+        // in place at the point it's encountered -- same as any other
+        // single-qubit gate -- rather than waiting for the final
+        // restore-identity pass. This test pins that down directly:
+        // route a distant Cx first (forcing swaps that move qubit 0
+        // off wire 0), then Measure qubit 0 *before* the circuit ends,
+        // and check the Measure landed on whatever physical wire qubit
+        // 0 was actually on at that point, not on wire 0.
+        let mut c = Circuit::new(4);
+        c.push(Gate::Cx(0, 3)).push(Gate::Measure(0, 0));
+        let coupling = CouplingMap::linear(4);
+        let routed = route(&c, &coupling);
+
+        // Replay the routing decisions the same way `route` does
+        // internally, stopping as soon as we see the Measure, to
+        // independently derive what physical wire qubit 0 should be on
+        // at that point in the *routed* circuit.
+        let mut logical_to_physical: Vec<usize> = (0..4).collect();
+        let mut physical_to_logical: Vec<usize> = (0..4).collect();
+        let mut found = None;
+        for g in &routed.gates {
+            match *g {
+                Gate::Swap(a, b) => {
+                    swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b)
+                }
+                Gate::Measure(q, clbit) => {
+                    found = Some((q, clbit));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (measured_wire, clbit) = found.expect("routed circuit must still contain a Measure");
+        assert_eq!(clbit, 0, "the classical bit index must be untouched by routing");
+        assert_eq!(
+            measured_wire, logical_to_physical[0],
+            "Measure must read qubit 0 off its *current* physical wire, not its original one"
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub fn optimize(circuit: &NativeCircuit) -> NativeCircuit {
     }
     NativeCircuit {
         num_qubits: circuit.num_qubits,
+        num_clbits: circuit.num_clbits,
         gates,
     }
 }
@@ -91,6 +92,10 @@ fn drop_zero_pass(gates: &[NativeGate]) -> Vec<NativeGate> {
         .filter(|g| match g {
             NativeGate::Rz(_, a) | NativeGate::Ry(_, a) => a.abs() > EPS,
             NativeGate::Rzz(_, _, a) => a.abs() > EPS,
+            // Never a candidate for dropping: it isn't a rotation with
+            // an "angle" to net to zero, and it's a real classical side
+            // effect the caller depends on.
+            NativeGate::Measure(..) => true,
         })
         .collect()
 }
@@ -125,6 +130,15 @@ mod tests {
         nc.push(NativeGate::Rz(0, 0.4));
         let opt = optimize(&nc);
         assert_eq!(opt.gates.len(), 3, "gates on q0 aren't adjacent, shouldn't merge");
+    }
+
+    #[test]
+    fn never_drops_or_merges_measure() {
+        let mut nc = NativeCircuit::new(1);
+        nc.push(NativeGate::Rz(0, 0.0)); // would be dropped on its own
+        nc.push(NativeGate::Measure(0, 0));
+        let opt = optimize(&nc);
+        assert_eq!(opt.gates, vec![NativeGate::Measure(0, 0)]);
     }
 
     #[test]

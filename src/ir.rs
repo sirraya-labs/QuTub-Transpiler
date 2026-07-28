@@ -25,6 +25,17 @@ pub enum Gate {
     Rzz(usize, usize, f64),
     /// Controlled phase: diag(1,1,1,e^{i*lambda}).
     Cp(usize, usize, f64),
+    /// Measures qubit `q` (whichever physical wire it's currently on --
+    /// see `route.rs`) into classical bit `c`. Not a unitary rewrite
+    /// target: `native.rs`/`backend.rs` pass it through unchanged
+    /// rather than decomposing it, and it must never be treated as
+    /// reorderable relative to *any* other gate by `ir_optimize.rs`'s
+    /// commuting pass -- two `Measure`s that write different qubits
+    /// into the *same* classical bit `c` are only disjoint by qubit,
+    /// not by the classical side effect that actually matters, so
+    /// `ir_optimize::disjoint` special-cases `Measure` to never commute
+    /// past anything.
+    Measure(usize, usize),
 }
 
 impl Gate {
@@ -34,7 +45,7 @@ impl Gate {
         use Gate::*;
         match *self {
             H(q) | X(q) | Y(q) | Z(q) | S(q) | Sdg(q) | T(q) | Tdg(q) | Rx(q, _) | Ry(q, _)
-            | Rz(q, _) => vec![q],
+            | Rz(q, _) | Measure(q, _) => vec![q],
             Cx(a, b) | Cz(a, b) | Swap(a, b) | Rxx(a, b, _) | Ryy(a, b, _) | Rzz(a, b, _)
             | Cp(a, b, _) => vec![a, b],
         }
@@ -44,6 +55,10 @@ impl Gate {
 #[derive(Debug, Clone, Default)]
 pub struct Circuit {
     pub num_qubits: usize,
+    /// Number of classical bits available to `Gate::Measure`. Mirrors
+    /// how `num_qubits` is set from `qreg` in `qasm.rs`: `creg` sets
+    /// this the same way, instead of being parsed-and-discarded.
+    pub num_clbits: usize,
     pub gates: Vec<Gate>,
 }
 
@@ -51,6 +66,7 @@ impl Circuit {
     pub fn new(num_qubits: usize) -> Self {
         Self {
             num_qubits,
+            num_clbits: 0,
             gates: Vec::new(),
         }
     }
@@ -85,6 +101,7 @@ impl Circuit {
                 Ryy(..) => "ryy",
                 Rzz(..) => "rzz",
                 Cp(..) => "cp",
+                Measure(..) => "measure",
             };
             *counts.entry(name).or_insert(0) += 1;
         }

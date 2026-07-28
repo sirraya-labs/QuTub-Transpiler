@@ -82,6 +82,12 @@ fn apply_ir_gate_directly(reg: &mut QuantumRegister, gate: &Gate) {
         Gate::Ryy(a, b, t) => reg.apply_ryy(a, b, t).unwrap(),
         Gate::Rzz(a, b, t) => reg.apply_rzz(a, b, t).unwrap(),
         Gate::Cp(c, t, l) => reg.apply_controlled_phase(c, t, l).unwrap(),
+        Gate::Measure(..) => panic!(
+            "apply_ir_gate_directly: Measure needs the shot-based statistical test \
+             methodology from the P0.1 roadmap item (QuantumRegister::fidelity doesn't apply \
+             to a measured bit), not this direct fidelity-comparison harness. No test in this \
+             file exercises Measure; this arm exists only to satisfy exhaustiveness."
+        ),
     }
 }
 

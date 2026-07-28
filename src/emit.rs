@@ -22,6 +22,21 @@ pub fn apply_to(circuit: &NativeCircuit, reg: &mut QuantumRegister) -> Result<()
             NativeGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
             NativeGate::Ry(q, angle) => reg.apply_ry(q, angle)?,
             NativeGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
+            NativeGate::Measure(..) => {
+                // Genuinely blocked, not a design choice made here: this
+                // crate has not yet confirmed what measurement primitive
+                // (if any) `sirraya_qutub::core::QuantumRegister` exposes
+                // (P0.1's definition of done calls for a dedicated
+                // `run_with_measurement`-style entry point returning
+                // classical outcomes once that's confirmed, rather than
+                // folding it into this statevector-only path).
+                return Err(
+                    "NativeGate::Measure is not yet supported by emit::apply_to -- \
+                     confirm sirraya_qutub's measurement API first (see P0.1 in the \
+                     roadmap chapter)"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(())
@@ -35,14 +50,28 @@ pub fn to_qasm(circuit: &NativeCircuit, circuit_name: &str) -> String {
     out.push_str("OPENQASM 2.0;\n");
     out.push_str("include \"qelib1.inc\";\n");
     out.push_str(&format!("qreg q[{}];\n", circuit.num_qubits));
-    out.push_str(&format!("creg c[{}];\n", circuit.num_qubits));
-    out.push_str(&format!("// Circuit: {} (native gate set: rz, ry, rzz)\n", circuit_name));
+    // NOTE: this used to write `creg c[{circuit.num_qubits}];` -- a
+    // stand-in from before `Gate::Measure`/`num_clbits` existed, back
+    // when nothing in the crate ever read a creg's declared size. Now
+    // that `qasm::parse` validates a `measure` statement's classical
+    // bit index against the declared creg size, emitting a size that
+    // doesn't match `circuit.num_clbits` would make this output fail
+    // to round-trip back through `qasm::parse` for any circuit with a
+    // Measure whose clbit index is >= num_qubits.
+    out.push_str(&format!("creg c[{}];\n", circuit.num_clbits));
+    out.push_str(&format!(
+        "// Circuit: {} (native gate set: rz, ry, rzz, measure)\n",
+        circuit_name
+    ));
     for gate in &circuit.gates {
         match *gate {
             NativeGate::Rz(q, angle) => out.push_str(&format!("rz({}) q[{}];\n", angle, q)),
             NativeGate::Ry(q, angle) => out.push_str(&format!("ry({}) q[{}];\n", angle, q)),
             NativeGate::Rzz(a, b, angle) => {
                 out.push_str(&format!("rzz({}) q[{}], q[{}];\n", angle, a, b))
+            }
+            NativeGate::Measure(q, c) => {
+                out.push_str(&format!("measure q[{}] -> c[{}];\n", q, c))
             }
         }
     }
@@ -84,6 +113,15 @@ pub fn apply_backend_to(circuit: &BackendCircuit, reg: &mut QuantumRegister) -> 
             BackendGate::Cx(a, b) => reg.apply_cnot(a, b)?,
             BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
             BackendGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
+            BackendGate::Measure(..) => {
+                // Same blocker as NativeGate::Measure in apply_to above.
+                return Err(
+                    "BackendGate::Measure is not yet supported by emit::apply_backend_to -- \
+                     confirm sirraya_qutub's measurement API first (see P0.1 in the \
+                     roadmap chapter)"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(())

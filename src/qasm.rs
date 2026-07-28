@@ -15,6 +15,7 @@ use crate::ir::{Circuit, Gate};
 
 pub fn parse(source: &str) -> Result<Circuit, String> {
     let mut num_qubits: Option<usize> = None;
+    let mut num_clbits: Option<usize> = None;
     let mut circuit = Circuit::default();
 
     for (lineno, raw_stmt) in split_statements(source) {
@@ -36,11 +37,35 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
             continue;
         }
         if let Some(rest) = stmt.strip_prefix("creg") {
-            // Classical register: parsed for validity, not otherwise used.
-            let _ = parse_register_size(rest, lineno)?;
+            let n = parse_register_size(rest, lineno)?;
+            num_clbits = Some(n);
+            circuit.num_clbits = n;
             continue;
         }
         if stmt.starts_with("//") {
+            continue;
+        }
+        if let Some(rest) = stmt.strip_prefix("measure") {
+            let n = num_qubits.ok_or_else(|| {
+                format!("line {}: `measure` before `qreg` declaration: `{}`", lineno, stmt)
+            })?;
+            let c_count = num_clbits.ok_or_else(|| {
+                format!("line {}: `measure` before `creg` declaration: `{}`", lineno, stmt)
+            })?;
+            let (q, c) = parse_measure_statement(rest, lineno)?;
+            if q >= n {
+                return Err(format!(
+                    "line {}: qubit index {} out of range for qreg[{}]: `{}`",
+                    lineno, q, n, stmt
+                ));
+            }
+            if c >= c_count {
+                return Err(format!(
+                    "line {}: classical bit index {} out of range for creg[{}]: `{}`",
+                    lineno, c, c_count, stmt
+                ));
+            }
+            circuit.gates.push(Gate::Measure(q, c));
             continue;
         }
 
@@ -249,19 +274,76 @@ fn split_params(rest: &str, lineno: usize) -> Result<(Vec<f64>, &str), String> {
 
 /// Parses a comma-separated list of `q[N]` references.
 fn parse_qubit_list(rest: &str, lineno: usize) -> Result<Vec<usize>, String> {
-    rest.split(',')
-        .map(|tok| {
-            let tok = tok.trim();
-            let open = tok
-                .find('[')
-                .ok_or_else(|| format!("line {}: expected `q[N]`, got `{}`", lineno, tok))?;
-            let close = tok
-                .find(']')
-                .ok_or_else(|| format!("line {}: expected `q[N]`, got `{}`", lineno, tok))?;
-            tok[open + 1..close]
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| format!("line {}: bad qubit index in `{}`", lineno, tok))
-        })
-        .collect()
+    rest.split(',').map(|tok| parse_index_ref(tok, lineno)).collect()
+}
+
+/// Parses a single `name[N]` reference (e.g. `q[0]` or `c[2]`), returning
+/// just `N`. Shared by `parse_qubit_list` (comma-separated `q[N]`'s) and
+/// `parse_measure_statement` (one `q[N]` and one `c[N]` either side of
+/// `->`) so both stay in sync on what counts as a well-formed reference.
+fn parse_index_ref(tok: &str, lineno: usize) -> Result<usize, String> {
+    let tok = tok.trim();
+    let open = tok
+        .find('[')
+        .ok_or_else(|| format!("line {}: expected `name[N]`, got `{}`", lineno, tok))?;
+    let close = tok
+        .find(']')
+        .ok_or_else(|| format!("line {}: expected `name[N]`, got `{}`", lineno, tok))?;
+    tok[open + 1..close]
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("line {}: bad index in `{}`", lineno, tok))
+}
+
+/// Parses the statement text after the `measure` keyword has already
+/// been stripped, e.g. ` q[0] -> c[1]`. Returns `(qubit_index,
+/// clbit_index)`; range-checking against the declared `qreg`/`creg`
+/// sizes happens in the caller, the same way qubit indices are already
+/// range-checked for every other gate statement.
+fn parse_measure_statement(rest: &str, lineno: usize) -> Result<(usize, usize), String> {
+    let arrow = rest.find("->").ok_or_else(|| {
+        format!("line {}: `measure` statement missing `->`: `measure{}`", lineno, rest)
+    })?;
+    let qubit_part = &rest[..arrow];
+    let clbit_part = &rest[arrow + 2..];
+    let q = parse_index_ref(qubit_part, lineno)?;
+    let c = parse_index_ref(clbit_part, lineno)?;
+    Ok((q, c))
+}
+
+#[cfg(test)]
+mod measure_tests {
+    use super::*;
+
+    #[test]
+    fn parses_measure_statement() {
+        let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\nmeasure q[0] -> c[0];\n";
+        let circuit = parse(src).unwrap();
+        assert_eq!(circuit.num_clbits, 2);
+        assert_eq!(circuit.gates, vec![Gate::H(0), Gate::Measure(0, 0)]);
+    }
+
+    #[test]
+    fn rejects_qubit_index_out_of_range_for_measure() {
+        let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q[5] -> c[0];\n";
+        assert!(parse(src).is_err());
+    }
+
+    #[test]
+    fn rejects_clbit_index_out_of_range_for_measure() {
+        let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q[0] -> c[9];\n";
+        assert!(parse(src).is_err());
+    }
+
+    #[test]
+    fn rejects_measure_before_creg_declaration() {
+        let src = "OPENQASM 2.0;\nqreg q[2];\nmeasure q[0] -> c[0];\n";
+        assert!(parse(src).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_measure_missing_arrow() {
+        let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q[0] c[0];\n";
+        assert!(parse(src).is_err());
+    }
 }

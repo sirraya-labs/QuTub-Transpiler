@@ -40,6 +40,7 @@ pub fn optimize(circuit: &Circuit) -> Circuit {
     }
     Circuit {
         num_qubits: circuit.num_qubits,
+        num_clbits: circuit.num_clbits,
         gates,
     }
 }
@@ -49,6 +50,18 @@ fn qubits_of(g: &Gate) -> Vec<usize> {
 }
 
 fn disjoint(a: &Gate, b: &Gate) -> bool {
+    // `Measure(q, c)` is only disjoint-by-qubit-set from a gate on a
+    // different qubit -- but two Measures writing different qubits
+    // into the *same* classical bit `c` would be silently reordered by
+    // that check alone, changing which one "wins" the bit. Treat any
+    // gate touching a Measure as never disjoint, so it's never a
+    // candidate for the commuting-reorder pass to slide past anything,
+    // in either direction. Conservative on purpose: this crate does
+    // not yet track classical-bit dependencies precisely enough to
+    // reorder Measures safely (see `ir::Gate::Measure`'s doc comment).
+    if matches!(a, Gate::Measure(..)) || matches!(b, Gate::Measure(..)) {
+        return false;
+    }
     let qa: HashSet<usize> = qubits_of(a).into_iter().collect();
     let qb: HashSet<usize> = qubits_of(b).into_iter().collect();
     qa.is_disjoint(&qb)
@@ -186,6 +199,12 @@ mod tests {
             Gate::Ryy(a, b, t) => reg.apply_ryy(a, b, t).unwrap(),
             Gate::Rzz(a, b, t) => reg.apply_rzz(a, b, t).unwrap(),
             Gate::Cp(c, t, l) => reg.apply_controlled_phase(c, t, l).unwrap(),
+            Gate::Measure(..) => panic!(
+                "apply_gate: Measure has no fidelity-based test yet -- it needs the \
+                 shot-based statistical methodology called for in the P0.1 roadmap item. \
+                 No test in this file exercises Measure; this arm exists only to satisfy \
+                 exhaustiveness."
+            ),
         }
     }
 
@@ -260,6 +279,30 @@ mod tests {
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates.len(), 3, "the two CNOTs should have cancelled");
         assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn never_reorders_measure_past_a_qubit_disjoint_gate() {
+        // X(1) is on a different qubit than Measure(0, 0), so it would
+        // look "disjoint" by qubit alone -- but Measure must never be
+        // sled past anything, so this must come out unchanged (not
+        // reordered, and obviously not merged with anything).
+        let mut c = Circuit::new(2);
+        c.push(Gate::Measure(0, 0)).push(Gate::X(1));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Measure(0, 0), Gate::X(1)]);
+    }
+
+    #[test]
+    fn never_reorders_two_measures_writing_the_same_clbit() {
+        // Measure(0, 0) then Measure(1, 0): different qubits, same
+        // classical bit. Qubit-disjointness alone would let the
+        // commuting pass treat these as swappable, silently changing
+        // which measurement's outcome ends up in classical bit 0.
+        let mut c = Circuit::new(2);
+        c.push(Gate::Measure(0, 0)).push(Gate::Measure(1, 0));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Measure(0, 0), Gate::Measure(1, 0)]);
     }
 
     #[test]

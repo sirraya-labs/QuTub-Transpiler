@@ -20,11 +20,16 @@ pub enum NativeGate {
     Rz(usize, f64),
     Ry(usize, f64),
     Rzz(usize, usize, f64),
+    /// Passed through unchanged from `ir::Gate::Measure` -- not a
+    /// unitary rewrite target, so it never appears on the left-hand
+    /// side of any decomposition identity in this module.
+    Measure(usize, usize),
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct NativeCircuit {
     pub num_qubits: usize,
+    pub num_clbits: usize,
     pub gates: Vec<NativeGate>,
 }
 
@@ -32,6 +37,7 @@ impl NativeCircuit {
     pub fn new(num_qubits: usize) -> Self {
         Self {
             num_qubits,
+            num_clbits: 0,
             gates: Vec::new(),
         }
     }
@@ -46,6 +52,12 @@ impl NativeCircuit {
 
     /// (single_qubit_gate_count, two_qubit_gate_count) -- exactly the two
     /// numbers `HardwareCalibration`'s fidelity story needs.
+    ///
+    /// `Measure` is deliberately excluded from both counts: it isn't a
+    /// unitary gate, so a per-gate depolarizing-error model has nothing
+    /// to say about it, and counting it as a "single-qubit gate" here
+    /// would silently make `fidelity::estimate_circuit_fidelity` price
+    /// a measurement as if it were a rotation.
     pub fn gate_counts(&self) -> (usize, usize) {
         let mut single = 0;
         let mut two = 0;
@@ -53,6 +65,7 @@ impl NativeCircuit {
             match g {
                 NativeGate::Rz(..) | NativeGate::Ry(..) => single += 1,
                 NativeGate::Rzz(..) => two += 1,
+                NativeGate::Measure(..) => {}
             }
         }
         (single, two)
@@ -240,6 +253,7 @@ pub(crate) fn m_rx(theta: f64) -> Mat2 {
 /// `{Rz, Ry, Rzz}` gate set.
 pub fn decompose(circuit: &Circuit) -> NativeCircuit {
     let mut nc = NativeCircuit::new(circuit.num_qubits);
+    nc.num_clbits = circuit.num_clbits;
     for gate in &circuit.gates {
         decompose_gate(&mut nc, gate);
     }
@@ -248,6 +262,7 @@ pub fn decompose(circuit: &Circuit) -> NativeCircuit {
 
 fn decompose_gate(nc: &mut NativeCircuit, gate: &Gate) {
     match *gate {
+        Gate::Measure(q, c) => nc.push(NativeGate::Measure(q, c)),
         Gate::H(q) => push_single(nc, q, m_h()),
         Gate::X(q) => push_single(nc, q, m_x()),
         Gate::Y(q) => push_single(nc, q, m_y()),
