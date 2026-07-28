@@ -83,17 +83,32 @@ pub(crate) struct C {
 }
 
 impl C {
-    fn new(re: f64, im: f64) -> Self {
+    pub(crate) fn new(re: f64, im: f64) -> Self {
         Self { re, im }
     }
-    fn polar(r: f64, theta: f64) -> Self {
+    pub(crate) fn polar(r: f64, theta: f64) -> Self {
         Self::new(r * theta.cos(), r * theta.sin())
     }
-    fn abs(self) -> f64 {
+    pub(crate) fn abs(self) -> f64 {
         (self.re * self.re + self.im * self.im).sqrt()
     }
-    fn arg(self) -> f64 {
+    pub(crate) fn arg(self) -> f64 {
         self.im.atan2(self.re)
+    }
+    /// Complex conjugate -- needed by `crate::kak`'s magic-basis algebra
+    /// (`dagger4`, and the `S = U_B^T U_B` symmetric/unitary argument in
+    /// its module doc) alongside the existing arithmetic ops.
+    pub(crate) fn conj(self) -> Self {
+        Self::new(self.re, -self.im)
+    }
+    /// Real part -- needed by `crate::kak` to split `S` into its real
+    /// symmetric `Re(S)`/`Im(S)` pieces.
+    pub(crate) fn re(self) -> f64 {
+        self.re
+    }
+    /// Imaginary part -- see `re`.
+    pub(crate) fn im(self) -> f64 {
+        self.im
     }
 }
 impl std::ops::Mul for C {

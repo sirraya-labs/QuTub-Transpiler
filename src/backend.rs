@@ -3,7 +3,9 @@
 //!
 //! # Backends implemented
 //! - [`Backend::TrappedIon`] -- `{Rz, Ry, Rzz}`. Delegates straight to
-//!   [`crate::native::decompose`] (unchanged, already tested).
+//!   [`crate::native::decompose`] (unchanged, already tested), then runs
+//!   [`crate::kak::resynthesize_native_circuit`] to fold any same-pair
+//!   run of 2+ `Rzz`'s down to the KAK-optimal 3-`Rzz` bound.
 //! - [`Backend::IbmQ`] -- `{Rz, Rx, Cx}`, modeling IBM's superconducting
 //!   basis (virtual-Z framing + a native two-qubit `CNOT`).
 //! - [`Backend::Rigetti`] -- `{Rz, Rx, Cz}`, modeling Rigetti's
@@ -142,8 +144,13 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
 
     match backend {
         Backend::TrappedIon => {
-            // Already-tested path: reuse native.rs verbatim.
+            // Already-tested path: reuse native.rs verbatim, then close
+            // the gap native.rs's own module doc flags as future work --
+            // re-synthesize any same-pair run of 2+ Rzz's the per-gate
+            // identities produced into the KAK-optimal 3-Rzz form (see
+            // `kak.rs`'s module doc).
             let native = crate::native::decompose(circuit);
+            let native = crate::kak::resynthesize_native_circuit(&native);
             let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
             for g in &native.gates {
                 bc.push(match *g {
@@ -156,10 +163,15 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
             bc
         }
         Backend::IbmQ | Backend::Rigetti => {
-            // Reuse the same Rz/Ry/Rzz canonical form (native.rs), then
-            // re-express each gate in terms of this backend's native
-            // Rx/Cx (IbmQ) or Rx/Cz (Rigetti).
+            // Reuse the same Rz/Ry/Rzz canonical form (native.rs), fold
+            // any same-pair multi-Rzz run down to KAK's 3-Rzz bound
+            // *before* re-expanding to this backend's native Cx/Cz --
+            // every Rzz saved here is 2 fewer Cx's (IbmQ) or 2 fewer
+            // H.Cz pairs (Rigetti) downstream, not just 1 fewer gate --
+            // then re-express each gate in terms of this backend's
+            // native Rx/Cx (IbmQ) or Rx/Cz (Rigetti).
             let native = crate::native::decompose(circuit);
+            let native = crate::kak::resynthesize_native_circuit(&native);
             let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
             for g in &native.gates {
                 match *g {
