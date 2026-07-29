@@ -1,352 +1,1096 @@
+# Sirraya QuTub Transpiler — Architecture
 
+> **A hardware-aware quantum compiler boundary between circuit semantics and executable reality.**
 
-# Sirraya QuTub Transpiler
+Sirraya QuTub Transpiler is an open-source quantum compilation system developed by **Sirraya Labs**.
 
-## Long-Term Engineering Reference
+Its purpose is to transform quantum programs from a high-level representation into circuits that are valid, optimized, hardware-aware, and independently verifiable for a target execution environment.
 
-**Organization:** Sirraya Labs
-**Project:** Sirraya QuTub Transpiler
-**Document type:** Engineering Architecture & Long-Term Development Reference
-**Intended lifetime:** Multi-year
-**Audience:** Compiler engineers, quantum software engineers, researchers, backend engineers, maintainers, and future technical leads
+The project is intentionally designed as a compiler rather than a collection of gate-conversion utilities. Its architecture separates **quantum program semantics**, **compiler transformations**, **physical constraints**, **backend capabilities**, **calibration information**, and **verification** so that each layer can evolve independently.
 
----
-
-# 1. Purpose
-
-Sirraya QuTub Transpiler should be understood as much more than a QASM parser or gate-conversion library.
-
-Its long-term purpose is to become a **hardware-aware quantum compilation system** that transforms a high-level quantum program into a validated circuit appropriate for a specific execution target.
-
-The fundamental problem is:
-
-> A quantum circuit can be mathematically correct while still being a poor circuit to execute on real hardware.
-
-A compiler therefore needs to reason about both **what a circuit means** and **how that circuit will behave when executed on a particular target system**.
-
-The long-term system should evolve toward:
-
-**Quantum Program → Semantic IR → Analysis → Optimization → Placement → Routing → Synthesis → Backend Lowering → Calibration-Aware Optimization → Scheduling → Verification → Validated Execution Artifact**
+The long-term objective is to provide a rigorous foundation for quantum compilation research and practical execution while remaining understandable, testable, and extensible for an open-source community.
 
 ---
 
-# 2. System Identity
+## Table of Contents
 
-The QuTub Transpiler is a compiler boundary between:
+* [1. Architecture at a Glance](#1-architecture-at-a-glance)
+* [2. Why a Quantum Compiler Needs Multiple Layers](#2-why-a-quantum-compiler-needs-multiple-layers)
+* [3. Design Goals](#3-design-goals)
+* [4. Architectural Principles](#4-architectural-principles)
+* [5. Compilation Pipeline](#5-compilation-pipeline)
+* [6. Frontend and Parsing](#6-frontend-and-parsing)
+* [7. Intermediate Representation](#7-intermediate-representation)
+* [8. Compiler Analyses](#8-compiler-analyses)
+* [9. Compiler Passes](#9-compiler-passes)
+* [10. Source-Level Optimization](#10-source-level-optimization)
+* [11. Gate Synthesis and Native Decomposition](#11-gate-synthesis-and-native-decomposition)
+* [12. Placement and Layout](#12-placement-and-layout)
+* [13. Routing](#13-routing)
+* [14. Backend Architecture](#14-backend-architecture)
+* [15. Hardware and Calibration Model](#15-hardware-and-calibration-model)
+* [16. Cost Models](#16-cost-models)
+* [17. Noise- and Fidelity-Aware Compilation](#17-noise--and-fidelity-aware-compilation)
+* [18. Native-Level Optimization](#18-native-level-optimization)
+* [19. Scheduling](#19-scheduling)
+* [20. Parameterized and Symbolic Circuits](#20-parameterized-and-symbolic-circuits)
+* [21. Pauli Algebra and Hamiltonian Infrastructure](#21-pauli-algebra-and-hamiltonian-infrastructure)
+* [22. Verification and Correctness](#22-verification-and-correctness)
+* [23. Measurement Verification](#23-measurement-verification)
+* [24. Diagnostics and Compilation Reports](#24-diagnostics-and-compilation-reports)
+* [25. Reproducibility](#25-reproducibility)
+* [26. Performance Engineering](#26-performance-engineering)
+* [27. Error Handling](#27-error-handling)
+* [28. Extending QuTub](#28-extending-qutub)
+* [29. Adding a New Gate](#29-adding-a-new-gate)
+* [30. Adding a New Optimization Pass](#30-adding-a-new-optimization-pass)
+* [31. Adding a New Backend](#31-adding-a-new-backend)
+* [32. Testing Strategy](#32-testing-strategy)
+* [33. Benchmarking](#33-benchmarking)
+* [34. Architecture Decision Records](#34-architecture-decision-records)
+* [35. Repository Organization](#35-repository-organization)
+* [36. Current Architecture vs. Target Architecture](#36-current-architecture-vs-target-architecture)
+* [37. Long-Term Direction](#37-long-term-direction)
+* [38. Contributing to the Architecture](#38-contributing-to-the-architecture)
+* [39. Guiding Principle](#39-guiding-principle)
 
-* how a quantum circuit is described,
-* how it is represented internally,
-* how it can be mathematically optimized,
-* how logical qubits map to physical qubits,
-* how gates are decomposed,
-* how hardware constraints influence compilation,
-* how noise and calibration influence decisions,
-* and how the final circuit is verified before execution.
+---
 
-The target architecture is:
+# 1. Architecture at a Glance
+
+The simplest description of QuTub is:
 
 ```text
-Quantum Program
-      |
-      v
-Frontend / Parser
-      |
-      v
-Quantum Compiler IR
-      |
-      v
-Analysis
-      |
-      v
-Source Optimization
-      |
-      v
-Placement / Layout
-      |
-      v
-Routing
-      |
-      v
-Technology-Aware Synthesis
-      |
-      v
-Backend Lowering
-      |
-      v
-Native Optimization
-      |
-      v
-Calibration / Noise-Aware Optimization
-      |
-      v
-Scheduling
-      |
-      v
-Verification
-      |
-      v
-Validated Native Circuit
-      |
-      +----> Compilation Report
-      |
-      v
-Simulation / Execution
+High-level quantum program
+            |
+            v
+      Frontend / Parser
+            |
+            v
+     Semantic Compiler IR
+            |
+            v
+          Analysis
+            |
+            v
+   Source-level Optimization
+            |
+            v
+      Logical Placement
+            |
+            v
+          Routing
+            |
+            v
+   Native Gate Synthesis
+            |
+            v
+      Backend Lowering
+            |
+            v
+    Native-level Optimization
+            |
+            v
+ Calibration / Noise Analysis
+            |
+            v
+        Scheduling
+            |
+            v
+        Verification
+            |
+            v
+    Validated Native Circuit
+            |
+            +------------------+
+            |                  |
+            v                  v
+       Compilation         Execution /
+          Report            Simulation
 ```
 
-The architecture must preserve a strict separation between:
+The key architectural boundary is:
 
-**Semantic representation**
-What the circuit means.
-
-**Compiler representation**
-How the compiler reasons about the circuit.
-
-**Physical representation**
-How a particular target can execute the circuit.
+> **The logical circuit describes what should happen. The target backend describes what can happen. The compiler connects the two.**
 
 ---
 
-# 3. Architectural North Star
+# 2. Why a Quantum Compiler Needs Multiple Layers
 
-The long-term architecture can be understood as five major layers.
+A quantum circuit can be mathematically correct and still be a poor circuit to execute.
 
-### Layer 1 — Understanding
+For example, two logically equivalent circuits may differ significantly in:
 
-The compiler receives a quantum program and converts it into an internal representation.
+* native gate count,
+* two-qubit gate count,
+* circuit depth,
+* physical connectivity requirements,
+* SWAP overhead,
+* execution duration,
+* calibration quality,
+* expected error,
+* and scheduling constraints.
 
-### Layer 2 — Reasoning
+A compiler therefore has to solve several distinct problems.
 
-The compiler analyzes dependencies, interactions, resources, commutation, depth, and other properties.
+### Semantic problem
 
-### Layer 3 — Transformation
+What operation does the circuit represent?
 
-The compiler changes the circuit while preserving semantics.
+### Mathematical problem
 
-### Layer 4 — Physicalization
+Can the circuit be transformed into an equivalent but simpler form?
 
-The compiler adapts the abstract circuit to physical hardware topology, native gates, calibration, noise, and timing.
+### Architectural problem
 
-### Layer 5 — Trust
+Which physical qubits should represent the logical qubits?
 
-The compiler verifies the transformation and produces evidence explaining what happened.
+### Routing problem
 
-This gives the system a fundamental principle:
+How can required interactions be made physically executable?
 
-> **QuTub should eventually understand not only what a quantum circuit is, but what it will cost to execute.**
+### Synthesis problem
+
+How can abstract gates be expressed using the target's native operations?
+
+### Hardware problem
+
+Which physical operations are currently reliable and available?
+
+### Timing problem
+
+When can each operation actually execute?
+
+### Verification problem
+
+How do we know that the compiler preserved the intended computation?
+
+QuTub treats these as related but separable concerns.
 
 ---
 
-# 4. Current System Baseline
+# 3. Design Goals
 
-The current system already establishes the foundation for this architecture.
+QuTub is designed around the following goals.
 
-Its conceptual pipeline is:
+## 3.1 Correctness
+
+Compiler transformations must preserve circuit semantics within explicitly defined numerical or statistical tolerances.
+
+Correctness takes precedence over optimization.
+
+---
+
+## 3.2 Extensibility
+
+New:
+
+* gates,
+* optimization passes,
+* routing algorithms,
+* synthesis strategies,
+* hardware models,
+* backends,
+* cost functions,
+* verification methods,
+
+should be addable without redesigning unrelated parts of the compiler.
+
+---
+
+## 3.3 Hardware awareness
+
+The architecture must be capable of representing physical constraints rather than assuming an ideal all-to-all-connected quantum computer.
+
+---
+
+## 3.4 Explicitness
+
+Important assumptions should be represented explicitly in types, configuration, diagnostics, and documentation.
+
+The compiler should not silently:
+
+* discard unsupported operations,
+* change measurement semantics,
+* introduce approximation,
+* assume connectivity,
+* or substitute a backend.
+
+---
+
+## 3.5 Reproducibility
+
+Compilation results should be reproducible whenever deterministic algorithms are selected.
+
+Randomized algorithms should support explicit seeds.
+
+---
+
+## 3.6 Verifiability
+
+Important compiler transformations should have a corresponding correctness strategy.
+
+---
+
+## 3.7 Research friendliness
+
+The architecture should support experimental compiler algorithms without forcing experimental behavior into the stable compilation path.
+
+---
+
+## 3.8 Long-term maintainability
+
+The project is intended to be developed over many years by contributors who may not have participated in its earliest implementation.
+
+Architecture must therefore communicate intent, not merely implementation.
+
+---
+
+# 4. Architectural Principles
+
+## 4.1 Separate semantics from implementation
+
+The IR should represent what a circuit means without prematurely encoding how one particular backend executes it.
+
+---
+
+## 4.2 Separate logical and physical qubits
+
+A logical qubit represents the program's identity.
+
+A physical qubit represents a location on a target system.
+
+These concepts must not be conflated.
 
 ```text
-QASM 2.0
-   ↓
-IR Circuit
-   ↓
-Source Optimization
-   ↓
-Routing
-   ↓
-Native Decomposition
-   ↓
-Backend Lowering
-   ↓
-Native Optimization
-   ↓
-Native Circuit
-   ↓
-sirraya-qutub
+Logical q0
+    |
+    | placement
+    v
+Physical Q7
 ```
 
-Current capabilities include:
-
-* OpenQASM 2.0 parsing
-* intermediate representation
-* source-level optimization
-* coupling maps
-* routing
-* SWAP insertion
-* native gate decomposition
-* backend-specific lowering
-* native optimization
-* fidelity estimation
-* QASM emission
-* execution through `sirraya-qutub`
-* verification against the real simulator
-
-This is the **foundation**, not the final architecture.
+A later routing decision may change the mapping without changing the logical program.
 
 ---
 
-# 5. Core Engineering Principles
+## 4.3 Prefer exact transformations
 
-## 5.1 Correctness before optimization
+When an exact identity exists, it should generally be preferred over approximation.
 
-The compiler must never sacrifice semantic correctness merely to reduce gate count or execution time.
-
-The preferred priority is:
-
-```text
-Correctness
-    >
-Numerical stability
-    >
-Predictability
-    >
-Performance
-    >
-Aggressive optimization
-```
-
-A transformation that cannot be reliably verified should not be accepted merely because it improves a benchmark.
+Approximate synthesis is valid when explicitly requested or selected by a compilation policy and must expose its error tolerance.
 
 ---
 
-## 5.2 Prefer exact transformations
+## 4.4 Optimize according to explicit objectives
 
-When an exact identity exists, prefer it.
+There is no universal definition of the "best" quantum circuit.
 
-For example:
+Depending on the target, users may care about:
 
-```text
-Rz(a) Rz(b)
-      ↓
-Rz(a + b)
-```
+* gate count,
+* two-qubit gate count,
+* depth,
+* latency,
+* expected fidelity,
+* estimated error,
+* SWAP count,
+* or a weighted combination.
 
-is exact.
-
-If approximation is introduced, it must be explicit.
-
-For example:
-
-```text
-ApproximateSynthesis
-    tolerance = ...
-```
-
-Approximation must never happen silently.
+These objectives belong in explicit cost models.
 
 ---
 
-## 5.3 Hardware awareness must become first-class
+## 4.5 Verification is part of compilation
 
-The compiler should eventually understand that:
+Verification should not be an afterthought.
 
-```text
-3 gates on excellent hardware
-```
-
-can be better than:
-
-```text
-2 gates on poor hardware
-```
-
-Therefore gate count cannot be the only optimization objective.
+The compiler should make it possible to validate transformations systematically.
 
 ---
 
-## 5.4 Optimization objectives must be explicit
+## 4.6 Diagnostics are part of the interface
 
-Possible objectives include:
+A mature compiler should eventually be able to explain:
 
-* gate count
-* two-qubit gate count
-* circuit depth
-* execution duration
-* estimated fidelity
-* expected error
-* SWAP count
-* critical path
-* memory usage
-* balanced cost
-
-The compiler should use explicit cost models rather than hidden assumptions.
-
----
-
-## 5.5 Verification is part of compilation
-
-Verification must not be treated as a separate activity performed only after development.
-
-Each significant transformation should have an appropriate verification strategy.
-
----
-
-## 5.6 Diagnostics are part of the product
-
-A mature compiler must eventually be able to answer:
-
-> Why was this SWAP inserted?
-
-> Why was this decomposition chosen?
+> Why was this gate introduced?
 
 > Why was this route selected?
 
-> Which pass reduced the circuit?
+> Why was this decomposition chosen?
 
-> Which pass increased depth?
+> Which optimization pass changed the circuit?
 
-> Where is the estimated error concentrated?
-
-Explainability becomes increasingly important as the compiler becomes sophisticated.
+Explainability is particularly important when optimization becomes multi-objective.
 
 ---
 
-# 6. Intermediate Representation
+# 5. Compilation Pipeline
 
-The IR is one of the most important long-term investments in QuTub.
+The target compilation architecture is:
 
-The current gate-oriented representation is a good starting point, but a mature compiler should eventually represent:
+```mermaid
+flowchart TD
+    A["Quantum Program"] --> B["Frontend / Parser"]
+    B --> C["Semantic IR"]
+    C --> D["Analysis"]
+    D --> E["Source Optimization"]
+    E --> F["Placement / Layout"]
+    F --> G["Routing"]
+    G --> H["Native Gate Synthesis"]
+    H --> I["Backend Lowering"]
+    I --> J["Native Optimization"]
+    J --> K["Calibration / Noise Analysis"]
+    K --> L["Scheduling"]
+    L --> M["Verification"]
+    M --> N["Validated Native Circuit"]
+    N --> O["Simulation / Execution"]
+    N --> P["Compilation Report"]
+```
 
-* circuits
-* modules
-* logical qubits
-* physical qubits
-* classical bits
-* operations
-* instructions
-* blocks
-* regions
-* parameters
-* symbolic expressions
-* measurements
-* resets
-* barriers
-* metadata
-* gate definitions
+The exact set and order of passes may evolve.
 
-The IR should support both concrete and parameterized operations.
+The architecture should therefore support configurable pass pipelines rather than requiring one immutable sequence.
+
+---
+
+# 6. Frontend and Parsing
+
+The frontend translates an external quantum program representation into QuTub's internal representation.
+
+The current project includes an OpenQASM 2.0 parser.
+
+The frontend is responsible for:
+
+* lexical and syntactic validation,
+* gate recognition,
+* register handling,
+* qubit references,
+* measurement representation,
+* parameter parsing,
+* useful source-location diagnostics.
+
+Unsupported constructs should produce explicit errors.
+
+They should never be silently ignored.
+
+---
+
+## 6.1 Frontend independence
+
+The compiler core should not depend on one source language.
+
+Future frontends may include:
+
+* OpenQASM,
+* programmatic Rust APIs,
+* circuit interchange formats,
+* higher-level quantum representations,
+* research-specific input formats.
+
+All should converge into the compiler's semantic representation.
+
+```text
+OpenQASM ───────┐
+                |
+Rust API ───────┼──> Compiler IR
+                |
+Other frontend ┘
+```
+
+---
+
+# 7. Intermediate Representation
+
+The IR is the central contract between compiler stages.
+
+A useful IR must represent:
+
+* quantum operations,
+* logical qubits,
+* classical bits,
+* measurements,
+* resets,
+* parameters,
+* operation ordering,
+* metadata,
+* source locations,
+* and eventually regions or basic blocks where needed.
+
+The IR should be expressive enough to represent the program without requiring backend-specific decisions.
+
+---
+
+## 7.1 Logical operations
+
+Examples include:
+
+```text
+H(q0)
+X(q1)
+Rx(q2, θ)
+CX(q0, q1)
+Rzz(q1, q2, φ)
+Measure(q0)
+Reset(q1)
+```
+
+---
+
+## 7.2 Native operations
+
+After target lowering, the representation may contain operations such as:
+
+```text
+Rz
+Ry
+Rzz
+```
+
+or another backend-defined native gate set.
+
+The compiler should preserve enough metadata to determine where each operation came from.
+
+---
+
+## 7.3 Parameter representation
+
+Long-term support should distinguish:
+
+```text
+Concrete:
+    Rz(1.570796)
+
+Symbolic:
+    Rz(theta)
+
+Expression:
+    Rz(theta + phi)
+```
+
+This is important for parameterized circuits and variational algorithms.
+
+---
+
+# 8. Compiler Analyses
+
+Analyses compute information that passes can consume without modifying the circuit.
+
+Important analyses include:
+
+### Dependency analysis
+
+Determines which operations depend on previous operations.
+
+### Depth analysis
+
+Computes logical and physical circuit depth.
+
+### Critical-path analysis
+
+Identifies operations that constrain execution time.
+
+### Resource analysis
+
+Counts:
+
+* logical qubits,
+* physical qubits,
+* gates,
+* one-qubit gates,
+* two-qubit gates,
+* measurements,
+* resets,
+* depth.
+
+### Interaction graph
+
+Represents relationships between logical qubits.
+
+```text
+Vertex = logical qubit
+Edge   = interaction
+```
+
+### Commutation analysis
+
+Determines whether operations can be reordered while preserving semantics.
+
+---
+
+# 9. Compiler Passes
+
+QuTub should evolve toward a pass-oriented architecture.
+
+Conceptually:
+
+```text
+Pass Manager
+    |
+    +-- Analysis Passes
+    |
+    +-- Transformation Passes
+    |
+    +-- Placement Passes
+    |
+    +-- Routing Passes
+    |
+    +-- Synthesis Passes
+    |
+    +-- Scheduling Passes
+    |
+    +-- Verification Passes
+    |
+    +-- Reporting Passes
+```
+
+Each transformation pass should document:
+
+* inputs,
+* outputs,
+* assumptions,
+* invariants,
+* analyses required,
+* analyses invalidated,
+* configuration,
+* expected complexity,
+* verification strategy.
+
+---
+
+## 9.1 Pass composition
+
+Passes should be composable.
 
 For example:
 
 ```text
-Rx(theta)
-Rzz(phi)
+Parse
+  ↓
+Canonicalize
+  ↓
+Optimize
+  ↓
+Analyze
+  ↓
+Place
+  ↓
+Route
+  ↓
+Decompose
+  ↓
+Optimize
+  ↓
+Schedule
+  ↓
+Verify
 ```
 
-should be representable even if `theta` and `phi` are not known during compilation.
+A future backend or optimization profile should be able to select a different sequence without modifying individual passes.
 
 ---
 
-# 7. Symbolic and Parameterized Compilation
+# 10. Source-Level Optimization
 
-The compiler should eventually understand expressions such as:
+Source-level optimization operates on semantic gates before hardware constraints dominate the representation.
+
+Examples include:
 
 ```text
-theta
-phi
-theta + phi
-theta - π/2
-2 * theta
+H H       → I
+X X       → I
+Z Z       → I
+Rz(a)Rz(b) → Rz(a+b)
 ```
 
-This enables symbolic optimization.
+Other future transformations may include:
+
+* gate cancellation,
+* rotation merging,
+* commutation,
+* block simplification,
+* Clifford identities,
+* Pauli simplification,
+* redundant operation removal.
+
+---
+
+## 10.1 Why optimize before routing?
+
+Routing can introduce additional operations.
+
+Therefore it is useful to simplify the logical circuit before introducing physical constraints.
+
+However, optimization should also happen after routing and decomposition because those stages can expose new opportunities.
+
+This naturally produces:
+
+```text
+Source Optimization
+        ↓
+Routing
+        ↓
+Synthesis
+        ↓
+Native Optimization
+```
+
+rather than one optimization pass.
+
+---
+
+# 11. Gate Synthesis and Native Decomposition
+
+The compiler must eventually translate abstract operations into operations supported by the target.
+
+For a target supporting:
+
+```text
+{Rz, Ry, Rzz}
+```
+
+a higher-level operation may be represented using those primitives.
+
+Examples include:
+
+```text
+H
+X
+Rx
+CX
+CZ
+SWAP
+Rxx
+Ryy
+```
+
+The exact decomposition belongs to the synthesis layer rather than being hard-coded into unrelated compiler components.
+
+---
+
+## 11.1 Synthesis properties
+
+Every synthesis rule should specify:
+
+* source operation,
+* native target set,
+* exact or approximate status,
+* mathematical identity,
+* parameter conditions,
+* expected native cost,
+* verification method.
+
+---
+
+## 11.2 Technology-specific synthesis
+
+Different technologies expose different native operations.
+
+Therefore:
+
+```text
+Logical Gate
+      |
+      v
+Synthesis Strategy
+      |
+      +----> Backend A
+      |
+      +----> Backend B
+      |
+      +----> Backend C
+```
+
+The compiler should not assume that one decomposition is universally optimal.
+
+---
+
+# 12. Placement and Layout
+
+Placement maps logical qubits to physical qubits.
+
+```mermaid
+flowchart LR
+    A["Logical Interaction Graph"] --> B["Placement Strategy"]
+    B --> C["Physical Hardware Graph"]
+    C --> D["Initial Logical-to-Physical Mapping"]
+    D --> E["Routing"]
+```
+
+Placement can consider:
+
+* connectivity,
+* interaction frequency,
+* expected routing overhead,
+* physical gate fidelity,
+* physical qubit availability,
+* execution duration.
+
+---
+
+## 12.1 Interaction graph
+
+For a circuit containing:
+
+```text
+CX(q0,q1)
+CX(q1,q2)
+CX(q0,q2)
+```
+
+the interaction graph contains:
+
+```text
+q0 ─── q1
+ \     /
+   q2
+```
+
+This graph can be compared with the target hardware topology to find useful initial placements.
+
+---
+
+# 13. Routing
+
+Routing transforms logical interactions into physically executable interactions.
+
+For example, if:
+
+```text
+Logical:
+q0 ─── q2
+```
+
+but the hardware only supports:
+
+```text
+Q0 ─── Q1 ─── Q2
+```
+
+the compiler must move logical state or otherwise transform the circuit so that the interaction becomes executable.
+
+SWAP insertion is one mechanism.
+
+---
+
+## 13.1 Routing strategies
+
+The architecture should permit multiple strategies, including:
+
+* shortest-path routing,
+* A* search,
+* lookahead routing,
+* SABRE-style approaches,
+* noise-aware routing,
+* fidelity-aware routing,
+* research algorithms.
+
+No single routing algorithm should be treated as universally optimal.
+
+---
+
+## 13.2 Routing cost
+
+A routing algorithm may optimize:
+
+```text
+SWAP count
++
+depth
++
+two-qubit error
++
+duration
++
+critical-path impact
+```
+
+The selected objective should be explicit.
+
+---
+
+# 14. Backend Architecture
+
+A backend describes what a target can execute.
+
+A backend may define:
+
+* physical qubit count,
+* native gate set,
+* connectivity,
+* gate durations,
+* gate fidelities,
+* measurement properties,
+* reset behavior,
+* calibration information,
+* scheduling constraints,
+* target-specific lowering rules.
+
+The compiler core should interact with these capabilities through stable abstractions.
+
+---
+
+## 14.1 Backend independence
+
+The architecture should permit:
+
+```text
+                 Compiler Core
+                /      |      \
+               /       |       \
+          Backend A Backend B Backend C
+```
+
+A backend should not require rewriting the compiler's semantic layers.
+
+---
+
+# 15. Hardware and Calibration Model
+
+A target hardware model should eventually represent physical characteristics.
+
+## Qubit properties
+
+Potential properties include:
+
+* T1,
+* T2,
+* frequency,
+* readout error,
+* availability,
+* calibration status.
+
+## Gate properties
+
+Potential properties include:
+
+* native operation,
+* fidelity,
+* error rate,
+* duration,
+* calibration timestamp,
+* physical qubit pair.
+
+## Connectivity
+
+The backend should represent which interactions are supported.
+
+---
+
+## 15.1 Calibration snapshots
+
+Calibration information should be versioned and associated with compilation.
+
+A compilation artifact should ideally be traceable to:
+
+```text
+Compiler version
+Backend version
+Calibration snapshot
+Compilation profile
+Source hash
+Configuration
+Random seed
+```
+
+This is essential for reproducibility.
+
+---
+
+# 16. Cost Models
+
+A compiler needs a formal answer to:
+
+> What does "better" mean?
+
+A simple cost model might be:
+
+```text
+C =
+    wg × gate_count
+  + wd × depth
+  + ws × swap_count
+  + we × estimated_error
+  + wt × duration
+```
+
+where each weight represents the importance of an objective.
+
+The actual implementation may use more sophisticated models.
+
+The key architectural principle is that cost should be **explicit and replaceable**.
+
+---
+
+## 16.1 Possible optimization profiles
+
+QuTub may eventually expose profiles such as:
+
+```text
+GateCount
+Depth
+Fidelity
+Latency
+Balanced
+Research
+Debug
+```
+
+Each profile can select different:
+
+* passes,
+* routing algorithms,
+* synthesis strategies,
+* cost functions,
+* verification levels.
+
+---
+
+# 17. Noise- and Fidelity-Aware Compilation
+
+A circuit with fewer gates is not necessarily a better circuit.
+
+For example:
+
+```text
+Circuit A
+7 gates
+2 high-error two-qubit operations
+
+Circuit B
+9 gates
+1 high-error two-qubit operation
+```
+
+A gate-count optimizer may prefer A.
+
+A fidelity-aware optimizer may prefer B.
+
+QuTub's architecture should allow the objective to be selected according to the target and user requirements.
+
+---
+
+## 17.1 Error budget
+
+A future compilation report may expose:
+
+```text
+Estimated Error Budget
+
+Single-qubit operations      14%
+Two-qubit operations         68%
+Readout                       18%
+```
+
+This should be clearly labeled as an estimate.
+
+The compiler must distinguish:
+
+* measured hardware values,
+* calibration-derived values,
+* theoretical models,
+* assumptions,
+* approximations.
+
+---
+
+# 18. Native-Level Optimization
+
+Optimization should happen again after synthesis.
+
+This is important because decomposition may create new patterns.
+
+For example:
+
+```text
+Logical circuit
+      ↓
+Native decomposition
+      ↓
+Rz(a)
+Rz(b)
+      ↓
+Rz(a+b)
+```
+
+Native-level optimization may include:
+
+* adjacent rotation merging,
+* cancellation,
+* commutation,
+* redundant operation elimination,
+* backend-specific identities,
+* duration-aware transformations.
+
+---
+
+# 19. Scheduling
+
+Scheduling assigns execution times to operations.
+
+Potential scheduling strategies include:
+
+* ASAP,
+* ALAP,
+* critical-path scheduling,
+* duration-aware scheduling,
+* resource-constrained scheduling,
+* hardware-aware scheduling.
+
+Scheduling must respect:
+
+* dependencies,
+* qubit availability,
+* gate durations,
+* hardware constraints,
+* measurement/reset behavior,
+* timing restrictions.
+
+---
+
+## 19.1 Why scheduling belongs after compilation
+
+The final operation set and physical qubit assignment affect execution timing.
+
+Therefore scheduling generally becomes more meaningful after:
+
+```text
+Routing
++
+Synthesis
++
+Backend lowering
+```
+
+although earlier scheduling analyses may still be useful.
+
+---
+
+# 20. Parameterized and Symbolic Circuits
+
+Quantum algorithms frequently use parameterized circuits.
+
+Examples include:
+
+```text
+Rx(theta)
+Rz(phi)
+Rzz(theta + phi)
+```
+
+The compiler should eventually represent symbolic expressions without requiring them to be evaluated immediately.
+
+This enables:
+
+* variational algorithms,
+* parameter sweeps,
+* symbolic simplification,
+* parameter-aware optimization,
+* reusable compiled templates.
+
+---
+
+## 20.1 Symbolic simplification
 
 For example:
 
@@ -361,232 +1105,13 @@ can become:
 Rz(theta + phi)
 ```
 
-without requiring numerical values.
-
-The compiler should distinguish:
-
-* concrete values
-* symbolic parameters
-* symbolic expressions
-* unknown values
-
-This is particularly important for variational quantum algorithms.
+without knowing the numerical values of either parameter.
 
 ---
 
-# 8. Pass Manager
+# 21. Pauli Algebra and Hamiltonian Infrastructure
 
-As the compiler grows, passes should no longer be hard-coded into a single large pipeline.
-
-A future architecture should support a pass manager conceptually similar to:
-
-```text
-Pass Manager
-    |
-    +-- Analysis Pass
-    +-- Optimization Pass
-    +-- Placement Pass
-    +-- Routing Pass
-    +-- Synthesis Pass
-    +-- Scheduling Pass
-    +-- Verification Pass
-    +-- Reporting Pass
-```
-
-Each pass should define:
-
-* its inputs
-* its assumptions
-* its outputs
-* analyses it requires
-* analyses it invalidates
-* configuration
-* statistics
-* correctness guarantees
-
-This will allow the compiler to grow without becoming one enormous transpilation function.
-
----
-
-# 9. Analysis Framework
-
-The compiler should eventually maintain reusable analyses.
-
-Important analyses include:
-
-### Dependency analysis
-
-Determines which operations depend on previous operations.
-
-### Depth analysis
-
-Calculates logical and physical circuit depth.
-
-### Critical-path analysis
-
-Identifies operations that determine execution time.
-
-### Resource analysis
-
-Counts:
-
-* logical qubits
-* physical qubits
-* gates
-* one-qubit gates
-* two-qubit gates
-* measurements
-* resets
-* circuit depth
-
-### Interaction graph
-
-Represents:
-
-```text
-Vertex = logical qubit
-Edge = interaction between logical qubits
-```
-
-This graph becomes extremely useful for placement and routing.
-
-### Commutation analysis
-
-Determines whether operations can be reordered without changing circuit semantics.
-
----
-
-# 10. Dependency DAG
-
-The compiler should eventually maintain an explicit dependency graph.
-
-For example:
-
-```text
-H(q0)
-   |
-   v
-CX(q0,q1)
-   |
-   v
-Rz(q1)
-   |
-   v
-CX(q1,q2)
-```
-
-Operations acting on independent qubits can potentially execute in parallel.
-
-This DAG becomes the foundation for:
-
-* scheduling
-* depth analysis
-* critical-path analysis
-* optimization
-* routing lookahead
-* parallel execution
-
----
-
-# 11. Optimization Architecture
-
-Optimization should operate at multiple levels.
-
-## Level 1 — Source optimization
-
-Operate on semantic gates.
-
-Examples:
-
-```text
-H H → I
-X X → I
-Z Z → I
-Rz(a) Rz(b) → Rz(a+b)
-```
-
-## Level 2 — Structural optimization
-
-Use:
-
-* dependencies
-* commutation
-* DAG transformations
-* block simplification
-
-## Level 3 — Clifford optimization
-
-Recognize Clifford structures and apply exact transformations.
-
-For example:
-
-```text
-H X H = Z
-
-H Z H = X
-```
-
-## Level 4 — Native optimization
-
-Optimize again after backend decomposition.
-
-This is important because a circuit that is elegant at the logical level can become inefficient after being translated into native gates.
-
----
-
-# 12. Commutation Engine
-
-Commutation should become a dedicated compiler service.
-
-The engine should reason about:
-
-```text
-Can A commute through B?
-```
-
-Potential answers may depend on:
-
-* whether the gates act on disjoint qubits
-* known algebraic identities
-* parameter values
-* symbolic conditions
-* backend-specific rules
-
-The compiler must never infer commutation merely from gate names.
-
----
-
-# 13. Identity Registry
-
-A centralized identity system can become a major optimization foundation.
-
-Identities may be categorized into:
-
-* single-qubit identities
-* two-qubit identities
-* rotation identities
-* Clifford identities
-* Pauli identities
-* backend-specific identities
-* approximate identities
-
-Each identity should record:
-
-* pattern
-* replacement
-* conditions
-* exact or approximate status
-* mathematical justification
-* verification method
-* expected cost impact
-
-This creates a systematic bridge between quantum mathematics and compiler optimization.
-
----
-
-# 14. Pauli Algebra
-
-A future version should introduce explicit representations for:
+A long-term compiler can benefit from representations of Pauli operators:
 
 ```text
 I
@@ -595,26 +1120,25 @@ Y
 Z
 ```
 
-and multi-qubit Pauli strings such as:
+and Pauli strings such as:
 
 ```text
 X0 Z1 Y3
 ```
 
-This enables:
+This creates infrastructure for:
 
-* Clifford propagation
-* Pauli rotations
-* Hamiltonians
-* VQE
-* QAOA
-* measurement grouping
-* error analysis
-* symbolic transformations
+* Clifford transformations,
+* Pauli rotations,
+* Hamiltonians,
+* VQE,
+* QAOA,
+* measurement grouping,
+* symbolic operator manipulation.
 
 ---
 
-# 15. Hamiltonian Representation
+## 21.1 Hamiltonian representation
 
 A Hamiltonian can be represented conceptually as:
 
@@ -633,1232 +1157,247 @@ H =
   - 0.2 X0 X1
 ```
 
-The compiler could eventually support:
+A future Hamiltonian layer may support:
 
-* addition
-* scalar multiplication
-* Pauli multiplication
-* simplification
-* coefficient merging
-* grouping
-* measurement grouping
-
-This begins to move QuTub upward from a gate compiler toward a broader quantum programming infrastructure.
+* addition,
+* subtraction,
+* scalar multiplication,
+* Pauli multiplication,
+* coefficient merging,
+* simplification,
+* grouping.
 
 ---
 
-# 16. Hamiltonian Evolution
+## 21.2 Hamiltonian evolution
 
-A future synthesis layer could support:
+A synthesis layer may eventually support:
 
 ```text
 exp(-iHt)
 ```
 
-using techniques such as:
+using methods such as:
 
-* Pauli evolution
-* first-order Trotterization
-* higher-order Suzuki formulas
-* commuting-group evolution
-* approximate synthesis
+* Pauli evolution,
+* Trotterization,
+* Suzuki formulas,
+* commuting-group evolution,
+* approximate synthesis.
 
-Any approximation must expose its tolerance and error characteristics.
+Approximation must always expose its tolerance.
 
 ---
 
-# 17. Placement
+# 22. Verification and Correctness
 
-Placement determines where logical qubits should initially live on physical hardware.
+Correctness is one of the defining engineering properties of QuTub.
 
-Conceptually:
+The compiler should verify transformations at the strongest practical level.
+
+---
+
+## 22.1 Exact equivalence
+
+For sufficiently small circuits, compare exact or numerically evaluated representations where practical.
+
+---
+
+## 22.2 Randomized state verification
+
+A general strategy is:
 
 ```text
-Logical Circuit
-      ↓
-Interaction Graph
-      ↓
-Physical Topology
-      ↓
-Initial Placement
-      ↓
-Routing
-      ↓
-Physical Circuit
+1. Generate a randomized initial state.
+2. Execute the reference circuit.
+3. Execute the transformed circuit.
+4. Compare the resulting states.
 ```
 
-Placement should eventually consider:
-
-* expected SWAP count
-* connectivity
-* two-qubit fidelity
-* gate duration
-* critical-path impact
-
----
-
-# 18. Topology Abstraction
-
-Physical connectivity should be represented as a graph:
-
-```text
-G = (V, E)
-```
-
-where:
-
-* `V` represents physical qubits
-* `E` represents allowed interactions
-
-Possible topologies include:
-
-* linear chains
-* rings
-* grids
-* heavy-hex
-* all-to-all
-* custom research topologies
-* backend-specific topologies
-
-The compiler must never assume full connectivity unless the target explicitly declares it.
-
----
-
-# 19. Routing
-
-Routing is the process of making logical interactions physically executable.
-
-The system should eventually support several routing strategies:
-
-* shortest-path routing
-* A* routing
-* lookahead routing
-* SABRE-style routing
-* noise-aware routing
-* fidelity-aware routing
-
-Routing should be a pluggable strategy rather than one permanently hard-coded algorithm.
-
----
-
-# 20. Multi-Objective Routing
-
-Routing decisions should eventually consider:
-
-```text
-SWAP count
-+
-Gate count
-+
-Depth
-+
-Two-qubit error
-+
-Execution duration
-+
-Critical path
-```
-
-A conceptual cost function is:
-
-```text
-C =
-    wg × gate_count
-  + wd × depth
-  + ws × swap_count
-  + we × estimated_error
-  + wt × duration
-```
-
-The weights should be configurable.
-
----
-
-# 21. Hardware Model
-
-Hardware information should eventually become a first-class object.
-
-A target hardware model should represent:
-
-### Qubit properties
-
-* T1
-* T2
-* frequency
-* readout error
-* availability
-
-### Gate properties
-
-* native operation
-* fidelity
-* duration
-* error rate
-* calibration metadata
-
-### Connectivity
-
-* available physical interactions
-* directionality where applicable
-* topology constraints
-
-This allows compilation decisions to use real target characteristics.
-
----
-
-# 22. Calibration Snapshots
-
-Calibration should be versioned and timestamped.
-
-A compilation result should be traceable to the calibration snapshot used during compilation.
-
-For example:
-
-```text
-Compiler version
-Backend
-Calibration snapshot
-Compilation profile
-Configuration
-Source hash
-Random seed
-```
-
-This is essential for reproducibility.
-
----
-
-# 23. Noise-Aware Compilation
-
-The compiler should eventually optimize for expected execution quality rather than only circuit size.
-
-Consider:
-
-```text
-Circuit A
-7 gates
-2 noisy two-qubit gates
-
-Circuit B
-9 gates
-1 noisy two-qubit gate
-```
-
-A gate-count optimizer may select A.
-
-A noise-aware compiler may select B.
-
-Neither is universally correct.
-
-The compilation profile should determine the objective.
-
----
-
-# 24. Error Budget
-
-Instead of reporting only:
-
-```text
-Estimated fidelity: 96.3%
-```
-
-a mature compiler should explain the estimated error.
-
-For example:
-
-```text
-Estimated Error Budget
-
-Single-qubit operations      12%
-Two-qubit operations         71%
-Readout                       17%
-
-Primary contributors:
-    physical pair A-B
-    physical pair C-D
-    readout on qubit 7
-```
-
-The system must distinguish between:
-
-* measured values
-* calibration-derived values
-* theoretical estimates
-* assumptions
-* approximations
-
-An estimate must never be presented as a measured hardware result.
-
----
-
-# 25. Fidelity Estimation
-
-The current fidelity estimator should evolve into a modular framework.
-
-The architecture should distinguish:
-
-```text
-FidelityModel
-ErrorModel
-CalibrationSnapshot
-CircuitStatistics
-Estimator
-```
-
-This allows future models to be introduced without rewriting the compiler.
-
----
-
-# 26. Scheduling
-
-Scheduling turns the compiled circuit into timed operations.
-
-Possible scheduling modes include:
-
-* ASAP
-* ALAP
-* critical-path aware
-* duration-aware
-* resource-constrained
-* calibration-aware
-
-The scheduler should account for:
-
-* operation duration
-* qubit availability
-* dependencies
-* physical constraints
-* timing restrictions
-
----
-
-# 27. Verification
-
-Verification is one of the most important differentiators of the system.
-
-## Exact equivalence
-
-For small circuits, compare the resulting unitary where practical.
-
-## Randomized state verification
-
-Generate randomized initial states and compare output states.
-
-## Fidelity verification
-
-For state simulation:
+For operations where fidelity is an appropriate metric:
 
 ```text
 abs(fidelity - 1.0) < tolerance
 ```
 
-The tolerance should be centralized.
+should be used with a documented tolerance.
 
-## Property-based testing
+---
 
-Generate random circuits and check semantic preservation.
+## 22.3 Property-based testing
 
-## Differential testing
+Property-based testing can generate families of circuits and verify invariants automatically.
 
-Compare against independent implementations where useful.
-
-## Metamorphic testing
-
-Verify known invariants such as:
+Potential properties include:
 
 ```text
 U × U† = I
 ```
 
----
-
-# 28. Measurement Verification
-
-Measurement cannot be validated in exactly the same way as unitary operations.
-
-Instead, use:
-
-* repeated shots
-* probability distributions
-* statistical tests
-* confidence intervals
-* controlled random seeds when appropriate
-
-The test must define acceptable statistical error.
-
----
-
-# 29. Testing Philosophy
-
-The fundamental QuTub testing principle should remain:
-
-> Every important decomposition, identity, routing transformation, and optimization pass should be validated against a trusted semantic reference whenever practical.
-
-For a decomposition:
+or:
 
 ```text
-1. Generate randomized initial state.
-2. Execute the original operation.
-3. Execute the decomposed operation.
-4. Compare the results.
+compile(compile(C)) ≈ compile(C)
 ```
 
-For measurement:
-
-```text
-1. Execute reference circuit repeatedly.
-2. Execute compiled circuit repeatedly.
-3. Compare resulting distributions.
-```
-
-For routing:
-
-```text
-1. Verify connectivity.
-2. Verify logical-to-physical mapping.
-3. Verify semantic equivalence.
-4. Verify final mapping.
-```
+where such an invariant is valid for the particular compilation stage.
 
 ---
 
-# 30. Regression Corpus
+## 22.4 Differential testing
 
-Every important bug should ideally become a permanent regression test.
+Where appropriate, QuTub can compare against independent implementations.
 
-The corpus should eventually include:
+This is particularly useful for:
 
-* identity circuits
-* single-gate circuits
-* randomized circuits
-* Clifford circuits
-* parameterized circuits
-* Bell states
-* GHZ states
-* QFT
-* Grover
-* Shor components
-* variational circuits
-* Hamiltonian circuits
-* measurement-heavy circuits
-* routing stress tests
-* deep circuits
-* wide circuits
-* connectivity stress tests
-* noise-sensitive circuits
-
-The regression corpus is a long-term engineering asset.
+* gate identities,
+* parser behavior,
+* measurement,
+* synthesis,
+* numerical algorithms.
 
 ---
 
-# 31. Compilation Reports
+# 23. Measurement Verification
 
-A mature compiler should explain what it did.
+Measurement requires different verification techniques because measurement changes the state and produces statistical outcomes.
 
-A report could contain:
+Useful approaches include:
+
+* repeated-shot testing,
+* distribution comparison,
+* statistical hypothesis tests,
+* confidence intervals,
+* controlled random seeds where appropriate.
+
+A measurement transformation should be evaluated statistically rather than forced into a unitary equivalence framework.
+
+---
+
+# 24. Diagnostics and Compilation Reports
+
+A mature compiler should make compilation observable.
+
+A compilation report may contain:
 
 ```text
 Sirraya QuTub Compilation Report
 
 Input
-    Qubits:                 32
-    Gates:                  412
+    Logical qubits:          32
+    Operations:             412
     Logical depth:           87
 
 Placement
     Physical qubits:         32
-    Initial mapping:       complete
+    Mapping:                 complete
 
 Routing
-    SWAPs inserted:          19
-    Physical depth:         121
+    SWAPs inserted:           19
+    Physical depth:          121
 
-Decomposition
-    Native 1Q gates:        614
-    Native 2Q gates:        108
+Synthesis
+    Native 1Q operations:    614
+    Native 2Q operations:    108
 
 Optimization
-    Gates removed:           73
-    Rotations merged:        41
+    Operations removed:       73
+    Rotations merged:         41
 
-Hardware
-    Target:                 <target>
-    Calibration:            <timestamp>
+Target
+    Backend:                 <target>
+    Calibration:             <snapshot>
 
-Estimated execution
-    Fidelity:               <estimate>
-    Duration:               <estimate>
+Execution estimate
+    Duration:                <estimate>
+    Fidelity:                <estimate>
 
 Verification
-    Equivalence:            PASS
-    Statistical checks:     PASS
+    Equivalence:             PASS
 ```
 
-Reports should eventually have both human-readable and machine-readable formats.
+The exact report format may evolve.
 
 ---
 
-# 32. Explainability
+## 24.1 Explainable compilation
 
-A mature compiler should eventually explain individual decisions.
-
-For example:
+A future compiler should be able to answer questions such as:
 
 ```text
-SWAP inserted because logical qubits q4 and q9
-were not adjacent on the selected physical topology.
+Why was this SWAP inserted?
+
+Why was this physical qubit selected?
+
+Why was this synthesis rule selected?
+
+Which optimization removed this operation?
+
+What caused circuit depth to increase?
+
+Which physical interactions dominate estimated error?
 ```
 
-Or:
-
-```text
-Route B selected.
-
-Route A:
-    estimated error = 0.032
-
-Route B:
-    estimated error = 0.018
-```
-
-Or:
-
-```text
-Rz(theta) and Rz(phi) merged because they commute.
-
-Result:
-    Rz(theta + phi)
-```
-
-This will be extremely important once the optimization system becomes sophisticated.
+Explainability should become increasingly important as compiler decisions become more complex.
 
 ---
 
-# 33. Backend Architecture
+# 25. Reproducibility
 
-Backends should implement a stable target abstraction.
-
-A backend should describe:
-
-* supported gates
-* native gates
-* connectivity
-* physical qubit count
-* gate durations
-* gate fidelity
-* measurement behavior
-* reset behavior
-* calibration
-* scheduling constraints
-
-Potential backend families include:
-
-* Sirraya QuTub
-* superconducting systems
-* trapped-ion systems
-* neutral-atom systems
-* custom research hardware
-* simulator-only targets
-
-The compiler core should not assume all quantum technologies behave alike.
-
----
-
-# 34. Native Gate Model
-
-The native gate set should not be permanently hard-coded into the entire compiler.
-
-Instead, a target should expose something conceptually like:
+A compilation result should ideally be reproducible from:
 
 ```text
-NativeGateSet
-```
-
-One target might provide:
-
-```text
-Rz
-Ry
-Rzz
-```
-
-Another might provide an entirely different native set.
-
-The synthesis engine should query the target capabilities.
-
----
-
-# 35. Approximate Synthesis
-
-Approximation is useful but must be controlled.
-
-Every approximate synthesis method should specify:
-
-* target operation
-* approximation algorithm
-* tolerance
-* error bound
-* expected gate count
-* verification method
-
-The compiler must never silently replace exact synthesis with approximate synthesis.
-
----
-
-# 36. Resource Estimation
-
-The system should eventually report:
-
-```text
-Logical qubits
-Physical qubits
-Total gates
-1Q gates
-2Q gates
-Measurements
-Resets
-Logical depth
-Physical depth
-SWAP count
-Estimated duration
-Estimated error
-Estimated fidelity
-```
-
-This data should be available programmatically as well as through reports.
-
----
-
-# 37. Compilation Profiles
-
-The compiler should support explicit optimization profiles.
-
-For example:
-
-```text
-GateCount
-Depth
-Fidelity
-Latency
-Balanced
-Research
-Debug
-```
-
-A profile can define:
-
-* pass pipeline
-* routing strategy
-* cost model
-* synthesis strategy
-* verification level
-* reporting level
-
-This avoids forcing one definition of "best circuit" onto every user.
-
----
-
-# 38. Determinism
-
-Compilation should be deterministic by default.
-
-If an algorithm uses randomness, the seed must be controllable.
-
-A compilation should be reproducible from:
-
-```text
-Source circuit
+Source program
++
 Compiler version
-Configuration
++
 Backend
++
 Calibration snapshot
++
+Compilation profile
++
+Configuration
++
 Random seed
 ```
 
-This becomes critical for debugging, benchmarking, and scientific research.
+This is particularly important for:
+
+* research,
+* benchmarking,
+* debugging,
+* regression testing,
+* scientific publication.
 
 ---
 
-# 39. API Stability
+# 26. Performance Engineering
 
-The project should distinguish:
+Quantum compilation can become computationally expensive.
 
-```text
-Stable API
-Internal API
-Experimental API
-Research API
-```
+Potential bottlenecks include:
 
-Internal implementation details should not accidentally become public contracts.
+* IR allocation,
+* graph construction,
+* dependency analysis,
+* routing search,
+* symbolic manipulation,
+* synthesis,
+* verification,
+* memory usage.
 
-A public API should remain stable even when internal compiler implementations evolve.
-
----
-
-# 40. Architecture Decision Records
-
-Major architectural decisions should be preserved in dedicated ADRs.
-
-Examples:
-
-```text
-ADR-0001 — IR Design
-ADR-0002 — Pass Manager
-ADR-0003 — Routing Interface
-ADR-0004 — Hardware Model
-ADR-0005 — Fidelity Estimation
-ADR-0006 — Parameter System
-ADR-0007 — Verification Strategy
-```
-
-Each decision should document:
-
-* Context
-* Problem
-* Decision
-* Alternatives
-* Reasoning
-* Consequences
-* Status
-
-This is critical when engineering teams change.
-
----
-
-# 41. Research Track
-
-The project should clearly separate:
-
-**Stable engineering**
-
-from:
-
-**Experimental research**
-
-Research areas may include:
-
-* new routing algorithms
-* novel cost functions
-* approximate synthesis
-* calibration-adaptive compilation
-* advanced noise-aware optimization
-* new verification techniques
-* new mathematical compilation techniques
-
-Experimental code should not silently become production behavior.
-
----
-
-# 42. Benchmarking
-
-A permanent benchmark suite should measure:
-
-* compilation time
-* gate reduction
-* depth reduction
-* SWAP reduction
-* estimated fidelity
-* estimated runtime
-* memory consumption
-* verification cost
-
-Benchmarks should cover:
-
-* small circuits
-* large circuits
-* deep circuits
-* wide circuits
-* routing-heavy circuits
-* noise-sensitive circuits
-* parameterized circuits
-
-An optimization should never be declared "better" without specifying the metric.
-
----
-
-# 43. Performance Engineering
-
-As circuits become larger, important performance areas will include:
-
-* IR allocation
-* cloning
-* graph traversal
-* dependency computation
-* routing search
-* symbolic simplification
-* verification
-* memory consumption
-
-Performance work should be driven by profiling.
+Performance improvements should be driven by profiling.
 
 Correctness should not be sacrificed for premature optimization.
 
 ---
 
-# 44. Security and Robustness
+# 27. Error Handling
 
-The parser and compiler should treat input as potentially untrusted.
+Errors should be explicit and typed where appropriate.
 
-Important areas include:
-
-* malformed QASM
-* unsupported operations
-* resource exhaustion
-* recursion limits
-* numerical instability
-* invalid qubit references
-* invalid mappings
-* dependency vulnerabilities
-
-The compiler must never silently skip unsupported operations.
-
----
-
-# 45. Technical Defensibility
-
-The objective should **not** be to make QuTub large simply so that someone cannot copy it.
-
-A 10,000-line codebase can still be copied.
-
-The real moat should be:
-
-```text
-Deep compiler architecture
-        +
-Research algorithms
-        +
-Verification infrastructure
-        +
-Hardware models
-        +
-Calibration knowledge
-        +
-Benchmark corpus
-        +
-Engineering history
-        +
-Specialized optimization
-        +
-Execution integrations
-```
-
-This is much more difficult to reproduce.
-
-The project should therefore grow because the problem itself demands sophisticated infrastructure.
-
----
-
-# 46. What 10,000+ Lines Should Represent
-
-A mature compiler can naturally exceed 10,000 lines through genuine capabilities such as:
-
-```text
-IR
-+
-Pass Manager
-+
-Analysis
-+
-Optimization
-+
-Placement
-+
-Routing
-+
-Synthesis
-+
-Backend abstraction
-+
-Calibration
-+
-Noise models
-+
-Scheduling
-+
-Verification
-+
-Reporting
-+
-Benchmarking
-+
-Symbolic mathematics
-+
-Hamiltonian support
-```
-
-The correct engineering question is:
-
-> What capability does this subsystem provide?
-
-If the answer is nothing meaningful, the code probably should not exist.
-
----
-
-# 47. Long-Term Development Roadmap
-
-## Phase 0 — Foundation
-
-* stabilize current behavior
-* document current architecture
-* strengthen regression testing
-* establish benchmark corpus
-* establish ADRs
-* establish versioning
-
-**Exit condition:**
-A new engineer can understand, build, test, and modify the current compiler without private knowledge.
-
----
-
-## Phase 1 — Compiler Core
-
-Build:
-
-* stronger IR
-* typed operations
-* qubit abstractions
-* parameter representation
-* pass manager
-* analysis interfaces
-* compiler diagnostics
-
-**Exit condition:**
-The compilation pipeline is no longer hard-coded around individual passes.
-
----
-
-## Phase 2 — Analysis and Optimization
-
-Build:
-
-* dependency DAG
-* depth analysis
-* critical path
-* commutation
-* identity registry
-* advanced cancellation
-* Clifford optimization
-* cost model
-
-**Exit condition:**
-Optimization decisions are analysis-driven and measurable.
-
----
-
-## Phase 3 — Placement and Routing
-
-Build:
-
-* topology abstraction
-* interaction graph
-* initial placement
-* routing interface
-* multiple routing strategies
-* routing cost models
-
-**Exit condition:**
-Routing algorithms can be exchanged without redesigning the compiler.
-
----
-
-## Phase 4 — Hardware Awareness
-
-Build:
-
-* hardware model
-* calibration snapshots
-* gate duration
-* gate fidelity
-* readout error
-* physical connectivity
-* target-specific constraints
-
-**Exit condition:**
-Compilation decisions can use actual target characteristics.
-
----
-
-## Phase 5 — Noise-Aware Compilation
-
-Build:
-
-* error models
-* error propagation
-* error budgets
-* noise-aware cost functions
-* fidelity-aware routing
-* noise-aware synthesis
-
-**Exit condition:**
-The compiler can intentionally trade circuit size against expected execution quality.
-
----
-
-## Phase 6 — Scheduling
-
-Build:
-
-* ASAP scheduling
-* ALAP scheduling
-* duration-aware scheduling
-* critical-path optimization
-* resource constraints
-
-**Exit condition:**
-Compiled circuits have meaningful execution timing.
-
----
-
-## Phase 7 — Verification
-
-Build:
-
-* unitary equivalence
-* randomized equivalence
-* property-based testing
-* statistical measurement verification
-* differential testing
-* permanent regression corpus
-
-**Exit condition:**
-Every major transformation has a documented verification strategy.
-
----
-
-## Phase 8 — Symbolic Compilation
-
-Build:
-
-* symbolic parameters
-* expression trees
-* symbolic simplification
-* parameter-aware optimization
-* parameterized verification
-
-**Exit condition:**
-Parameterized circuits can be optimized without requiring concrete parameter values.
-
----
-
-## Phase 9 — Quantum Algorithm Infrastructure
-
-Build:
-
-* Pauli algebra
-* Hamiltonians
-* Pauli rotations
-* Hamiltonian evolution
-* Trotterization
-* measurement grouping
-
-**Exit condition:**
-Higher-level quantum algorithm structures can be represented and compiled.
-
----
-
-## Phase 10 — Advanced Research Compiler
-
-Explore:
-
-* advanced synthesis
-* approximate synthesis
-* advanced routing
-* multi-objective optimization
-* calibration-adaptive compilation
-* automated optimization search
-* advanced verification
-* research-oriented compilation strategies
-
-**Exit condition:**
-QuTub becomes a platform for quantum compilation research rather than only a transpilation library.
-
----
-
-# 48. Team Structure
-
-As the system grows, teams may naturally divide into:
-
-### Compiler Core
-
-Responsible for:
-
-* IR
-* pass manager
-* frontend
-* compiler infrastructure
-
-### Optimization
-
-Responsible for:
-
-* algebra
-* commutation
-* Clifford optimization
-* symbolic optimization
-
-### Architecture
-
-Responsible for:
-
-* placement
-* topology
-* routing
-
-### Hardware
-
-Responsible for:
-
-* hardware models
-* calibration
-* noise
-
-### Synthesis
-
-Responsible for:
-
-* gate decomposition
-* Hamiltonian evolution
-* approximate synthesis
-
-### Verification
-
-Responsible for:
-
-* equivalence
-* testing
-* statistical validation
-
-### Tooling
-
-Responsible for:
-
-* CLI
-* reporting
-* benchmarks
-* documentation
-
-One engineer may own multiple areas early in the project.
-
-The architectural boundaries should still remain.
-
----
-
-# 49. Ownership and Handover
-
-No critical subsystem should depend on only one person's undocumented knowledge.
-
-Each important subsystem should have:
-
-* primary maintainer
-* secondary maintainer
-* documentation owner
-* test owner
-
-When an engineer changes teams or leaves, the handover should cover:
-
-* implementation status
-* open issues
-* known bugs
-* architectural decisions
-* performance limitations
-* research references
-* benchmark results
-* test gaps
-* unfinished work
-* recommended next steps
-
-The goal is institutional memory.
-
----
-
-# 50. Definition of Done
-
-A feature is not complete simply because it compiles.
-
-A mature definition of done is:
-
-```text
-Implementation
-      +
-Tests
-      +
-Documentation
-      +
-Diagnostics
-      +
-Benchmark
-      +
-Verification
-      +
-Known limitations
-```
-
-The depth of each requirement can vary according to feature size.
-
----
-
-# 51. New Gate or Identity Checklist
-
-Before introducing a new identity:
-
-```text
-Mathematical identity documented
-Conditions documented
-Exact/approximate status defined
-Implementation added
-Randomized verification added
-Regression test added
-Performance impact measured
-Documentation updated
-```
-
----
-
-# 52. New Backend Checklist
-
-Before adding a backend:
-
-```text
-Native gate set defined
-Connectivity defined
-Qubit model defined
-Calibration representation defined
-Gate durations defined where available
-Measurement model defined
-Routing constraints defined
-Backend lowering implemented
-Verification suite added
-Example circuits added
-Benchmarks collected
-Documentation added
-```
-
----
-
-# 53. New Optimization Checklist
-
-Before merging an optimization:
-
-```text
-Semantic preconditions identified
-Mathematical basis documented
-Correct compiler layer identified
-Interactions with other passes understood
-Numerical stability considered
-Randomized verification added
-Regression tests added
-Benchmark measured
-Cost-model impact documented
-```
-
----
-
-# 54. Failure Philosophy
-
-Compiler failures must be explicit.
-
-Prefer errors such as:
+Possible error categories include:
 
 ```text
 UnsupportedGate
@@ -1874,196 +1413,574 @@ NumericalError
 ConfigurationError
 ```
 
-Never:
+The compiler should fail loudly rather than produce a plausible but incorrect circuit.
 
-* silently remove a gate
-* silently approximate
-* silently change measurement semantics
-* silently alter backend behavior
-* silently fall back to an unexpected target
-
-A compiler should fail loudly rather than produce a plausible but incorrect circuit.
+Unsupported operations must not be silently skipped.
 
 ---
 
-# 55. Numerical Policy
+# 28. Extending QuTub
 
-Quantum compilation relies heavily on floating-point mathematics.
+A contribution should ideally have a clear architectural home.
 
-The project should centralize policies for:
-
-* angle normalization
-* near-zero comparisons
-* matrix comparison
-* fidelity comparison
-* symbolic-to-numeric conversion
-* approximation tolerance
-
-Avoid scattering arbitrary constants throughout the system.
-
-Instead, establish named numerical policies.
-
----
-
-# 56. CLI Direction
-
-A future command-line interface could conceptually support:
+Before implementing a new capability, determine whether it belongs to:
 
 ```text
-qutub-transpile input.qasm
-```
-
-with options for:
-
-* backend
-* compilation profile
-* optimization level
-* output format
-* report generation
-* verification
-
-Future capabilities could include:
-
-```text
-inspect
-analyze
-benchmark
-verify
-explain
-```
-
-The CLI should remain a consumer of the compiler library.
-
-Compiler logic should not be trapped inside the CLI.
-
----
-
-# 57. Compilation Artifact
-
-A future compiled artifact should preserve:
-
-```text
-Source hash
-Compiler version
+Frontend
+IR
+Analysis
+Optimization
+Placement
+Routing
+Synthesis
 Backend
-Calibration snapshot
-Compilation profile
-Configuration
-Logical circuit
-Physical circuit
-Qubit mapping
-Scheduling
-Statistics
-Verification status
-Error estimate
-```
-
-This provides reproducibility and makes compiled outputs scientifically useful.
-
----
-
-# 58. End-to-End Target Architecture
-
-The mature system should conceptually look like:
-
-```text
-                 QUANTUM PROGRAM
-                        |
-                        v
-                    FRONTEND
-                        |
-                        v
-                CANONICAL IR
-                        |
-                        v
-                    ANALYSIS
-            /           |           \
-           /            |            \
- Dependencies      Commutation    Interaction
-    |                   |             Graph
-    +-------------------+-------------+
-                        |
-                        v
-               SOURCE OPTIMIZATION
-                        |
-                        v
-                    PLACEMENT
-                        |
-                        v
-                     ROUTING
-                        |
-                        v
-              TECHNOLOGY-AWARE
-                   SYNTHESIS
-                        |
-                        v
-                 BACKEND LOWERING
-                        |
-                        v
-              NATIVE OPTIMIZATION
-                        |
-                        v
-            CALIBRATION-AWARE COST
-                    EVALUATION
-                        |
-                        v
-                   SCHEDULING
-                        |
-                        v
-                  VERIFICATION
-                  /          \
-                 /            \
-                v              v
-       VALIDATED CIRCUIT    REPORT
-                |
-                v
-        SIRRAYA QUTUB /
-        TARGET BACKEND
-```
-
----
-
-# 59. Most Important Architectural Insight
-
-The compiler must eventually optimize:
-
-**Mathematically valid circuit**
-
-into:
-
-**Physically appropriate circuit**
-
-Those are different problems.
-
-A mathematically optimal decomposition can be physically poor.
-
-A gate-count-optimal circuit can have worse fidelity.
-
-A minimum-SWAP route can have worse calibration characteristics.
-
-A shorter circuit can have a worse critical path.
-
-A deeper circuit can sometimes be preferable if it avoids particularly poor hardware interactions.
-
-Therefore QuTub should eventually reason simultaneously about:
-
-```text
-Semantics
-Topology
 Calibration
-Noise
-Time
-Resources
+Scheduling
 Verification
+Reporting
 ```
 
-That is the core technical identity of the system.
+If a feature does not fit cleanly into one of these boundaries, that may indicate that the architecture itself needs discussion.
 
 ---
 
-# 60. What QuTub Should Eventually Become
+# 29. Adding a New Gate
 
-The long-term goal is not:
+A new gate should generally require:
+
+```text
+1. Define its semantic representation.
+2. Define validation rules.
+3. Define parser support if applicable.
+4. Define decomposition or native support.
+5. Document mathematical identities.
+6. Add direct tests.
+7. Add randomized equivalence tests where appropriate.
+8. Add regression cases.
+9. Update examples/documentation.
+10. Benchmark if the gate materially affects compilation cost.
+```
+
+A gate should not be considered complete merely because it can be parsed.
+
+---
+
+# 30. Adding a New Optimization Pass
+
+A new optimization should document:
+
+```text
+Purpose
+Preconditions
+Transformation
+Semantic guarantee
+Affected IR
+Required analyses
+Invalidated analyses
+Complexity
+Numerical considerations
+Verification strategy
+Benchmark results
+```
+
+For example:
+
+```text
+Pass:
+    RotationMerge
+
+Input:
+    Rz(a), Rz(b)
+
+Output:
+    Rz(a+b)
+
+Requirement:
+    Same logical qubit
+
+Guarantee:
+    Exact up to numerical representation
+```
+
+---
+
+# 31. Adding a New Backend
+
+A backend should describe at minimum:
+
+```text
+Native gates
+Physical qubits
+Connectivity
+Gate durations
+Gate fidelity/error information
+Measurement behavior
+Reset behavior
+Calibration representation
+Scheduling constraints
+```
+
+A new backend should include:
+
+* backend tests,
+* example circuits,
+* verification tests,
+* documentation,
+* benchmarks where practical.
+
+Backend-specific assumptions should remain localized to the backend abstraction.
+
+---
+
+# 32. Testing Strategy
+
+Testing should occur at multiple levels.
+
+## Unit tests
+
+Validate individual functions and data structures.
+
+## Identity tests
+
+Validate mathematical transformations.
+
+## Integration tests
+
+Validate complete compiler stages.
+
+## End-to-end tests
+
+Validate:
+
+```text
+Input
+→ Parse
+→ Compile
+→ Execute / Simulate
+→ Verify
+```
+
+## Property-based tests
+
+Generate broad circuit families.
+
+## Regression tests
+
+Every important bug should become a permanent test.
+
+---
+
+## 32.1 Reference simulation
+
+Where appropriate, the real `sirraya-qutub` simulator should be used as the semantic reference rather than relying only on mocked behavior.
+
+This is particularly important for decomposition correctness.
+
+---
+
+# 33. Benchmarking
+
+Benchmarking should measure more than compilation time.
+
+Relevant metrics include:
+
+```text
+Compilation time
+Gate count
+1Q gate count
+2Q gate count
+Depth
+SWAP count
+Estimated duration
+Estimated fidelity
+Estimated error
+Memory consumption
+Verification cost
+```
+
+Benchmarks should include diverse workloads:
+
+* small circuits,
+* wide circuits,
+* deep circuits,
+* routing-heavy circuits,
+* parameterized circuits,
+* algorithmic circuits,
+* noise-sensitive circuits.
+
+An optimization should be evaluated against a clearly stated objective.
+
+---
+
+# 34. Architecture Decision Records
+
+Major architectural decisions should be recorded in ADRs.
+
+Suggested structure:
+
+```text
+docs/
+  adr/
+    0001-ir-design.md
+    0002-pass-manager.md
+    0003-routing-interface.md
+    0004-hardware-model.md
+    0005-fidelity-model.md
+```
+
+Each ADR should contain:
+
+```text
+Context
+Problem
+Decision
+Alternatives
+Rationale
+Consequences
+Status
+```
+
+ADRs preserve architectural history and prevent future contributors from having to reconstruct decisions from source code and git history.
+
+---
+
+# 35. Repository Organization
+
+As the project grows, a structure along these lines may be appropriate:
+
+```text
+sirraya-qutub-transpiler/
+│
+├── src/
+│   ├── ir/
+│   ├── frontend/
+│   ├── analysis/
+│   ├── passes/
+│   ├── optimize/
+│   ├── placement/
+│   ├── routing/
+│   ├── synthesis/
+│   ├── backend/
+│   ├── calibration/
+│   ├── scheduling/
+│   ├── verification/
+│   ├── diagnostics/
+│   └── reporting/
+│
+├── tests/
+│   ├── parser/
+│   ├── identities/
+│   ├── optimization/
+│   ├── routing/
+│   ├── synthesis/
+│   ├── backend/
+│   ├── verification/
+│   └── integration/
+│
+├── examples/
+│
+├── benchmarks/
+│
+├── docs/
+│   ├── adr/
+│   ├── design/
+│   └── research/
+│
+├── ARCHITECTURE.md
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+└── README.md
+```
+
+This is a target organizational model rather than a requirement that the current repository immediately adopt every directory.
+
+---
+
+# 36. Current Architecture vs. Target Architecture
+
+QuTub is an evolving open-source project.
+
+It is important to distinguish between **implemented capabilities** and **architectural direction**.
+
+## Current foundation
+
+The project currently provides the foundations for:
+
+* OpenQASM 2.0 parsing,
+* circuit IR,
+* native decomposition,
+* source-level optimization,
+* routing and coupling maps,
+* backend lowering,
+* native optimization,
+* fidelity estimation,
+* QASM emission,
+* execution through `sirraya-qutub`,
+* and direct simulator-based verification.
+
+## Target architecture
+
+The long-term architecture described in this document includes additional capabilities such as:
+
+* a richer compiler IR,
+* modular pass management,
+* reusable analysis infrastructure,
+* advanced placement,
+* multiple routing strategies,
+* hardware-aware cost models,
+* calibration-aware compilation,
+* noise-aware optimization,
+* scheduling,
+* symbolic compilation,
+* Pauli and Hamiltonian infrastructure,
+* richer verification,
+* explainable compilation,
+* and broader backend support.
+
+These are architectural directions and should not be interpreted as claims that every capability is already implemented.
+
+The repository, release notes, examples, and API documentation should remain the authoritative sources for current feature availability.
+
+---
+
+# 37. Long-Term Direction
+
+The long-term evolution of QuTub can be understood as a progression:
+
+```mermaid
+flowchart TD
+    A["Current Foundation"] --> B["Compiler Infrastructure"]
+    B --> C["Analysis + Optimization"]
+    C --> D["Placement + Routing"]
+    D --> E["Hardware Awareness"]
+    E --> F["Calibration + Noise Awareness"]
+    F --> G["Scheduling"]
+    G --> H["Symbolic Compilation"]
+    H --> I["Quantum Algorithm Infrastructure"]
+    I --> J["Advanced Research Compiler"]
+```
+
+The stages are not rigid release commitments.
+
+They represent architectural maturity.
+
+---
+
+## 37.1 Stage 1 — Compiler infrastructure
+
+Strengthen:
+
+* IR,
+* pass manager,
+* analyses,
+* diagnostics,
+* testing,
+* documentation.
+
+---
+
+## 37.2 Stage 2 — Advanced optimization
+
+Develop:
+
+* commutation,
+* identity registries,
+* Clifford optimization,
+* symbolic simplification,
+* multi-objective cost models.
+
+---
+
+## 37.3 Stage 3 — Physical compilation
+
+Develop:
+
+* placement,
+* topology abstractions,
+* routing strategies,
+* hardware models,
+* backend-specific synthesis.
+
+---
+
+## 37.4 Stage 4 — Hardware-aware compilation
+
+Develop:
+
+* calibration snapshots,
+* gate durations,
+* physical fidelity,
+* error models,
+* noise-aware routing,
+* error budgets.
+
+---
+
+## 37.5 Stage 5 — Scheduling
+
+Develop:
+
+* timing-aware compilation,
+* critical-path optimization,
+* resource-aware scheduling,
+* backend timing constraints.
+
+---
+
+## 37.6 Stage 6 — Symbolic and algorithmic infrastructure
+
+Develop:
+
+* symbolic parameters,
+* Pauli algebra,
+* Hamiltonians,
+* Hamiltonian evolution,
+* measurement grouping.
+
+---
+
+## 37.7 Stage 7 — Research platform
+
+Explore:
+
+* new synthesis algorithms,
+* new routing algorithms,
+* approximate compilation,
+* calibration-adaptive compilation,
+* advanced verification,
+* multi-objective optimization,
+* automated compiler search,
+* hardware-specific research.
+
+---
+
+# 38. Contributing to the Architecture
+
+QuTub is an open-source project.
+
+Architecture is therefore a shared engineering artifact rather than something owned exclusively by the original authors.
+
+Contributors are encouraged to propose improvements when they can demonstrate:
+
+* a real problem,
+* a clear architectural boundary,
+* a measurable benefit,
+* a correctness strategy,
+* and a maintainable implementation.
+
+For substantial changes, open a discussion or issue before beginning implementation.
+
+This is particularly important for changes involving:
+
+* IR design,
+* backend interfaces,
+* routing,
+* synthesis,
+* optimization semantics,
+* calibration,
+* scheduling,
+* public APIs.
+
+Small fixes and clearly scoped improvements generally do not require prior design discussion.
+
+---
+
+## 38.1 What makes a strong architectural contribution?
+
+A strong contribution does more than add code.
+
+It explains:
+
+```text
+Problem
+    ↓
+Constraints
+    ↓
+Design
+    ↓
+Alternatives
+    ↓
+Trade-offs
+    ↓
+Implementation
+    ↓
+Verification
+    ↓
+Benchmark
+```
+
+This makes the contribution useful to future engineers even after the original author is no longer maintaining it.
+
+---
+
+## 38.2 Research contributions
+
+Research-oriented work is welcome.
+
+A research contribution should ideally provide:
+
+* a clear description of the algorithm,
+* references where appropriate,
+* assumptions,
+* experimental methodology,
+* reproducible configuration,
+* benchmark circuits,
+* results,
+* limitations.
+
+Research code may remain experimental until sufficient validation exists.
+
+---
+
+# 39. Guiding Principle
+
+The central principle of QuTub can be expressed simply:
+
+> **A quantum circuit is not finished when it is mathematically valid. It is finished when it has been transformed into a circuit that the target execution system can execute efficiently, reliably, and verifiably.**
+
+That requires the compiler to understand several things at once:
+
+```text
+                Quantum Semantics
+                       |
+                       v
+                  Mathematics
+                       |
+                       v
+                 Compiler IR
+                       |
+                       v
+                   Analysis
+                       |
+                       v
+                  Optimization
+                       |
+                       v
+                Physical Topology
+                       |
+                       v
+                    Routing
+                       |
+                       v
+                Native Synthesis
+                       |
+                       v
+                 Hardware Model
+                       |
+                       v
+              Calibration + Noise
+                       |
+                       v
+                   Scheduling
+                       |
+                       v
+                  Verification
+                       |
+                       v
+              Executable Circuit
+```
+
+The long-term vision is therefore not simply:
 
 ```text
 QASM → gates
@@ -2073,237 +1990,32 @@ It is:
 
 ```text
 Quantum Program
-       |
-       v
+      ↓
 Semantic Understanding
-       |
-       v
+      ↓
 Compiler Analysis
-       |
-       v
+      ↓
 Mathematical Optimization
-       |
-       v
+      ↓
 Physical Mapping
-       |
-       v
+      ↓
 Hardware-Aware Routing
-       |
-       v
+      ↓
 Technology-Aware Synthesis
-       |
-       v
+      ↓
 Calibration-Aware Optimization
-       |
-       v
+      ↓
 Execution Scheduling
-       |
-       v
+      ↓
 Independent Verification
-       |
-       v
+      ↓
 Validated Execution Artifact
 ```
 
-In one sentence:
+Sirraya QuTub Transpiler is intended to grow into a **general, hardware-aware, verification-oriented quantum compilation framework** while remaining open to multiple quantum technologies, compiler strategies, research directions, and contributors.
 
-> **Sirraya QuTub Transpiler should become a quantum compiler that understands not only what a circuit means, but what it will cost to execute that circuit on a real target system.**
+The architecture should evolve.
 
----
+The principles should remain clear.
 
-# 61. Long-Term Success Criteria
-
-QuTub should eventually satisfy the following:
-
-```text
-Multiple frontends → one IR
-
-Multiple backends → one compiler architecture
-
-Passes → composable
-
-Routing algorithms → replaceable
-
-Cost models → replaceable
-
-Calibration snapshots → versioned
-
-Hardware-aware compilation → supported
-
-Noise-aware optimization → supported
-
-Parameterized circuits → supported
-
-Symbolic optimization → supported
-
-Verification → systematic
-
-Reports → reproducible
-
-Benchmarks → continuously maintained
-
-New engineers → able to understand architecture
-
-Research experiments → isolated from stable production
-```
-
----
-
-# 62. Engineering Culture
-
-The team should prefer:
-
-```text
-Small interfaces
-Explicit assumptions
-Mathematical documentation
-Reproducible experiments
-Strong tests
-Measured performance
-Clear ownership
-Reviewable changes
-```
-
-over:
-
-```text
-Clever abstractions
-Undocumented tricks
-Large rewrites
-Premature optimization
-Opaque magic
-Unverified benchmark claims
-```
-
-Advanced algorithms are acceptable.
-
-Unnecessary complexity is not.
-
-The system should remain understandable even when its underlying mathematics becomes sophisticated.
-
----
-
-# 63. Guidance for Future Engineers
-
-Before modifying an unfamiliar subsystem, answer:
-
-1. What semantic guarantee does this subsystem provide?
-2. What assumptions does it make?
-3. Which IR level does it operate on?
-4. Which analyses does it consume?
-5. Which analyses does it invalidate?
-6. Which mathematical identities does it rely on?
-7. How is correctness verified?
-8. What hardware assumptions exist?
-9. What cost function is being optimized?
-10. What happens when the subsystem fails?
-11. Is its behavior deterministic?
-12. Can its decisions be explained?
-13. What benchmark demonstrates the change?
-14. Which ADR describes the architecture?
-15. What future feature could this interface accidentally prevent?
-
-If these questions cannot be answered, the subsystem needs better documentation before it needs more features.
-
----
-
-# 64. Recommended Implementation Order
-
-The team should **not attempt to build the entire architecture simultaneously**.
-
-The recommended order is:
-
-```text
-1. Freeze and document current behavior
-2. Strengthen IR
-3. Introduce PassManager
-4. Introduce analysis interfaces
-5. Build dependency DAG
-6. Improve optimization
-7. Introduce topology abstraction
-8. Improve placement
-9. Introduce routing strategies
-10. Introduce HardwareModel
-11. Introduce calibration snapshots
-12. Introduce CostModel
-13. Add noise-aware routing
-14. Add scheduling
-15. Strengthen verification
-16. Add reporting
-17. Add symbolic parameters
-18. Add Pauli algebra
-19. Add Hamiltonians
-20. Add advanced synthesis
-21. Expand backend ecosystem
-22. Build research optimization framework
-```
-
-Each stage should preserve the correctness of the preceding stage.
-
----
-
-# 65. Final Engineering Principle
-
-QuTub should not become large merely for the sake of becoming large.
-
-The goal is not:
-
-> "Make the repository 10,000 lines."
-
-The goal is:
-
-> **Build a system whose depth naturally results from solving the real problems involved in quantum compilation.**
-
-The durable technical moat should therefore be:
-
-```text
-Architecture
-+
-Algorithms
-+
-Verification
-+
-Hardware knowledge
-+
-Calibration data
-+
-Benchmarks
-+
-Documentation
-+
-Accumulated engineering decisions
-```
-
-That is significantly more defensible than simply having a large codebase.
-
-The objective is not to make QuTub difficult for engineers to understand.
-
-The objective is to make QuTub **deep enough that reproducing the complete system requires substantial quantum, mathematical, compiler, hardware, and software-engineering expertise, along with years of accumulated validation and research.**
-
----
-
-# 66. Document Maintenance
-
-This reference should be updated whenever:
-
-* a major architectural boundary changes
-* a new compiler layer is introduced
-* the backend abstraction changes
-* a major optimization strategy is adopted
-* a research direction becomes production-supported
-* an ADR supersedes an existing decision
-* ownership of a critical subsystem changes
-
-Recommended review cadence:
-
-```text
-Minor review:              Quarterly
-Architecture review:       Every 6 months
-Major roadmap review:      Annually
-```
-
-When this document conflicts with an approved ADR, the ADR should be treated as authoritative for that specific architectural question. The main engineering reference should then be updated to reflect the decision.
-
----
-
-
+And every significant transformation should be explainable, testable, and grounded in the semantics of the quantum computation it transforms.
