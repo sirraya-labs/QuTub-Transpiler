@@ -7,15 +7,26 @@
 //! part of this module is the commuting-reorder pass that slides gates
 //! past each other to make non-adjacent cancellable pairs adjacent.
 //!
-//! The only commutation rule used is the universally true one: **two
-//! gates with disjoint qubit sets commute**, unconditionally, because
-//! they act on different tensor factors. No gate-type-specific
-//! commutation table (e.g. "Rz commutes through a CNOT control") is
-//! implemented -- that class of rule is real and used by production
-//! transpilers, but each such rule needs its own derivation and test the
-//! same way the two-qubit identities in `native.rs` did, and getting one
-//! wrong silently produces a wrong circuit rather than a missed
-//! optimization. Disjoint-support commutativity needs no such proof.
+//! The base commutation rule is the universally true one: **two gates
+//! with disjoint qubit sets commute**, unconditionally, because they
+//! act on different tensor factors. On top of that, exactly one
+//! gate-specific rule is implemented: **`Rz(q)` commutes through
+//! `Cx(control, target)` when `q == control`, but not when
+//! `q == target`** -- `Cx` is diagonal in its control's computational
+//! basis (`|0><0| (x) I + |1><1| (x) X`), and `Rz` is diagonal, so the
+//! two act as commuting (simultaneously diagonalizable, on the control
+//! factor) operators; the target wire carries the actual `X`, which
+//! does not commute with a target-side `Rz`. This is the same
+//! distinction `backend.rs`'s native-level peephole pass already
+//! implements and tests (`optimize_floats_rz_through_cx_control_wire`
+//! / `optimize_does_not_float_rz_through_cx_target_wire`), brought up
+//! to this source (pre-decomposition) level. No other gate-type-
+//! specific commutation rule is implemented -- that class of rule is
+//! real and used by production transpilers, but each one needs its own
+//! derivation and test the same way this one and the two-qubit
+//! identities in `native.rs` did, and getting one wrong silently
+//! produces a wrong circuit rather than a missed optimization.
+//! Disjoint-support commutativity needs no such proof.
 //!
 //! The `tests` submodule below checks every pass end to end against the
 //! real simulator (same methodology as `tests/decompositions.rs`): run
@@ -65,6 +76,25 @@ fn disjoint(a: &Gate, b: &Gate) -> bool {
     let qa: HashSet<usize> = qubits_of(a).into_iter().collect();
     let qb: HashSet<usize> = qubits_of(b).into_iter().collect();
     qa.is_disjoint(&qb)
+}
+
+/// `true` if `a` immediately followed by `b` commute, checking `a`
+/// as the `Rz` and `b` as the `Cx` (see [`commutes`]/this module's
+/// doc comment for the rule and its derivation). Order-specific by
+/// design -- callers check both orderings via [`commutes`] -- so this
+/// stays a single unambiguous pattern match rather than a symmetric
+/// one that has to case on which argument is which gate.
+fn rz_commutes_through_cx_control(a: &Gate, b: &Gate) -> bool {
+    matches!((a, b), (Gate::Rz(q, _), Gate::Cx(control, _)) if q == control)
+}
+
+/// `true` if `a` immediately followed by `b` commute: either because
+/// they're [`disjoint`], or because the one gate-specific rule this
+/// module implements applies in either argument order (see this
+/// module's doc comment). This is the check the commuting-reorder
+/// pass below actually uses in place of a bare `disjoint` call.
+fn commutes(a: &Gate, b: &Gate) -> bool {
+    disjoint(a, b) || rz_commutes_through_cx_control(a, b) || rz_commutes_through_cx_control(b, a)
 }
 
 /// `true` if `a` immediately followed by `b` is the identity (same
@@ -118,17 +148,19 @@ fn cancel_pass(gates: &[Gate]) -> Vec<Gate> {
 }
 
 /// For each gate, tries to slide it backward (earlier in the circuit)
-/// past a run of gates it's disjoint from, stopping as soon as it would
-/// land next to a gate it can cancel with, or hits a non-disjoint gate
-/// it can't pass. This is a single forward scan that greedily pulls
-/// cancellable pairs together; running it to a fixed point with
-/// `cancel_pass` (see `optimize`) handles chains of reorders.
+/// past a run of gates it [`commutes`] with (disjoint qubits, or the
+/// one gate-specific rule this module implements -- see the module
+/// doc comment), stopping as soon as it would land next to a gate it
+/// can cancel with, or hits a gate it can't pass. This is a single
+/// forward scan that greedily pulls cancellable pairs together;
+/// running it to a fixed point with `cancel_pass` (see `optimize`)
+/// handles chains of reorders.
 fn commute_forward_pass(gates: &[Gate]) -> Vec<Gate> {
     let mut out: Vec<Gate> = Vec::with_capacity(gates.len());
     for g in gates {
         // Find the furthest-back position we can slide g to: walk
-        // backward from the end of `out` while each gate we pass is
-        // disjoint from g. Stop early if we find a cancel partner.
+        // backward from the end of `out` while each gate we pass
+        // commutes with g. Stop early if we find a cancel partner.
         let mut insert_at = out.len();
         let mut cancel_at: Option<usize> = None;
         while insert_at > 0 {
@@ -137,7 +169,7 @@ fn commute_forward_pass(gates: &[Gate]) -> Vec<Gate> {
                 cancel_at = Some(insert_at - 1);
                 break;
             }
-            if disjoint(candidate, g) {
+            if commutes(candidate, g) {
                 insert_at -= 1;
                 continue;
             }
@@ -303,6 +335,55 @@ mod tests {
         c.push(Gate::Measure(0, 0)).push(Gate::Measure(1, 0));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::Measure(0, 0), Gate::Measure(1, 0)]);
+    }
+
+    #[test]
+    fn commutes_rz_through_cx_control_wire_to_cancel() {
+        // Rz(0, t) . Cx(0, 1) . Rz(0, -t): qubit 0 is Cx's control, so
+        // the gate-specific rule should let the two Rz's commute
+        // together across the Cx and cancel, leaving just the Cx.
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rz(0, 0.4)).push(Gate::Cx(0, 1)).push(Gate::Rz(0, -0.4));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Cx(0, 1)]);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn does_not_commute_rz_through_cx_target_wire() {
+        // Rz(1, t) . Cx(0, 1) . Rz(1, -t): qubit 1 is Cx's TARGET, not
+        // its control -- this must NOT be treated as commuting or
+        // cancelling. This mirrors backend.rs's exact distinction
+        // (optimize_does_not_float_rz_through_cx_target_wire) at the
+        // source level: naively cancelling here would silently drop a
+        // real dependency, since this sandwich is not the identity.
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rz(1, 0.4)).push(Gate::Cx(0, 1)).push(Gate::Rz(1, -0.4));
+        let opt = optimize_ir(&c);
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "target-side Rz must not commute/cancel through Cx, got {:?}",
+            opt.gates
+        );
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn control_side_rz_floats_through_cx_and_a_disjoint_gate_to_cancel() {
+        // Rz(0, t) . Cx(0, 1) . X(2) . Rz(0, -t): the leading Rz(0,t)
+        // has to cross both a Cx (via the new control-wire rule) and a
+        // qubit-disjoint X(2) (via the existing disjoint rule) before
+        // it can reach and cancel with the trailing Rz(0,-t) -- a
+        // chain that exercises the two rules together.
+        let mut c = Circuit::new(3);
+        c.push(Gate::Rz(0, 0.4))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::X(2))
+            .push(Gate::Rz(0, -0.4));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates.len(), 2, "the two Rz's should have cancelled, got {:?}", opt.gates);
+        assert_same_action(&c, &opt);
     }
 
     #[test]
