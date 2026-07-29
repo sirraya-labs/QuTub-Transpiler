@@ -1,255 +1,834 @@
-# Contributing to sirraya-qutub-transpiler
+# Contributing to `sirraya-qutub-transpiler`
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Good First Issues](https://img.shields.io/github/issues/sirraya-labs/QuTub-Transpiler/good%20first%20issue)](https://github.com/sirraya-labs/QuTub-Transpiler/labels/good%20first%20issue)
 [![Discussions](https://img.shields.io/badge/Discussions-join-blue)](https://github.com/sirraya-labs/QuTub-Transpiler/discussions)
 
-First off — thank you for considering a contribution. This project is a
-QASM 2.0 importer and multi-backend native-gate compiler for quantum
-circuits, built and maintained by [Sirraya Labs](https://github.com/sirraya-labs).
-We welcome issues, discussion, docs fixes, and code from anyone, regardless
-of experience level with quantum computing or Rust.
+Thank you for considering a contribution to `sirraya-qutub-transpiler`.
 
-This document gets you from "cloned the repo" to "opened a PR" with as
-little friction as possible. For the deep technical dive into *why* the
-codebase looks the way it does, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+This project is a **QASM 2.0 importer and multi-backend native-gate compiler** for quantum circuits, built and maintained by [Sirraya Labs](https://github.com/sirraya-labs).
+
+Contributions are welcome at every level, including:
+
+* Bug reports
+* Documentation improvements
+* Test coverage
+* Design discussions
+* Optimization work
+* Backend development
+* Quantum-computing research and implementation
+
+You do **not** need to be an expert in quantum computing or Rust to contribute.
+
+For the deep technical explanation of the compiler architecture and the reasoning behind its design decisions, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+---
+
+## Contribution workflow
+
+The intended contribution path is deliberately simple:
+
+```mermaid
+flowchart LR
+    A["Find an issue<br/>or identify a problem"] --> B["Search existing<br/>issues and PRs"]
+    B --> C{"Small change?"}
+
+    C -->|Yes| D["Implement directly"]
+    C -->|No| E["Open an issue<br/>or discussion first"]
+
+    D --> F["Add / update tests"]
+    E --> F
+
+    F --> G["cargo fmt"]
+    G --> H["cargo test"]
+    H --> I["cargo clippy"]
+    I --> J["Open pull request"]
+    J --> K["Review"]
+    K --> L["Merge"]
+```
+
+The goal is to make the path from **"I found something"** to **"I opened a good PR"** as frictionless as possible.
+
+---
 
 ## Table of contents
 
-- [Code of Conduct](#code-of-conduct)
-- [Quick start](#quick-start)
-- [Ways to contribute](#ways-to-contribute)
-- [Before you start](#before-you-start)
-- [Development setup](#development-setup)
-- [Project layout](#project-layout)
-- [The one testing rule that matters most](#the-one-testing-rule-that-matters-most)
-- [Coding conventions](#coding-conventions)
-- [Commit messages](#commit-messages)
-- [Pull request checklist](#pull-request-checklist)
-- [Reporting bugs](#reporting-bugs)
-- [Good first issues](#good-first-issues--where-help-is-wanted)
-- [Getting help](#getting-help)
-- [License](#license)
+* [Code of Conduct](#code-of-conduct)
+* [Quick start](#quick-start)
+* [Ways to contribute](#ways-to-contribute)
+* [Before you start](#before-you-start)
+* [Development setup](#development-setup)
+* [Project layout](#project-layout)
+* [Testing philosophy](#testing-philosophy)
+* [The core testing rule](#the-core-testing-rule)
+* [Coding conventions](#coding-conventions)
+* [Commit messages](#commit-messages)
+* [Pull request checklist](#pull-request-checklist)
+* [Reporting bugs](#reporting-bugs)
+* [Good first issues](#good-first-issues)
+* [Larger projects](#larger-projects)
+* [Getting help](#getting-help)
+* [License](#license)
+
+---
 
 ## Code of Conduct
 
 This project follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
-By participating, you're expected to uphold it. Report unacceptable
-behavior to [amir@sirraya.org](mailto:amir@sirraya.org).
 
-## Quick start
+By participating, you are expected to uphold it.
+
+Report unacceptable behavior to [amir@sirraya.org](mailto:amir@sirraya.org).
+
+---
+
+# Quick start
+
+If you simply want to get the project building and run its test suite:
 
 ```bash
 git clone https://github.com/sirraya-labs/QuTub-Transpiler.git
 cd sirraya-qutub-transpiler
+
 cargo build
 cargo test
 ```
 
-If `cargo test` passes, you're set up correctly. If it doesn't, please
-open an issue with your OS, Rust version (`rustc --version`), and the
-full error — don't struggle through a broken setup silently, that's a bug
-in our onboarding and we want to know about it.
+If `cargo test` passes, your development environment is ready.
 
-**Prerequisites:**
-- Rust, stable channel (`rustup default stable` if you're not sure which
-  toolchain you're on).
-- This crate depends on `sirraya_qutub` (the Qutub simulator, also from
-  Sirraya Labs). `cargo build` will fetch it automatically per the
-  `Cargo.toml` dependency declaration — no separate setup should be
-  needed, but if you hit a resolution error, check that dependency's own
-  README for anything version-specific.
+If it does not, please open an issue with:
 
-## Ways to contribute
+* Your operating system
+* Rust version from `rustc --version`
+* The full error output
+* The commit or version you checked out
 
-You don't need to write Rust to contribute meaningfully:
+A broken setup is useful information. Please do not silently work around an onboarding problem if the project itself is responsible for it.
 
-| Contribution | Where to start |
-|---|---|
-| Report a bug | [Open an issue](#reporting-bugs) |
-| Fix a doc typo / unclear explanation | Just open a PR, no issue needed |
-| Add test coverage | See [testing rule](#the-one-testing-rule-that-matters-most) below — always welcome |
-| Pick up a labeled issue | [`good first issue`](#good-first-issues--where-help-is-wanted) |
-| Propose a feature | Open a **discussion issue** first (see below) |
-| Tackle an open roadmap item | See [`ARCHITECTURE.md` §5](ARCHITECTURE.md#5-current-status) for the current list of known gaps |
+### Prerequisites
 
-## Before you start
+You need:
 
-- **Search existing issues and PRs first** — someone may already be
-  working on it, or it may already be a known, deliberate design decision
-  (this codebase has a lot of "we thought about the obvious simplification
-  and rejected it, here's why" — see `ARCHITECTURE.md` before assuming
-  something's an oversight).
-- **For anything beyond a small fix, open an issue before writing code.**
-  This is especially true for anything touching gate decomposition,
-  routing, or backend lowering — we'd rather agree on the approach with
-  you up front than ask for a rewrite after the fact.
-- Small, focused PRs get reviewed faster than large ones. If your change
-  is naturally large (a new backend, a new coupling-map topology), it's
-  fine — just say so in the issue first so review expectations are set.
+* Rust on the **stable** channel
+* Cargo
+* Git
 
-## Development setup
+If you are unsure which Rust toolchain you are using:
 
 ```bash
-cargo build              # build the crate
-cargo test                # run the full test suite (fast — a few seconds)
-cargo test <module>       # e.g. `cargo test route::` to scope to one module
-cargo fmt                 # format
-cargo fmt --check         # check formatting without changing anything (what CI runs)
-cargo clippy --all-targets -- -D warnings   # lint (what CI runs)
+rustup default stable
 ```
 
-There's no separate integration-test setup step — `tests/decompositions.rs`
-and `tests/measurement.rs` run as part of `cargo test` and exercise the
-real `sirraya_qutub` simulator directly, not mocks.
+### `sirraya_qutub` dependency
 
-## Project layout
+This crate depends on `sirraya_qutub`, the Sirraya Labs quantum simulator.
 
-```
-src/
-  ir.rs            source-level gate set (Circuit, Gate)
-  qasm.rs          OPENQASM 2.0 -> ir::Circuit parser
-  ir_optimize.rs    source-level cancel/reorder pass
-  route.rs         SWAP insertion against a CouplingMap
-  coupling.rs      physical qubit connectivity (linear, heavy-hex, ...)
-  native.rs        decomposition to {Rz, Ry, Rzz} (trapped-ion-style)
-  backend.rs       decomposition to IbmQ / Rigetti / TrappedIon native gates
-  optimize.rs      native-level peephole pass
-  emit.rs          execution against sirraya_qutub + QASM re-emission
-  fidelity.rs      gate-count-based fidelity estimate
-tests/
-  decompositions.rs   every gate identity, checked against the real simulator
-  measurement.rs      shot-based statistical test for Gate::Measure
+The dependency is declared in `Cargo.toml`, so:
+
+```bash
+cargo build
 ```
 
-Full explanation of each module — what it does, the exact identities it
-relies on, and the traps a naive rewrite would fall into — is in
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+should resolve it automatically.
 
-## The one testing rule that matters most
+If dependency resolution fails, check the `sirraya_qutub` project's documentation for version-specific requirements.
 
-**Every gate identity, decomposition, or optimization pass must be
-checked against the real `sirraya_qutub::core::QuantumRegister`, not just
-asserted algebraically.** The pattern (used throughout `tests/` and every
-module's own `#[cfg(test)]` block):
+---
 
-1. Build a randomized initial state.
-2. Run the "ground truth" side directly via `QuantumRegister`'s own
-   `apply_*` methods.
-3. Run your new code's side on a clone of the same initial state.
-4. Compare with `QuantumRegister::fidelity` — expect `(fidelity - 1.0).abs()
-   < 1e-9`.
+# Ways to contribute
 
-A sign error anywhere shows up as fidelity ≪ 1, not a subtle discrepancy —
-so this is a fast, reliable way to know your identity is *exactly* right,
-not just plausible. `Gate::Measure` is the one exception (fidelity doesn't
-apply to a collapsed state) — see `tests/measurement.rs`'s shot-based
-approach instead.
+Not every useful contribution requires writing Rust.
 
-**A PR adding a new identity without a test in this style will get asked
-to add one before merge.** This isn't a formality — it's this project's
-main quality guarantee, and it's what lets a single reviewer trust a
-change quickly instead of re-deriving the math by hand.
+| Contribution                     | Where to start                                    |
+| -------------------------------- | ------------------------------------------------- |
+| Report a bug                     | [Reporting bugs](#reporting-bugs)                 |
+| Fix a documentation problem      | Open a focused PR                                 |
+| Improve test coverage            | Follow the [testing rule](#the-core-testing-rule) |
+| Pick up a beginner-friendly task | [Good first issues](#good-first-issues)           |
+| Propose a feature                | Start with an issue or discussion                 |
+| Work on a roadmap item           | See [`ARCHITECTURE.md`](ARCHITECTURE.md)          |
+| Improve compiler optimization    | Discuss the intended transformation first         |
+| Add a backend or topology        | Open an issue before implementation               |
 
-## Coding conventions
+Documentation and test improvements are especially valuable because they make future compiler work easier to review and maintain.
 
-- Run `cargo fmt` and `cargo clippy` clean before opening a PR (CI checks
-  both).
-- No `unsafe` unless there's genuinely no alternative — and if so, explain
-  why in a comment right above it.
-- This codebase leans heavily on doc comments that explain *why*, not
-  just *what* — including rejected simpler alternatives. Please follow
-  that style for anything non-obvious: a future contributor (possibly
-  you, in six months) will thank you for not having to reverse-engineer
-  the reasoning from git blame.
-- Prefer exact identities over approximations. If something genuinely
-  can't be exact (e.g. a fidelity estimate), say so explicitly in the doc
-  comment, the way `fidelity.rs` does.
+---
 
-## Commit messages
+# Before you start
 
-Short, imperative, module-prefixed where it helps:
+## Search first
 
+Before opening an issue or starting implementation, search existing:
+
+* Issues
+* Pull requests
+* Discussions
+
+A problem may already be known, actively worked on, or intentionally designed that way.
+
+This codebase contains a number of cases where an apparently simpler implementation was considered and deliberately rejected.
+
+Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before assuming that an unusual implementation is accidental.
+
+---
+
+## Discuss substantial changes first
+
+For anything beyond a small fix, open an issue before writing significant amounts of code.
+
+This is particularly important for changes involving:
+
+* Gate decomposition
+* Gate identities
+* Routing
+* Coupling maps
+* Backend lowering
+* Optimization rules
+* Measurement semantics
+* New hardware backends
+
+The goal is to agree on the mathematical and architectural approach **before** implementation makes a particular direction expensive to change.
+
+---
+
+## Keep pull requests focused
+
+Small, focused PRs are easier to review and merge.
+
+A large change is completely acceptable when the problem itself is large, such as:
+
+* A new backend
+* A new coupling-map topology
+* A major compiler pass
+* A substantial architectural change
+
+For these changes, open an issue first so the implementation and review scope can be agreed upon.
+
+---
+
+# Development setup
+
+## Common commands
+
+```bash
+# Build
+cargo build
+
+# Run the complete test suite
+cargo test
+
+# Run tests for a specific module
+cargo test route::
+
+# Format the project
+cargo fmt
+
+# Verify formatting without changing files
+cargo fmt --check
+
+# Run Clippy with warnings treated as errors
+cargo clippy --all-targets -- -D warnings
 ```
+
+### CI-equivalent checks
+
+Before opening a PR, these should pass:
+
+```bash
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+There is no separate integration-test setup step.
+
+The integration tests under:
+
+```text
+tests/decompositions.rs
+tests/measurement.rs
+```
+
+are included in the normal `cargo test` run.
+
+They exercise the real `sirraya_qutub` simulator rather than mocked quantum operations.
+
+---
+
+# Project layout
+
+The source tree is organized according to the compiler pipeline:
+
+```mermaid
+flowchart TD
+    QASM["qasm.rs<br/>OPENQASM 2.0 parser"]
+    IR["ir.rs<br/>Source-level IR"]
+    IROPT["ir_optimize.rs<br/>Source optimization"]
+    COUPLING["coupling.rs<br/>Physical topology"]
+    ROUTE["route.rs<br/>Hardware-aware routing"]
+    NATIVE["native.rs<br/>Native decomposition"]
+    BACKEND["backend.rs<br/>Backend lowering"]
+    OPT["optimize.rs<br/>Native optimization"]
+    EMIT["emit.rs<br/>Execution / QASM output"]
+    FID["fidelity.rs<br/>Fidelity estimation"]
+
+    QASM --> IR
+    IR --> IROPT
+    IROPT --> ROUTE
+    COUPLING --> ROUTE
+    ROUTE --> NATIVE
+    ROUTE --> BACKEND
+    NATIVE --> OPT
+    BACKEND --> OPT
+    OPT --> EMIT
+    OPT --> FID
+```
+
+## Source modules
+
+| File                 | Responsibility                                        |
+| -------------------- | ----------------------------------------------------- |
+| `src/ir.rs`          | Source-level gate set and `Circuit` representation    |
+| `src/qasm.rs`        | OPENQASM 2.0 → `ir::Circuit` parser                   |
+| `src/ir_optimize.rs` | Source-level cancellation and conservative reordering |
+| `src/route.rs`       | SWAP insertion against a `CouplingMap`                |
+| `src/coupling.rs`    | Physical qubit connectivity models                    |
+| `src/native.rs`      | Decomposition to `{Rz, Ry, Rzz}`                      |
+| `src/backend.rs`     | Backend-specific native-gate lowering                 |
+| `src/optimize.rs`    | Native-level peephole optimization                    |
+| `src/emit.rs`        | Execution against `sirraya_qutub` and QASM emission   |
+| `src/fidelity.rs`    | Gate-count-based fidelity estimation                  |
+
+## Tests
+
+| File                      | Responsibility                                      |
+| ------------------------- | --------------------------------------------------- |
+| `tests/decompositions.rs` | Gate identities verified against the real simulator |
+| `tests/measurement.rs`    | Statistical verification of `Gate::Measure`         |
+
+For the full explanation of each module, including the mathematical identities and design constraints behind them, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+---
+
+# Testing philosophy
+
+Testing is not an afterthought in this project.
+
+The transpiler performs mathematical transformations on quantum circuits. A transformation can compile successfully, produce valid-looking gates, and still implement the wrong unitary.
+
+The testing strategy therefore focuses on **semantic equivalence**, not simply successful compilation.
+
+```mermaid
+flowchart TD
+    A["Original circuit / identity"] --> B["Ground-truth implementation"]
+    A --> C["Transpiler implementation"]
+
+    B --> D["QuantumRegister"]
+    C --> E["QuantumRegister"]
+
+    D --> F["Final quantum state"]
+    E --> G["Final quantum state"]
+
+    F --> H["Fidelity comparison"]
+    G --> H
+
+    H --> I{"|fidelity - 1| < 1e-9?"}
+
+    I -->|Yes| J["Transformation verified"]
+    I -->|No| K["Investigate identity / implementation"]
+```
+
+This approach makes the tests validate what actually matters:
+
+> **Does the transpiled circuit implement the same quantum operation?**
+
+---
+
+# The core testing rule
+
+> ## Every non-trivial quantum transformation must be verified against the real simulator.
+>
+> Every gate identity, decomposition, or optimization pass must be checked against the real `sirraya_qutub::core::QuantumRegister`.
+>
+> An algebraic assertion by itself is not enough.
+
+The standard pattern is:
+
+### 1. Build a randomized initial state
+
+The test begins from a non-trivial state rather than relying only on basis states such as `|0⟩`.
+
+This makes phase and amplitude errors much easier to detect.
+
+### 2. Execute the ground truth
+
+Run the reference operation directly through `QuantumRegister`'s native `apply_*` methods.
+
+### 3. Execute the transpiler implementation
+
+Run the implementation being tested on a clone of the same initial state.
+
+### 4. Compare the resulting states
+
+Use:
+
+```rust
+QuantumRegister::fidelity
+```
+
+and require:
+
+```rust
+(fidelity - 1.0).abs() < 1e-9
+```
+
+The expected result is therefore essentially:
+
+```text
+fidelity = 1
+```
+
+within numerical precision.
+
+---
+
+## Why fidelity testing matters
+
+A mathematically plausible implementation can still contain:
+
+* A sign error
+* A reversed control and target
+* An incorrect phase
+* A wrong rotation convention
+* An incorrect tensor-product ordering
+* A faulty qubit remapping
+* An optimization that changes semantics
+
+These errors may not be obvious from the generated circuit.
+
+Fidelity makes them immediately visible.
+
+A sign error should produce a fidelity significantly below one rather than a subtle discrepancy that a reviewer must manually discover.
+
+This is why the project treats simulator-backed verification as its primary quality guarantee.
+
+---
+
+## Measurement is the exception
+
+`Gate::Measure` cannot be tested using state fidelity in the same way.
+
+Measurement changes the state through probabilistic collapse, so there is no single deterministic unitary transformation to compare.
+
+Measurement tests therefore use **shot-based statistical verification**.
+
+See:
+
+```text
+tests/measurement.rs
+```
+
+for the corresponding approach.
+
+---
+
+## Pull request requirement
+
+A PR that introduces a new:
+
+* Gate identity
+* Gate decomposition
+* Optimization identity
+* Backend transformation
+* Routing transformation
+
+should include an appropriate verification test.
+
+For unitary transformations, this normally means fidelity-based verification.
+
+For measurement behavior, it means statistical verification.
+
+A new identity without corresponding verification will be asked to add a test before it is merged.
+
+This is not a formality. It is what allows reviewers to validate a mathematical transformation quickly without having to independently re-derive every identity.
+
+---
+
+# Coding conventions
+
+## Formatting and linting
+
+Run:
+
+```bash
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+```
+
+before opening a PR.
+
+CI checks both.
+
+---
+
+## Avoid `unsafe`
+
+Do not introduce `unsafe` unless there is genuinely no reasonable safe alternative.
+
+If `unsafe` is necessary, explain the reason in a comment immediately above the relevant code.
+
+---
+
+## Explain why, not only what
+
+This codebase intentionally uses documentation comments to explain **why** an implementation is structured a particular way.
+
+For non-obvious code, document:
+
+* The mathematical reasoning
+* The hardware constraint
+* The correctness constraint
+* The rejected simpler alternative
+* Any important assumptions
+
+For example, if a seemingly simpler optimization is deliberately avoided, document that decision.
+
+Future contributors should not have to reconstruct the reasoning from `git blame`.
+
+---
+
+## Prefer exact transformations
+
+When a transformation can be implemented exactly, prefer the exact identity.
+
+For example:
+
+```text
+Ry(θ)
+```
+
+should be lowered through an exact identity rather than an approximation whenever the target gate set permits it.
+
+If something genuinely cannot be exact, state that explicitly in the documentation.
+
+`fidelity.rs` is an example of this distinction: its estimates are intentionally approximations and are documented as such.
+
+---
+
+## Preserve semantic boundaries
+
+Be especially careful around:
+
+```text
+Measure
+routing
+control / target ordering
+classical-bit destinations
+backend topology
+```
+
+These are not ordinary optimization details.
+
+They can change the semantics of a circuit if handled incorrectly.
+
+---
+
+# Commit messages
+
+Keep commits short and imperative.
+
+A module prefix is useful when it clarifies the scope:
+
+```text
 route: fix identity restoration on non-linear coupling maps
 backend: add Rigetti-specific Rzz lowering
 docs: clarify Measure's role in ir_optimize's commuting pass
 ```
 
-Reference the issue number if there is one (`Fixes #42`). Squash-merge is
-fine — commit history inside a PR branch doesn't need to be pristine, but
-the PR title/description does, since that's what becomes the merge commit
-message.
+If the change resolves an issue, reference it where appropriate:
 
-## Pull request checklist
+```text
+Fixes #42
+```
 
-Before you open (or mark ready-for-review):
+Squash-merging is fine.
 
-- [ ] `cargo test` passes locally
-- [ ] `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` pass
-- [ ] New identity/decomposition/optimization ⇒ new fidelity- or
-      shot-based test (see above) — not optional
-- [ ] Touched `Gate::Measure` handling anywhere? Double-check
-      `ir_optimize.rs`'s `disjoint` and `route.rs`'s remap logic — both
-      special-case it on purpose
-- [ ] Updated the relevant doc comment (and `ARCHITECTURE.md`, if the
-      change is structural) so the docs don't go stale
-- [ ] PR description explains *why*, not just *what* — link the issue if
-      there is one
+The commit history inside a PR does not need to be perfectly clean. The **PR title and description** should clearly communicate the final change because those become part of the project's long-term history.
 
-A maintainer will typically respond within **72 hours**. If you haven't
-heard back in that window, a polite ping on the PR is completely fine.
+---
 
-## Reporting bugs
+# Pull request checklist
 
-Open an issue with:
-- What you expected vs. what happened
-- A minimal circuit (QASM text or `Circuit`-building code) that
-  reproduces it
-- Your Rust version and the crate commit/version
-- Whether it reproduces on `main`
+Before opening a PR, or marking one ready for review:
 
-If you've found something that looks like it could produce a *wrong but
-silently plausible* result (e.g. a fidelity that's off by a small amount
-rather than obviously broken), please say so explicitly and treat it as
-higher priority — those are the bugs this project's testing philosophy is
-specifically designed to catch, so one slipping through is worth
-understanding.
+### Required checks
 
-## Good first issues & where help is wanted
+* [ ] `cargo test` passes locally
+* [ ] `cargo fmt --check` passes
+* [ ] `cargo clippy --all-targets -- -D warnings` passes
+* [ ] New identity / decomposition / optimization includes an appropriate verification test
+* [ ] Measurement behavior has shot-based verification where applicable
 
-Check the repo's [`good first issue`](https://github.com/sirraya-labs/QuTub-Transpiler/labels/good%20first%20issue)
-label for a current, maintained list. As a starting point, these are
-known, well-scoped gaps (see `ARCHITECTURE.md` §5 for full context on
-each):
+### Semantic checks
 
-- Give `Rigetti` its own real grid coupling map, instead of the
-  conservative linear-chain stand-in it uses today.
-- Add gate-specific commutation rules to `ir_optimize.rs`'s source-level
-  pass (e.g. `Rz` commuting through a `Cx` control), matching the rules
-  `backend.rs`'s native-level pass already uses.
-- Extend test coverage for any identity that currently only has an
-  algebraic derivation in a doc comment without a matching fidelity test.
+* [ ] `Gate::Measure` behavior was considered if touched
+* [ ] `ir_optimize.rs` measurement barriers remain correct
+* [ ] `route.rs` remapping logic remains correct
+* [ ] Control / target ordering is preserved
+* [ ] Classical-bit destinations remain valid
 
-Larger, more involved projects (open a discussion issue first):
+### Documentation checks
 
-- A `Backend::Pasqal` (neutral-atom) implementation — genuinely harder
-  than the existing backends, since it needs atom placement and
-  blockade-radius routing, not just fixed native-gate lowering.
-- SWAP-count-aware routing in `route.rs` (currently a correctness pass,
-  not an optimizer).
+* [ ] Relevant doc comments are updated
+* [ ] `ARCHITECTURE.md` is updated if the change is structural
+* [ ] PR description explains **why**, not only **what**
+* [ ] Related issue or discussion is linked where applicable
 
-## Getting help
+---
 
-- **Questions about using the crate:** open a [Discussion](https://github.com/sirraya-labs/QuTub-Transpiler/discussions)
-  or an issue tagged `question`.
-- **Stuck on a contribution:** comment on the issue or your draft PR —
-  partial progress and "I'm not sure how to approach X" are welcome, not
-  just finished work.
-- **Something sensitive/security-related:** email [amir@sirraya.org](mailto:amir@sirraya.org)
-  directly rather than filing a public issue.
+## The review standard
 
-## License
+A useful mental model is:
 
-Licensed under the [MIT License](LICENSE). By submitting a pull request,
-you agree that your contribution is licensed under the same terms.
+```mermaid
+flowchart LR
+    A["Code compiles"] --> B["Tests pass"]
+    B --> C["Quantum semantics verified"]
+    C --> D["Architecture remains coherent"]
+    D --> E["Documentation explains the decision"]
+    E --> F["Ready for review"]
+```
+
+Passing `cargo test` is necessary, but it is not the entire definition of a good contribution.
+
+For compiler changes, reviewers should be able to understand:
+
+1. What transformation is being introduced.
+2. Why it is mathematically or semantically correct.
+3. Why it belongs at that stage of the compiler pipeline.
+4. How the implementation is tested.
+5. What hardware or backend assumptions it makes.
+
+---
+
+# Reporting bugs
+
+Open an issue with as much of the following as possible.
+
+## What happened?
+
+Describe:
+
+* What you expected
+* What actually happened
+* Whether the result is incorrect, unexpected, or merely unclear
+
+## Minimal reproduction
+
+Provide the smallest circuit that reproduces the problem.
+
+Either provide QASM:
+
+```qasm
+OPENQASM 2.0;
+include "qelib1.inc";
+
+qreg q[2];
+creg c[2];
+
+h q[0];
+cx q[0],q[1];
+```
+
+or Rust code that constructs the corresponding `Circuit`.
+
+## Environment
+
+Include:
+
+```bash
+rustc --version
+cargo --version
+```
+
+Also provide:
+
+* Operating system
+* Crate version or commit
+* Whether the problem reproduces on `main`
+
+---
+
+## Incorrect-but-plausible results
+
+Please explicitly flag bugs where the output appears valid but is semantically wrong.
+
+Examples include:
+
+* Fidelity slightly below one
+* Incorrect phase relationships
+* Wrong qubit mapping
+* Incorrect control / target direction
+* A circuit that executes but produces the wrong distribution
+* A routing transformation that silently changes logical wire identity
+
+These bugs are particularly important because they are exactly the class of problems this project's verification philosophy is designed to catch.
+
+---
+
+# Good first issues
+
+Check the repository's [`good first issue`](https://github.com/sirraya-labs/QuTub-Transpiler/labels/good%20first%20issue) label for the current maintained list.
+
+Some currently well-scoped areas include:
+
+### Rigetti topology
+
+Give `Rigetti` its actual grid-style coupling map instead of the conservative linear-chain stand-in currently used.
+
+Relevant areas:
+
+```text
+coupling.rs
+backend.rs
+route.rs
+```
+
+### Source-level commutation
+
+Extend `ir_optimize.rs` with gate-specific commutation rules.
+
+For example:
+
+```text
+Rz commuting through the control wire of Cx
+```
+
+The native-level optimizer in `backend.rs` already contains related rules that can serve as a reference.
+
+Any new rule should have an appropriate semantic verification test.
+
+### Test coverage
+
+Add fidelity tests for identities that currently have only an algebraic derivation or documentation explanation.
+
+This is particularly useful for:
+
+* Backend lowering identities
+* Native decompositions
+* Optimization rules
+* Routing transformations
+
+---
+
+# Larger projects
+
+Some contributions require architectural discussion before implementation.
+
+For these, open an issue or discussion first.
+
+## Pasqal / neutral-atom backend
+
+A proper `Backend::Pasqal` implementation is substantially different from the existing digital gate backends.
+
+It would need to reason about concepts such as:
+
+```text
+Atom placement
+Blockade radius
+Physical movement
+Interaction geometry
+Placement-aware routing
+```
+
+A simple fixed connectivity map would not accurately represent the platform.
+
+---
+
+## SWAP-aware routing optimization
+
+The current router is primarily a **correctness pass**, not a global optimizer.
+
+A future routing optimizer could consider:
+
+```mermaid
+flowchart LR
+    A["Logical circuit"] --> B["Interaction graph"]
+    B --> C["Hardware topology"]
+    C --> D["Lookahead"]
+    D --> E["Candidate SWAP schedules"]
+    E --> F["Cost model"]
+    F --> G["Lower-SWAP route"]
+```
+
+Potential future concerns include:
+
+* Lookahead
+* Gate reordering
+* Interaction frequency
+* SWAP count
+* Circuit depth
+* Backend-specific gate costs
+* Final logical-to-physical mapping
+
+The objective should not be merely:
+
+> Minimize the number of SWAP gates.
+
+A better optimizer would eventually balance SWAP count against total circuit depth and hardware-specific execution cost.
+
+---
+
+# Getting help
+
+## Using the crate
+
+For questions about using `sirraya-qutub-transpiler`, open a [Discussion](https://github.com/sirraya-labs/QuTub-Transpiler/discussions) or an issue tagged `question`.
+
+## Contributing
+
+If you are stuck on a contribution:
+
+* Comment on the issue
+* Ask on your draft PR
+* Share partial progress
+* Explain where the implementation becomes unclear
+
+You do not need to arrive with a finished solution.
+
+A clear:
+
+> "I understand the identity, but I'm unsure where this transformation belongs in the pipeline."
+
+is a useful contribution to the discussion.
+
+## Security or sensitive issues
+
+For something security-related or otherwise inappropriate for a public issue, contact [amir@sirraya.org](mailto:amir@sirraya.org) directly.
+
+---
+
+# License
+
+This project is licensed under the [MIT License](LICENSE).
+
+By submitting a pull request, you agree that your contribution is licensed under the same terms.
+
+---
+
+## Contributor principle
+
+The most useful way to think about contributing to this project is:
+
+```mermaid
+flowchart TD
+    A["Understand the problem"] --> B["Understand the architecture"]
+    B --> C["Make the smallest correct change"]
+    C --> D["Verify against the real simulator"]
+    D --> E["Document the reasoning"]
+    E --> F["Submit a focused PR"]
+```
+
+The goal is not simply to add more code.
+
+The goal is to make the transpiler **more correct, more understandable, more verifiable, and easier for the next contributor to extend**.
