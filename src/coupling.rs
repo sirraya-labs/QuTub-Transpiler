@@ -36,13 +36,24 @@
 //! actual heavy-hex *topology family*, which is the part that matters
 //! for routing correctness.
 //!
-//! `Rigetti` is still modeled as a fixed nearest-neighbor chain
-//! (`0-1-2-...-(n-1)`, see [`CouplingMap::linear`]) -- its real grid
-//! topology is a more permissive superset of a line (every interior
-//! qubit has more than two neighbors), so a line remains a conservative
-//! stand-in there: routing that succeeds against a line also succeeds,
-//! with room to spare, against the real grid. Modeling Rigetti's actual
-//! grid graph is separate future work from this heavy-hex item.
+//! # P1.3 (this module's square-grid generator)
+//!
+//! `Rigetti` now routes against a real square lattice
+//! ([`CouplingMap::square_grid_for`]/[`CouplingMap::square_grid`]),
+//! not the `linear` stand-in this module used to fall back on for it.
+//! Rigetti's current Ankaa-class processors (Ankaa-2, Ankaa-3) are
+//! published as a plain rectangular grid of qubits with tunable
+//! couplers -- interior qubits have four-fold connectivity, edge
+//! qubits three, corners two -- *not* the square-octagonal unit cell
+//! Rigetti's earlier Aspen generation used. [`CouplingMap::square_grid`]
+//! builds that grid exactly; [`CouplingMap::square_grid_for`] finds the
+//! smallest square grid with at least `n` qubits and takes a BFS-order
+//! prefix of exactly `n`, for the same reason [`CouplingMap::heavy_hex_for`]
+//! does: a breadth-first prefix of a connected graph is always
+//! connected.
+//!
+//! As with heavy-hex, this is the real *topology family*, not a claim
+//! about any specific chip's own published qubit numbering.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -132,6 +143,70 @@ impl CouplingMap {
                 return cm;
             }
             d += 1;
+        }
+    }
+
+    /// The real square-lattice topology for a `rows`-by-`cols`
+    /// rectangular grid of qubits (`rows, cols >= 1`): qubit `(r, c)`
+    /// is adjacent to `(r+1, c)` and `(r, c+1)` wherever those
+    /// coordinates exist, giving every interior qubit 4 neighbors, edge
+    /// qubits 3, and corner qubits 2. This is the actual published
+    /// topology family Rigetti's current-generation Ankaa-class
+    /// superconducting processors (Ankaa-2, Ankaa-3) use -- see this
+    /// module's doc comment.
+    ///
+    /// Node numbering is a deterministic BFS order from a fixed corner
+    /// of the grid (see [`square_grid_bfs_map`]), so it's stable across
+    /// calls but not meant to line up with any real device's own
+    /// published qubit numbering (see this module's doc comment).
+    ///
+    /// # Panics
+    /// If `rows == 0` or `cols == 0` -- there is no such thing as a
+    /// 0-row or 0-column grid; use [`CouplingMap::linear`] (or an empty
+    /// map) for a topology-free 0/1-qubit case instead.
+    pub fn square_grid(rows: usize, cols: usize) -> Self {
+        assert!(
+            rows >= 1 && cols >= 1,
+            "square_grid requires at least 1 row and 1 column, got {}x{}",
+            rows,
+            cols
+        );
+        let edges = square_grid_edges(rows, cols);
+        square_grid_bfs_map(&edges, (0, 0), None)
+    }
+
+    /// The smallest square grid with at least `num_qubits` qubits,
+    /// truncated to exactly `num_qubits` by taking a breadth-first
+    /// prefix from a fixed corner -- guaranteed connected, for the same
+    /// reason [`CouplingMap::heavy_hex_for`] is (a BFS prefix of a
+    /// connected graph always is). This is what
+    /// [`crate::backend::Backend::coupling_map`] uses for `Rigetti`.
+    ///
+    /// `num_qubits <= 1` returns a topology-free map, matching
+    /// [`CouplingMap::linear`]/[`CouplingMap::heavy_hex_for`]'s
+    /// behavior at the same sizes.
+    pub fn square_grid_for(num_qubits: usize) -> Self {
+        if num_qubits <= 1 {
+            return Self {
+                num_qubits,
+                edges: HashSet::new(),
+            };
+        }
+        let mut side = 1usize;
+        loop {
+            let total = side * side;
+            if total >= num_qubits {
+                let edges = square_grid_edges(side, side);
+                let mut cm = square_grid_bfs_map(&edges, (0, 0), Some(num_qubits));
+                debug_assert_eq!(
+                    cm.num_qubits, num_qubits,
+                    "a side x side square grid with >= num_qubits total qubits is always \
+                     connected, so a BFS prefix should always reach exactly num_qubits"
+                );
+                cm.num_qubits = num_qubits;
+                return cm;
+            }
+            side += 1;
         }
     }
 
@@ -360,6 +435,96 @@ fn heavy_hex_bfs_map(
     }
 }
 
+// ---------------------------------------------------------------------
+// Square-grid construction internals.
+//
+// Much simpler than the heavy-hex case above: a plain rectangular grid
+// graph needs no edge-subdivision step, and its nodes are already a
+// single flat coordinate type (no data-vs-flag distinction), so
+// `square_grid_edges`/`square_grid_bfs_map` mirror
+// `hexagonal_lattice_edges`/`heavy_hex_bfs_map`'s structure without
+// needing an enum for the node type.
+// ---------------------------------------------------------------------
+
+/// A node in the square-grid graph, addressed by its `(row, col)`
+/// coordinate.
+type GridCoord = (usize, usize);
+
+fn square_grid_edges(rows: usize, cols: usize) -> Vec<(GridCoord, GridCoord)> {
+    let mut edges: HashSet<(GridCoord, GridCoord)> = HashSet::new();
+    for r in 0..rows {
+        for c in 0..cols {
+            if r + 1 < rows {
+                edges.insert(((r, c), (r + 1, c)));
+            }
+            if c + 1 < cols {
+                edges.insert(((r, c), (r, c + 1)));
+            }
+        }
+    }
+    let mut out: Vec<(GridCoord, GridCoord)> = edges.into_iter().collect();
+    out.sort();
+    out
+}
+
+/// Assigns integer qubit indices to a square-grid graph via BFS from
+/// `start`, and builds the resulting [`CouplingMap`]. If `limit` is
+/// `Some(n)`, only the first `n` BFS-visited nodes get an index (and
+/// only edges between two indexed nodes survive) -- see
+/// [`CouplingMap::square_grid_for`]'s doc comment for why that prefix
+/// is always connected. Mirrors [`heavy_hex_bfs_map`] exactly, just
+/// over `GridCoord` instead of `HeavyHexNode`.
+fn square_grid_bfs_map(
+    edges: &[(GridCoord, GridCoord)],
+    start: GridCoord,
+    limit: Option<usize>,
+) -> CouplingMap {
+    let mut adjacency: HashMap<GridCoord, Vec<GridCoord>> = HashMap::new();
+    for &(a, b) in edges {
+        adjacency.entry(a).or_default().push(b);
+        adjacency.entry(b).or_default().push(a);
+    }
+    for neighbors in adjacency.values_mut() {
+        neighbors.sort();
+    }
+
+    let mut order: Vec<GridCoord> = Vec::new();
+    let mut visited: HashSet<GridCoord> = HashSet::new();
+    let mut queue: VecDeque<GridCoord> = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
+    while let Some(node) = queue.pop_front() {
+        if let Some(lim) = limit {
+            if order.len() >= lim {
+                break;
+            }
+        }
+        order.push(node);
+        if let Some(neighbors) = adjacency.get(&node) {
+            for &next in neighbors {
+                if visited.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    let index: HashMap<GridCoord, usize> =
+        order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+
+    let mut cm_edges: HashSet<(usize, usize)> = HashSet::new();
+    for &(a, b) in edges {
+        if let (Some(&ia), Some(&ib)) = (index.get(&a), index.get(&b)) {
+            cm_edges.insert(if ia < ib { (ia, ib) } else { (ib, ia) });
+        }
+    }
+
+    CouplingMap {
+        num_qubits: order.len(),
+        edges: cm_edges,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,6 +673,135 @@ mod tests {
     #[test]
     fn neighbors_matches_is_adjacent_on_a_heavy_hex_map() {
         let map = CouplingMap::heavy_hex_grid(2, 3);
+        for q in 0..map.num_qubits() {
+            let nbrs = map.neighbors(q);
+            for other in 0..map.num_qubits() {
+                assert_eq!(
+                    nbrs.contains(&other),
+                    map.is_adjacent(q, other),
+                    "neighbors({}) disagrees with is_adjacent({}, {})",
+                    q,
+                    q,
+                    other
+                );
+            }
+        }
+    }
+
+    /// A 1x1 square grid is a single, edgeless qubit -- there's no
+    /// second qubit to be adjacent to.
+    #[test]
+    fn square_grid_1x1_has_a_single_isolated_qubit() {
+        let map = CouplingMap::square_grid(1, 1);
+        assert_eq!(map.num_qubits(), 1);
+        assert!(map.neighbors(0).is_empty());
+    }
+
+    /// A 2x3 square grid should have exactly 6 qubits, each with the
+    /// degree its position dictates: corners 2, edges 3, interior 4.
+    /// A 2-row grid has no interior cells, so this only pins down
+    /// corner/edge degrees; `square_grid_has_an_interior_degree_four_qubit`
+    /// below covers the interior case on a bigger grid.
+    #[test]
+    fn square_grid_2x3_matches_expected_degrees() {
+        let map = CouplingMap::square_grid(2, 3);
+        assert_eq!(map.num_qubits(), 6);
+        let degree = |q: usize| {
+            (0..6).filter(|&other| other != q && map.is_adjacent(q, other)).count()
+        };
+        let degrees: Vec<usize> = (0..6).map(degree).collect();
+        let mut sorted = degrees.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            vec![2, 2, 2, 2, 3, 3],
+            "a 2x3 grid should have 4 corners (degree 2) and 2 edge-midpoints (degree 3): {:?}",
+            degrees
+        );
+    }
+
+    /// No qubit in a square grid should have more than 4 neighbors, and
+    /// a big-enough grid should actually have an interior qubit that
+    /// reaches that maximum.
+    #[test]
+    fn square_grid_has_an_interior_degree_four_qubit() {
+        let map = CouplingMap::square_grid(3, 3);
+        let mut saw_degree_four = false;
+        for q in 0..map.num_qubits() {
+            let degree = (0..map.num_qubits())
+                .filter(|&other| other != q && map.is_adjacent(q, other))
+                .count();
+            assert!(degree <= 4, "qubit {} has degree {} > 4", q, degree);
+            if degree == 4 {
+                saw_degree_four = true;
+            }
+        }
+        assert!(saw_degree_four, "a 3x3 grid should have at least one interior degree-4 qubit");
+    }
+
+    #[test]
+    fn square_grid_is_fully_connected() {
+        let map = CouplingMap::square_grid(3, 4);
+        for target in 1..map.num_qubits() {
+            assert!(
+                map.shortest_path(0, target).is_some(),
+                "qubit {} should be reachable from qubit 0 in a 3x4 square grid",
+                target
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn square_grid_rejects_zero_rows_or_cols() {
+        CouplingMap::square_grid(0, 3);
+    }
+
+    /// `square_grid_for` must return *exactly* the requested qubit
+    /// count (not just "at least"), for a range of sizes including
+    /// ones that don't land exactly on a side x side grid's natural
+    /// qubit count.
+    #[test]
+    fn square_grid_for_returns_exact_requested_size() {
+        for n in [0, 1, 2, 5, 9, 10, 16, 50, 77] {
+            let map = CouplingMap::square_grid_for(n);
+            assert_eq!(map.num_qubits(), n, "square_grid_for({}) returned the wrong qubit count", n);
+        }
+    }
+
+    /// The whole point of building the truncated map via a BFS prefix:
+    /// it must stay connected even when it cuts a real square grid off
+    /// partway through, for sizes both smaller and larger than one bare
+    /// side x side grid.
+    #[test]
+    fn square_grid_for_is_always_connected() {
+        for n in [2, 5, 9, 10, 16, 50, 77] {
+            let map = CouplingMap::square_grid_for(n);
+            for target in 1..n {
+                assert!(
+                    map.shortest_path(0, target).is_some(),
+                    "square_grid_for({}): qubit {} unreachable from qubit 0",
+                    n,
+                    target
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn square_grid_for_never_exceeds_degree_four() {
+        for n in [9, 16, 50, 77] {
+            let map = CouplingMap::square_grid_for(n);
+            for q in 0..n {
+                let degree = (0..n).filter(|&other| other != q && map.is_adjacent(q, other)).count();
+                assert!(degree <= 4, "square_grid_for({}): qubit {} has degree {} > 4", n, q, degree);
+            }
+        }
+    }
+
+    #[test]
+    fn neighbors_matches_is_adjacent_on_a_square_grid_map() {
+        let map = CouplingMap::square_grid(3, 4);
         for q in 0..map.num_qubits() {
             let nbrs = map.neighbors(q);
             for other in 0..map.num_qubits() {

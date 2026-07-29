@@ -664,17 +664,16 @@ impl Backend {
     ///
     /// `IbmQ` routes against a real heavy-hex lattice
     /// (`CouplingMap::heavy_hex_for`, P1.1) -- IBM's actual published
-    /// superconducting-device topology family, not a stand-in. `Rigetti`
-    /// still gets the conservative nearest-neighbor chain a line always
-    /// was for a more permissive real lattice -- see `coupling.rs` for
-    /// why that remains safe to route against for now, and why it's
-    /// separate future work to give Rigetti its own real grid topology
-    /// the way `IbmQ` just got heavy-hex.
+    /// superconducting-device topology family, not a stand-in.
+    /// `Rigetti` routes against a real square lattice
+    /// (`CouplingMap::square_grid_for`, P1.3) -- Rigetti's actual
+    /// published Ankaa-class topology family (see `coupling.rs`), not
+    /// the conservative `linear` stand-in it used to fall back on.
     pub fn coupling_map(self, num_qubits: usize) -> Option<crate::coupling::CouplingMap> {
         match self {
             Backend::TrappedIon => None,
             Backend::IbmQ => Some(crate::coupling::CouplingMap::heavy_hex_for(num_qubits)),
-            Backend::Rigetti => Some(crate::coupling::CouplingMap::linear(num_qubits)),
+            Backend::Rigetti => Some(crate::coupling::CouplingMap::square_grid_for(num_qubits)),
         }
     }
 }
