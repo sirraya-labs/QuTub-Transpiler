@@ -1,8 +1,12 @@
 # Contributing to sirraya-qutub-transpiler
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Good First Issues](https://img.shields.io/github/issues/sirraya-labs/QuTub-Transpiler/good%20first%20issue)](https://github.com/sirraya-labs/QuTub-Transpiler/labels/good%20first%20issue)
+[![Discussions](https://img.shields.io/badge/Discussions-join-blue)](https://github.com/sirraya-labs/QuTub-Transpiler/discussions)
+
 First off — thank you for considering a contribution. This project is a
 QASM 2.0 importer and multi-backend native-gate compiler for quantum
-circuits, built and maintained by [Sirraya Labs](<!-- TODO: org link -->).
+circuits, built and maintained by [Sirraya Labs](https://github.com/sirraya-labs).
 We welcome issues, discussion, docs fixes, and code from anyone, regardless
 of experience level with quantum computing or Rust.
 
@@ -31,12 +35,12 @@ codebase looks the way it does, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 This project follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
 By participating, you're expected to uphold it. Report unacceptable
-behavior to <!-- TODO: contact email -->.
+behavior to [amir@sirraya.org](mailto:amir@sirraya.org).
 
 ## Quick start
 
 ```bash
-git clone <!-- TODO: repo URL -->
+git clone https://github.com/sirraya-labs/QuTub-Transpiler.git
 cd sirraya-qutub-transpiler
 cargo build
 cargo test
@@ -193,9 +197,8 @@ Before you open (or mark ready-for-review):
 - [ ] PR description explains *why*, not just *what* — link the issue if
       there is one
 
-A maintainer will typically respond within <!-- TODO: response-time SLA,
-e.g. "a few days" -->. If you haven't heard back in that window, a polite
-ping on the PR is completely fine.
+A maintainer will typically respond within **72 hours**. If you haven't
+heard back in that window, a polite ping on the PR is completely fine.
 
 ## Reporting bugs
 
@@ -215,7 +218,7 @@ understanding.
 
 ## Good first issues & where help is wanted
 
-Check the repo's [`good first issue`](<!-- TODO: issue-tracker filter URL -->)
+Check the repo's [`good first issue`](https://github.com/sirraya-labs/QuTub-Transpiler/labels/good%20first%20issue)
 label for a current, maintained list. As a starting point, these are
 known, well-scoped gaps (see `ARCHITECTURE.md` §5 for full context on
 each):
@@ -238,17 +241,15 @@ Larger, more involved projects (open a discussion issue first):
 
 ## Getting help
 
-- **Questions about using the crate:** open a [Discussion](<!-- TODO: discussions URL -->)
+- **Questions about using the crate:** open a [Discussion](https://github.com/sirraya-labs/QuTub-Transpiler/discussions)
   or an issue tagged `question`.
 - **Stuck on a contribution:** comment on the issue or your draft PR —
   partial progress and "I'm not sure how to approach X" are welcome, not
   just finished work.
-- **Something sensitive/security-related:** email <!-- TODO: security contact -->
+- **Something sensitive/security-related:** email [amir@sirraya.org](mailto:amir@sirraya.org)
   directly rather than filing a public issue.
 
 ## License
 
-<!-- TODO: confirm license — e.g. "Licensed under MIT OR Apache-2.0, at
-your option, matching Rust ecosystem convention. See LICENSE-MIT /
-LICENSE-APACHE." By submitting a PR you agree your contribution is
-licensed under the same terms. -->
+Licensed under the [MIT License](LICENSE). By submitting a pull request,
+you agree that your contribution is licensed under the same terms.
