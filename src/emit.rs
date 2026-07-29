@@ -2,6 +2,17 @@
 //! `sirraya_qutub::core::QuantumRegister`, and emits it back out as
 //! `sirraya_qutub`-dialect QASM text. This is the one module in the
 //! crate that actually touches the dependency.
+//!
+//! `QuantumRegister::measure_single_qubit(&mut self, qubit: usize) ->
+//! Result<u8, String>` is confirmed (source in hand, not just doc
+//! comments) to perform a real Born-rule-sampled projective measurement
+//! that collapses and renormalizes the state vector -- exactly the
+//! primitive `Gate::Measure`'s P0.1 roadmap item was blocked on.
+//! `apply_to`/`run` deliberately stay statevector-only (erroring on
+//! `Measure`, same as before) since a caller of that entry point never
+//! asked for classical output; `apply_to_with_measurement`/
+//! `run_with_measurement` below are the real, confirmed answer for a
+//! circuit that contains one.
 
 use crate::native::{NativeCircuit, NativeGate};
 use sirraya_qutub::core::QuantumRegister;
@@ -15,7 +26,10 @@ pub fn run(circuit: &NativeCircuit) -> Result<QuantumRegister, String> {
 }
 
 /// Applies the native circuit's gates onto an existing register in
-/// place, so callers can prepare a custom initial state first.
+/// place, so callers can prepare a custom initial state first. Errors
+/// on `Measure` -- this entry point returns only a `QuantumRegister`,
+/// with nowhere to put a classical outcome; use
+/// [`apply_to_with_measurement`] for a circuit that measures.
 pub fn apply_to(circuit: &NativeCircuit, reg: &mut QuantumRegister) -> Result<(), String> {
     for gate in &circuit.gates {
         match *gate {
@@ -23,19 +37,59 @@ pub fn apply_to(circuit: &NativeCircuit, reg: &mut QuantumRegister) -> Result<()
             NativeGate::Ry(q, angle) => reg.apply_ry(q, angle)?,
             NativeGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
             NativeGate::Measure(..) => {
-                // Genuinely blocked, not a design choice made here: this
-                // crate has not yet confirmed what measurement primitive
-                // (if any) `sirraya_qutub::core::QuantumRegister` exposes
-                // (P0.1's definition of done calls for a dedicated
-                // `run_with_measurement`-style entry point returning
-                // classical outcomes once that's confirmed, rather than
-                // folding it into this statevector-only path).
                 return Err(
-                    "NativeGate::Measure is not yet supported by emit::apply_to -- \
-                     confirm sirraya_qutub's measurement API first (see P0.1 in the \
-                     roadmap chapter)"
+                    "NativeGate::Measure is not supported by emit::apply_to -- this entry \
+                     point returns no classical outcomes; use apply_to_with_measurement (or \
+                     run_with_measurement) instead"
                         .to_string(),
                 );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs the native circuit on a fresh `QuantumRegister` (starting in
+/// |00...0>), returning both the final register *and* the classical
+/// outcomes written by every `Measure` in the circuit (indexed by
+/// classical bit, sized to `circuit.num_clbits`). This is the P0.1
+/// roadmap item's `run_with_measurement`-style entry point.
+pub fn run_with_measurement(
+    circuit: &NativeCircuit,
+) -> Result<(QuantumRegister, Vec<u8>), String> {
+    let mut reg = QuantumRegister::new(circuit.num_qubits)?;
+    let mut clbits = vec![0u8; circuit.num_clbits];
+    apply_to_with_measurement(circuit, &mut reg, &mut clbits)?;
+    Ok((reg, clbits))
+}
+
+/// As [`apply_to`], but `Measure(q, c)` is executed for real via
+/// `QuantumRegister::measure_single_qubit`, collapsing `reg` and
+/// writing the sampled outcome into `clbits[c]`. `clbits` must have at
+/// least `circuit.num_clbits` entries -- `qasm::parse` already
+/// range-checks every `Measure`'s `c` against the declared `creg` size,
+/// so a caller building `clbits` as `vec![0u8; circuit.num_clbits]`
+/// (as [`run_with_measurement`] does) can't index out of range here.
+pub fn apply_to_with_measurement(
+    circuit: &NativeCircuit,
+    reg: &mut QuantumRegister,
+    clbits: &mut [u8],
+) -> Result<(), String> {
+    for gate in &circuit.gates {
+        match *gate {
+            NativeGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
+            NativeGate::Ry(q, angle) => reg.apply_ry(q, angle)?,
+            NativeGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
+            NativeGate::Measure(q, c) => {
+                let outcome = reg.measure_single_qubit(q)?;
+                let num_clbits = clbits.len();
+                let slot = clbits.get_mut(c).ok_or_else(|| {
+                    format!(
+                        "Measure writes classical bit {} but only {} were provided",
+                        c, num_clbits
+                    )
+                })?;
+                *slot = outcome;
             }
         }
     }
@@ -101,7 +155,9 @@ pub fn run_backend(circuit: &BackendCircuit) -> Result<QuantumRegister, String> 
 /// Applies a [`BackendCircuit`]'s gates onto an existing register in
 /// place. `BackendGate::Rot` is interpreted as `Ry` for `TrappedIon`
 /// and `Rx` for `IbmQ`/`Rigetti`, matching each backend's native
-/// single-qubit axis (see `backend`'s module doc).
+/// single-qubit axis (see `backend`'s module doc). Errors on `Measure`
+/// for the same reason [`apply_to`] does; use
+/// [`apply_backend_to_with_measurement`] for a circuit that measures.
 pub fn apply_backend_to(circuit: &BackendCircuit, reg: &mut QuantumRegister) -> Result<(), String> {
     for gate in &circuit.gates {
         match *gate {
@@ -114,13 +170,56 @@ pub fn apply_backend_to(circuit: &BackendCircuit, reg: &mut QuantumRegister) -> 
             BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
             BackendGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
             BackendGate::Measure(..) => {
-                // Same blocker as NativeGate::Measure in apply_to above.
                 return Err(
-                    "BackendGate::Measure is not yet supported by emit::apply_backend_to -- \
-                     confirm sirraya_qutub's measurement API first (see P0.1 in the \
-                     roadmap chapter)"
+                    "BackendGate::Measure is not supported by emit::apply_backend_to -- this \
+                     entry point returns no classical outcomes; use \
+                     apply_backend_to_with_measurement (or run_backend_with_measurement) instead"
                         .to_string(),
                 );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// As [`run_backend`], but returns the classical outcomes written by
+/// every `Measure` in the lowered circuit, indexed by classical bit.
+pub fn run_backend_with_measurement(
+    circuit: &BackendCircuit,
+) -> Result<(QuantumRegister, Vec<u8>), String> {
+    let mut reg = QuantumRegister::new(circuit.num_qubits)?;
+    let mut clbits = vec![0u8; circuit.num_clbits];
+    apply_backend_to_with_measurement(circuit, &mut reg, &mut clbits)?;
+    Ok((reg, clbits))
+}
+
+/// As [`apply_backend_to`], but `Measure(q, c)` is executed for real,
+/// same as [`apply_to_with_measurement`].
+pub fn apply_backend_to_with_measurement(
+    circuit: &BackendCircuit,
+    reg: &mut QuantumRegister,
+    clbits: &mut [u8],
+) -> Result<(), String> {
+    for gate in &circuit.gates {
+        match *gate {
+            BackendGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
+            BackendGate::Rot(q, angle) => match circuit.backend {
+                Backend::TrappedIon => reg.apply_ry(q, angle)?,
+                Backend::IbmQ | Backend::Rigetti => reg.apply_rx(q, angle)?,
+            },
+            BackendGate::Cx(a, b) => reg.apply_cnot(a, b)?,
+            BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
+            BackendGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
+            BackendGate::Measure(q, c) => {
+                let outcome = reg.measure_single_qubit(q)?;
+                let num_clbits = clbits.len();
+                let slot = clbits.get_mut(c).ok_or_else(|| {
+                    format!(
+                        "Measure writes classical bit {} but only {} were provided",
+                        c, num_clbits
+                    )
+                })?;
+                *slot = outcome;
             }
         }
     }

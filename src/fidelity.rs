@@ -1,18 +1,35 @@
 //! A self-contained circuit-fidelity estimate.
 //!
-//! This deliberately does **not** import `sirraya_qutub`'s
-//! `HardwareCalibration` type and reach into its fields -- this crate
-//! has never seen that type's actual field layout confirmed from a
-//! compiled build (only from the `xeb.rs` doc comments), so depending
-//! on its exact shape would be guessing. Instead this module
-//! re-implements the one published formula `xeb.rs` documents --
-//! `p = (1 - F) * d / (d - 1)`, the standard fidelity <-> depolarizing
-//! parameter relation from randomized-benchmarking literature -- against
-//! the same published Quantinuum Helios numbers (Sandia National
-//! Laboratories benchmark, Nature, June 2026), independently of
-//! `sirraya_qutub`'s internal representation. If/when `HardwareCalibration`
-//! stabilizes as a public, documented API, this can be replaced with a
-//! thin wrapper around it instead.
+//! # P0.2 finding (resolved)
+//!
+//! This module used to avoid `sirraya_qutub::xeb::HardwareCalibration`
+//! entirely and re-derive its formula independently, because this crate
+//! had only ever seen that type's field layout from `xeb.rs`'s doc
+//! comments, never a compiled build. That's now confirmed directly from
+//! source: `HardwareCalibration` is
+//!
+//! ```ignore
+//! pub struct HardwareCalibration {
+//!     pub name: &'static str,
+//!     pub single_qubit_fidelity: f64,
+//!     pub two_qubit_fidelity: f64,
+//! }
+//! ```
+//!
+//! -- field-for-field identical to [`PublishedCalibration`] below, with
+//! the same `fidelity_to_depolarizing_probability` formula and the same
+//! published Quantinuum Helios numbers (0.999975 / 0.99921) in its own
+//! `quantinuum_helios_2026()` constructor. It stores a single published
+//! fidelity figure, not per-qubit or time-varying calibration data, so
+//! the divergence this module's doc comment used to warn about was never
+//! actually there. **Decision:** replace the independent re-derivation
+//! for the one entry the two types share (Quantinuum Helios) with a
+//! thin wrapper delegating to the real type, so the two numbers cannot
+//! silently drift apart in the future -- see
+//! [`PublishedCalibration::quantinuum_helios_2026`] below.
+//! `ibm_heron_r2` and `rigetti_ankaa3` have no counterpart in
+//! `sirraya_qutub::xeb` (it only models the trapped-ion Quantinuum
+//! device) and so still stand on their own citations, unchanged.
 //!
 //! The estimate itself is the standard first-order approximation used
 //! for a quick circuit-level fidelity budget: treat each native gate's
@@ -31,17 +48,30 @@ pub struct PublishedCalibration {
     pub two_qubit_fidelity: f64,
 }
 
+/// Confirmed field-for-field identical to `PublishedCalibration` (see
+/// this module's doc comment) -- this conversion is the thin wrapper
+/// P0.2 called for, not a coincidence of matching field names.
+impl From<sirraya_qutub::xeb::HardwareCalibration> for PublishedCalibration {
+    fn from(cal: sirraya_qutub::xeb::HardwareCalibration) -> Self {
+        Self {
+            name: cal.name,
+            single_qubit_fidelity: cal.single_qubit_fidelity,
+            two_qubit_fidelity: cal.two_qubit_fidelity,
+        }
+    }
+}
+
 impl PublishedCalibration {
     /// Quantinuum Helios (98-qubit trapped-ion), as benchmarked by Sandia
-    /// National Laboratories and published in Nature, June 2026 -- the
-    /// same figures `sirraya_qutub::xeb::HardwareCalibration` is
-    /// documented as using.
+    /// National Laboratories and published in Nature, June 2026.
+    ///
+    /// Delegates to `sirraya_qutub::xeb::HardwareCalibration::quantinuum_helios_2026`
+    /// (confirmed field-for-field identical -- see this module's doc
+    /// comment) instead of restating the same two numbers a second time,
+    /// so this and `sirraya_qutub`'s own copy cannot silently drift
+    /// apart the way an independently-maintained duplicate could.
     pub fn quantinuum_helios_2026() -> Self {
-        Self {
-            name: "Quantinuum Helios (Sandia benchmark, Nature, June 2026)",
-            single_qubit_fidelity: 0.999975,
-            two_qubit_fidelity: 0.99921,
-        }
+        sirraya_qutub::xeb::HardwareCalibration::quantinuum_helios_2026().into()
     }
 
     /// p = (1 - F) * d / (d - 1), the standard average-gate-fidelity ->
@@ -136,6 +166,46 @@ impl PublishedCalibration {
                    not Ankaa-3-specific)",
             single_qubit_fidelity: 0.9986,
             two_qubit_fidelity: 0.995,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantinuum_wrapper_matches_the_real_hardware_calibration_exactly() {
+        // Not a fidelity comparison (there's no circuit here) -- a
+        // direct field-for-field equality check that the thin wrapper
+        // really is transparent, which is the whole point of P0.2's
+        // decision to delegate instead of restating the numbers.
+        let wrapped = PublishedCalibration::quantinuum_helios_2026();
+        let real = sirraya_qutub::xeb::HardwareCalibration::quantinuum_helios_2026();
+        assert_eq!(wrapped.name, real.name);
+        assert_eq!(wrapped.single_qubit_fidelity, real.single_qubit_fidelity);
+        assert_eq!(wrapped.two_qubit_fidelity, real.two_qubit_fidelity);
+    }
+
+    #[test]
+    fn depolarizing_probability_formula_matches_the_real_crate_for_arbitrary_fidelities() {
+        // Same formula, independently invoked on both sides, for a
+        // spread of fidelities and qubit counts -- not just the one
+        // pinned Quantinuum figure above.
+        for &fidelity in &[0.9, 0.99, 0.999975, 0.99921, 1.0, 0.5] {
+            for num_qubits in [1usize, 2usize] {
+                let ours = PublishedCalibration::fidelity_to_depolarizing_probability(
+                    fidelity, num_qubits,
+                );
+                let theirs = sirraya_qutub::xeb::HardwareCalibration::fidelity_to_depolarizing_probability(
+                    fidelity, num_qubits,
+                );
+                assert!(
+                    (ours - theirs).abs() < 1e-15,
+                    "fidelity {} num_qubits {}: ours {} vs theirs {}",
+                    fidelity, num_qubits, ours, theirs
+                );
+            }
         }
     }
 }

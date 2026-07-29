@@ -47,6 +47,7 @@
 
 use crate::coupling::CouplingMap;
 use crate::ir::{Circuit, Gate};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Routes `circuit` against `coupling`, returning a new [`Circuit`]
 /// with `Swap`s inserted wherever a two-qubit gate needed one, *and*
@@ -93,10 +94,11 @@ use crate::ir::{Circuit, Gate};
 ///   with its original argument order preserved, at the two now-adjacent
 ///   physical locations.
 /// - **Once every gate has been processed**, [`restore_identity_mapping`]
-///   runs a plain adjacent-transposition bubble sort over the
-///   remaining `physical -> logical` mapping, emitting one more `Swap`
-///   per adjacent transposition, until every qubit is back on its
-///   original wire.
+///   restores every qubit to its original physical wire via a
+///   general-graph-correct spanning-tree token-swap pass (see that
+///   function's own doc comment) -- not a linear-chain-only bubble
+///   sort, since `coupling` need not number consecutive physical
+///   qubits adjacently (e.g. `CouplingMap::heavy_hex_for`).
 ///
 /// Preserving argument order matters: `Gate::Cx(control, target)` is
 /// **not** symmetric (see `native.rs`'s `H`-sandwich decomposition), so
@@ -172,21 +174,38 @@ fn swap_mapping(
 }
 
 /// Sorts `physical_to_logical` back to the identity (`physical_to_logical[p]
-/// == p` for every `p`) using only adjacent transpositions -- a plain
-/// bubble sort -- appending one `Gate::Swap(p, p + 1)` to `out` per
-/// transposition performed. Adjacent-transposition bubble sort can
-/// restore *any* permutation to sorted order using only swaps of
-/// neighboring positions, so this always terminates at the identity
-/// regardless of how scattered the residual permutation from the main
-/// routing pass is.
+/// == p` for every `p`) using only coupling-adjacent swaps, via a
+/// general-graph-correct "token swapping" strategy -- **not** a linear
+/// bubble sort. The old implementation assumed physical qubits were
+/// numbered along a path where consecutive indices are always
+/// coupling-adjacent, which held for `CouplingMap::linear` but is false
+/// for `CouplingMap::heavy_hex_for`/`heavy_hex_grid` (a `debug_assert!`
+/// there would fire on real `IbmQ` circuits, not just a theoretical
+/// gap).
 ///
-/// This assumes physical qubits are numbered along a path where
-/// consecutive indices are coupling-adjacent -- true for every
-/// [`CouplingMap`] this crate constructs (`CouplingMap::linear`) --
-/// hence the `debug_assert!` rather than a runtime check: a future
-/// non-linear coupling map would need a different restoration strategy
-/// (e.g. per-qubit shortest-path token swapping), not just a relaxed
-/// assumption here.
+/// # Algorithm
+/// Token swapping (restoring an arbitrary permutation to the identity
+/// using only edge-adjacent swaps) is NP-hard to do with the *minimum*
+/// number of swaps on a general graph, but this pass only needs
+/// *correctness*, not swap-count optimality, and a connected graph
+/// always admits a solution: take an arbitrary spanning tree of
+/// `coupling` (its edges are a subset of the real coupling graph's, so
+/// every swap this emits is still a real hardware-adjacent swap), then
+/// repeatedly prune a leaf of the tree:
+/// - If the leaf already holds its own token (`physical_to_logical[leaf]
+///   == leaf`), it's already home -- remove it from the active set and
+///   move on. (Removing an already-fixed leaf from a tree always leaves
+///   a tree: this is the standard leaf-pruning invariant.)
+/// - Otherwise, find wherever (among the still-active vertices) the
+///   token whose home is `leaf` currently sits, and walk it to `leaf`
+///   one coupling-adjacent swap at a time along the *tree* path between
+///   them -- guaranteed to lie entirely within the active subtree, by
+///   the same invariant. `leaf` is now home and is removed.
+///
+/// Every tree with >= 2 nodes has at least one leaf (in fact at least
+/// two), so this always makes progress; with one active node left,
+/// it's necessarily already home (there's nowhere else for its token to
+/// be), so the loop naturally terminates at the identity.
 fn restore_identity_mapping(
     out: &mut Circuit,
     logical_to_physical: &mut [usize],
@@ -194,23 +213,104 @@ fn restore_identity_mapping(
     coupling: &CouplingMap,
 ) {
     let n = physical_to_logical.len();
-    loop {
-        let mut moved = false;
-        for p in 0..n.saturating_sub(1) {
-            if physical_to_logical[p] > physical_to_logical[p + 1] {
-                debug_assert!(
-                    coupling.is_adjacent(p, p + 1),
-                    "restore_identity_mapping assumes consecutive physical indices are adjacent"
-                );
-                out.push(Gate::Swap(p, p + 1));
-                swap_mapping(logical_to_physical, physical_to_logical, p, p + 1);
-                moved = true;
+    if n <= 1 {
+        return;
+    }
+
+    let tree = spanning_tree(coupling, n);
+    let mut active: HashSet<usize> = (0..n).collect();
+
+    while active.len() > 1 {
+        let leaf = *active
+            .iter()
+            .find(|&&v| active_degree(&tree, &active, v) <= 1)
+            .expect("a tree with >= 2 active nodes always has a leaf");
+
+        if physical_to_logical[leaf] != leaf {
+            let p = *active
+                .iter()
+                .find(|&&v| physical_to_logical[v] == leaf)
+                .expect("the token destined for `leaf` must be somewhere in the active set");
+            let path = tree_path_within(&tree, &active, p, leaf);
+            for hop in path.windows(2) {
+                let (u, v) = (hop[0], hop[1]);
+                out.push(Gate::Swap(u, v));
+                swap_mapping(logical_to_physical, physical_to_logical, u, v);
             }
         }
-        if !moved {
-            break;
+        active.remove(&leaf);
+    }
+}
+
+/// A BFS spanning tree of `coupling` restricted to vertices `0..n`,
+/// stored as an adjacency list. Every edge here is a real edge of
+/// `coupling` (a subset of it, not a superset), so any swap along a
+/// tree edge is a legal hardware-adjacent swap.
+fn spanning_tree(coupling: &CouplingMap, n: usize) -> HashMap<usize, Vec<usize>> {
+    let mut visited = vec![false; n];
+    let mut tree: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(0);
+    visited[0] = true;
+    while let Some(u) = queue.pop_front() {
+        for v in coupling.neighbors(u) {
+            if v < n && !visited[v] {
+                visited[v] = true;
+                tree.entry(u).or_default().push(v);
+                tree.entry(v).or_default().push(u);
+                queue.push_back(v);
+            }
         }
     }
+    tree
+}
+
+/// Number of `v`'s tree-neighbors that are still in `active`.
+fn active_degree(tree: &HashMap<usize, Vec<usize>>, active: &HashSet<usize>, v: usize) -> usize {
+    tree.get(&v)
+        .map(|nbrs| nbrs.iter().filter(|&&u| active.contains(&u)).count())
+        .unwrap_or(0)
+}
+
+/// Shortest (in fact only, since it's a tree) path from `start` to
+/// `goal` using only tree edges between currently-`active` vertices --
+/// always exists, since leaf-pruning keeps the active-induced subgraph
+/// of a tree connected.
+fn tree_path_within(
+    tree: &HashMap<usize, Vec<usize>>,
+    active: &HashSet<usize>,
+    start: usize,
+    goal: usize,
+) -> Vec<usize> {
+    if start == goal {
+        return vec![start];
+    }
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut predecessor: HashMap<usize, usize> = HashMap::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
+    while let Some(u) = queue.pop_front() {
+        if u == goal {
+            break;
+        }
+        if let Some(nbrs) = tree.get(&u) {
+            for &v in nbrs {
+                if active.contains(&v) && visited.insert(v) {
+                    predecessor.insert(v, u);
+                    queue.push_back(v);
+                }
+            }
+        }
+    }
+    let mut path = vec![goal];
+    let mut current = goal;
+    while current != start {
+        current = predecessor[&current];
+        path.push(current);
+    }
+    path.reverse();
+    path
 }
 
 fn remap_single(gate: &Gate, new_q: usize) -> Gate {
@@ -468,5 +568,51 @@ mod tests {
         let coupling = CouplingMap::linear(3);
         let routed = route(&c, &coupling);
         assert_eq!(routed.gates, c.gates, "no swaps should have been needed");
+    }
+
+    /// The P1.2 regression case: `CouplingMap::heavy_hex_for` (IbmQ's
+    /// real topology) has plenty of physical qubits whose consecutive
+    /// indices are *not* coupling-adjacent, which the old bubble-sort
+    /// `restore_identity_mapping` silently assumed. Every two-qubit
+    /// gate (including the restore swaps) must land on real edges, the
+    /// final mapping must be the identity, and the whole thing must
+    /// still act like the original circuit.
+    #[test]
+    fn restores_identity_on_a_heavy_hex_coupling_map() {
+        let coupling = CouplingMap::heavy_hex_for(12);
+        let mut c = Circuit::new(12);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 11))
+            .push(Gate::Rz(5, 0.42))
+            .push(Gate::Cp(2, 9, 1.3))
+            .push(Gate::Ryy(1, 8, 0.77))
+            .push(Gate::Cz(3, 10));
+
+        let routed = route(&c, &coupling);
+        for g in &routed.gates {
+            let qs = g.qubits();
+            if qs.len() == 2 {
+                assert!(
+                    coupling.is_adjacent(qs[0], qs[1]),
+                    "gate {:?} is not on a real heavy-hex edge",
+                    g
+                );
+            }
+        }
+
+        let mut logical_to_physical: Vec<usize> = (0..12).collect();
+        let mut physical_to_logical: Vec<usize> = (0..12).collect();
+        for g in &routed.gates {
+            if let Gate::Swap(a, b) = *g {
+                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+            }
+        }
+        assert_eq!(
+            logical_to_physical,
+            (0..12).collect::<Vec<_>>(),
+            "every qubit must be restored to its original physical wire on a heavy-hex map"
+        );
+
+        assert_routing_preserves_action(&c, &coupling);
     }
 }

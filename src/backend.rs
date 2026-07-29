@@ -660,17 +660,21 @@ impl Backend {
     /// doing anything else. `None` for `TrappedIon` -- a trapped-ion
     /// chain's shared motional mode makes every qubit pair directly
     /// reachable, so there's nothing to route (see `coupling.rs`'s
-    /// module doc). `IbmQ`/`Rigetti` both get a nearest-neighbor chain,
-    /// a deliberately conservative stand-in for their real (more
-    /// permissive) lattices -- see `coupling.rs` for why a line is safe
-    /// to route against even though it's not either device's literal
-    /// topology.
+    /// module doc).
+    ///
+    /// `IbmQ` routes against a real heavy-hex lattice
+    /// (`CouplingMap::heavy_hex_for`, P1.1) -- IBM's actual published
+    /// superconducting-device topology family, not a stand-in. `Rigetti`
+    /// still gets the conservative nearest-neighbor chain a line always
+    /// was for a more permissive real lattice -- see `coupling.rs` for
+    /// why that remains safe to route against for now, and why it's
+    /// separate future work to give Rigetti its own real grid topology
+    /// the way `IbmQ` just got heavy-hex.
     pub fn coupling_map(self, num_qubits: usize) -> Option<crate::coupling::CouplingMap> {
         match self {
             Backend::TrappedIon => None,
-            Backend::IbmQ | Backend::Rigetti => {
-                Some(crate::coupling::CouplingMap::linear(num_qubits))
-            }
+            Backend::IbmQ => Some(crate::coupling::CouplingMap::heavy_hex_for(num_qubits)),
+            Backend::Rigetti => Some(crate::coupling::CouplingMap::linear(num_qubits)),
         }
     }
 }
