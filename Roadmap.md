@@ -2019,3 +2019,854 @@ The architecture should evolve.
 The principles should remain clear.
 
 And every significant transformation should be explainable, testable, and grounded in the semantics of the quantum computation it transforms.
+
+# Glossary and Key Terms
+
+This glossary defines the terminology used throughout the Sirraya QuTub Transpiler architecture, roadmap, source code, documentation, issues, and contribution discussions.
+
+The purpose of this section is to establish a **shared technical vocabulary**. Terms used in this project should retain the meanings defined here unless a document explicitly states otherwise.
+
+---
+
+## A
+
+### Abstract Gate
+
+A gate expressed at the circuit-description level rather than directly in the native instruction set of a target backend.
+
+Examples include:
+
+```text
+H
+X
+CX
+SWAP
+RXX
+RYY
+```
+
+Abstract gates are convenient for circuit authors but may require decomposition before execution on a specific target.
+
+---
+
+### Backend
+
+A target-specific compilation layer responsible for translating an intermediate or native circuit into the gate set, connectivity model, and execution conventions of a particular quantum platform.
+
+A backend may define:
+
+* Native gates
+* Gate decomposition rules
+* Qubit topology
+* Coupling constraints
+* Parameter conventions
+* Measurement semantics
+* Execution interfaces
+* Hardware-specific optimization opportunities
+
+Conceptually:
+
+```text
+IR / Routed Circuit
+        ↓
+     Backend
+        ↓
+Target-specific circuit
+```
+
+---
+
+### Backend Lowering
+
+The process of transforming a circuit into the operations and conventions supported by a specific backend.
+
+Backend lowering is distinct from generic gate decomposition because a backend may have capabilities, restrictions, or native operations that are not universal across targets.
+
+---
+
+## C
+
+### Circuit
+
+An ordered collection of quantum operations acting on a defined set of qubits.
+
+In QuTub Transpiler, a circuit progresses through multiple representations during compilation rather than remaining in a single form from parsing to execution.
+
+---
+
+### Circuit IR
+
+See **Intermediate Representation (IR)**.
+
+---
+
+### Compilation
+
+The complete transformation process from a high-level circuit description to a validated circuit suitable for a target execution system.
+
+In QuTub, compilation is a multi-stage process rather than a single gate-rewriting operation.
+
+A simplified model is:
+
+```text
+Source
+  ↓
+Parse
+  ↓
+IR
+  ↓
+Source Optimization
+  ↓
+Routing
+  ↓
+Native Decomposition
+  ↓
+Backend Lowering
+  ↓
+Native Optimization
+  ↓
+Validation
+  ↓
+Execution / Simulation
+```
+
+---
+
+### Coupling Map
+
+A representation of which physical qubits can directly participate in two-qubit operations.
+
+For example:
+
+```text
+0 ─── 1 ─── 2 ─── 3
+```
+
+represents a linear topology.
+
+A logical two-qubit operation may require routing when its operands are not directly connected in the target coupling map.
+
+---
+
+### Compiler Pass
+
+A transformation or analysis stage operating on a circuit representation.
+
+Examples include:
+
+* Parsing
+* Source-level optimization
+* Routing
+* Gate decomposition
+* Backend lowering
+* Native optimization
+* Validation
+
+A pass should have a clearly defined input representation, output representation, invariants, and correctness expectations.
+
+---
+
+### Correctness Pass
+
+A compiler pass whose primary purpose is to ensure that a circuit satisfies a required structural or semantic property.
+
+Routing is an example: its primary responsibility is correctness with respect to target connectivity, even if future versions may introduce additional optimization objectives.
+
+---
+
+## D
+
+### Decomposition
+
+The replacement of a higher-level gate with a sequence of lower-level gates that implements the same quantum operation, subject to the project's equivalence definition.
+
+For example:
+
+```text
+H
+ ↓
+Rz + Ry
+```
+
+Decomposition should preserve the intended operation rather than merely producing a syntactically valid circuit.
+
+---
+
+### Dependency Boundary
+
+A deliberate architectural boundary between QuTub Transpiler and another component, such as `sirraya-qutub`.
+
+The transpiler should depend on stable public interfaces rather than unnecessarily coupling itself to private implementation details of its execution engine.
+
+---
+
+### Device Model
+
+A software representation of the capabilities and constraints of a target execution system.
+
+A device model may include:
+
+* Number of qubits
+* Coupling topology
+* Native gate set
+* Gate fidelities
+* Timing characteristics
+* Measurement behavior
+* Calibration information
+* Backend-specific restrictions
+
+---
+
+## E
+
+### Equivalence
+
+A statement that two circuits implement the same intended quantum transformation under a specified equivalence criterion.
+
+Possible criteria include:
+
+* Exact unitary equivalence
+* Global-phase equivalence
+* State fidelity
+* Measurement-distribution equivalence
+* Backend-specific semantic equivalence
+
+The exact criterion must be explicit when correctness depends on it.
+
+---
+
+### Execution Layer
+
+The portion of the system responsible for applying a compiled circuit to an execution target.
+
+For QuTub, this may include simulation through `sirraya-qutub` as well as future execution interfaces.
+
+---
+
+## F
+
+### Fidelity
+
+A quantitative measure used to compare quantum states or operations.
+
+Within QuTub, fidelity is also used as part of compiler validation and hardware-aware estimation.
+
+A fidelity value close to:
+
+```text
+1.0
+```
+
+indicates strong agreement under the chosen fidelity definition.
+
+Fidelity must not automatically be interpreted as proof of equivalence; the appropriate correctness criterion depends on the transformation being tested.
+
+---
+
+### Fidelity Estimation
+
+An analytical or model-based prediction of expected circuit fidelity based on gate errors, circuit structure, and device characteristics.
+
+This is different from experimentally measuring the fidelity of an executed circuit.
+
+---
+
+## G
+
+### Gate
+
+A quantum operation acting on one or more qubits.
+
+QuTub distinguishes between gates at different abstraction levels.
+
+For example:
+
+```text
+High-level:
+    CX
+
+Native:
+    Rz
+    Ry
+    Rzz
+```
+
+---
+
+### Gate Identity
+
+A mathematically established relationship between quantum gates or sequences of gates.
+
+For example:
+
+```text
+High-level operation
+        ↓
+Equivalent gate sequence
+```
+
+Gate identities are foundational to decomposition and optimization.
+
+In QuTub, important identities should be supported by executable tests whenever practical.
+
+---
+
+### Gate Set
+
+The collection of quantum operations permitted at a particular compilation stage.
+
+Examples:
+
+```text
+Source gate set
+    H, X, Y, Z, CX, SWAP, RXX, RYY, ...
+
+Native gate set
+    Rz, Ry, Rzz
+```
+
+---
+
+## H
+
+### Hardware Calibration
+
+A collection of measured or published characteristics describing how accurately a target execution system performs quantum operations.
+
+Calibration data may include:
+
+* Single-qubit gate fidelity
+* Two-qubit gate fidelity
+* Readout error
+* Coherence information
+* Gate duration
+* Connectivity
+* Other device-specific parameters
+
+Calibration is inherently time-dependent for real hardware.
+
+---
+
+### Hardware-Aware Compilation
+
+Compilation that considers the physical properties and limitations of a target device rather than treating the machine as an abstract collection of unlimited qubits and gates.
+
+Examples include:
+
+* Routing against physical connectivity
+* Native-gate selection
+* Calibration-aware gate selection
+* Fidelity estimation
+* Hardware-specific optimization
+
+---
+
+## I
+
+### Intermediate Representation (IR)
+
+A structured representation of a circuit used internally by the compiler.
+
+The IR separates circuit meaning from the syntax used to express it.
+
+For example:
+
+```text
+OpenQASM
+   ↓
+Parser
+   ↓
+Circuit IR
+   ↓
+Compiler passes
+```
+
+The IR is one of the most important architectural boundaries in QuTub.
+
+---
+
+### Invariant
+
+A property that must remain true before and after a compiler pass.
+
+Examples include:
+
+* Qubit indices remain valid
+* Measurements remain semantically correct
+* Gate parameters remain well-defined
+* Equivalent transformations preserve circuit semantics
+* A routed circuit satisfies its coupling constraints
+
+Every significant compiler pass should have explicitly understood invariants.
+
+---
+
+## L
+
+### Logical Qubit
+
+A qubit as understood by the circuit author or source program.
+
+Logical qubits are independent of the physical layout of a target device.
+
+Example:
+
+```text
+Logical:
+q0 ─── q1
+```
+
+may eventually map to:
+
+```text
+Physical:
+q3 ─── q4
+```
+
+---
+
+### Lowering
+
+A transformation from a higher-level representation into a lower-level representation with fewer assumptions and more explicit execution details.
+
+QuTub may perform multiple lowering stages:
+
+```text
+Source
+  ↓
+IR
+  ↓
+Routed IR
+  ↓
+Native representation
+  ↓
+Backend representation
+```
+
+---
+
+## M
+
+### Measurement
+
+An operation that extracts classical information from a quantum state.
+
+Measurement is fundamentally different from unitary gate operations because it can collapse the quantum state.
+
+Consequently, transformations involving measurement require special correctness reasoning and cannot always be validated using ordinary state-vector fidelity.
+
+---
+
+### Native Gate
+
+A gate directly supported by the target execution model without requiring further generic decomposition.
+
+For a particular QuTub target configuration, the native gate set may include:
+
+```text
+Rz
+Ry
+Rzz
+```
+
+Native gates are target-dependent.
+
+---
+
+### Native Circuit
+
+A circuit expressed primarily in the native gate set expected by the execution layer or backend.
+
+A native circuit is generally much closer to executable form than a source-level circuit.
+
+---
+
+### Native Optimization
+
+Optimization performed after a circuit has been lowered toward its target native representation.
+
+Typical operations include:
+
+* Adjacent rotation merging
+* Cancellation
+* Redundant operation removal
+* Backend-specific peephole transformations
+
+Native optimization should preserve the semantic guarantees established by earlier compiler stages.
+
+---
+
+## O
+
+### OpenQASM
+
+An open quantum assembly language used to represent quantum circuits.
+
+QuTub currently provides support for a deliberately defined OpenQASM 2.0 subset rather than attempting to accept every possible extension or dialect.
+
+Unsupported constructs should produce explicit errors rather than being silently ignored.
+
+---
+
+### Optimization
+
+A transformation intended to improve some measurable property of a circuit without changing its intended behavior.
+
+Possible objectives include:
+
+* Fewer gates
+* Fewer two-qubit gates
+* Lower estimated error
+* Lower circuit depth
+* Lower routing overhead
+* Lower execution time
+* Better backend compatibility
+
+Optimization is therefore **objective-dependent**.
+
+A transformation that reduces gate count is not necessarily an improvement if it increases error or depth.
+
+---
+
+## P
+
+### Parse
+
+The process of converting a textual circuit representation, such as OpenQASM, into a structured internal representation.
+
+```text
+Source text
+    ↓
+Lexer / Parser
+    ↓
+Circuit IR
+```
+
+A parser should reject unsupported or malformed input explicitly.
+
+---
+
+### Pass Pipeline
+
+The ordered sequence of compiler passes through which a circuit travels.
+
+QuTub's architectural model can be expressed as:
+
+```text
+Parse
+  ↓
+Source IR
+  ↓
+Source Optimization
+  ↓
+Routing
+  ↓
+Native Decomposition
+  ↓
+Backend Lowering
+  ↓
+Native Optimization
+  ↓
+Validation
+  ↓
+Execution
+```
+
+The ordering of passes matters because later passes may rely on invariants established by earlier passes.
+
+---
+
+## Q
+
+### Quantum Circuit
+
+A sequence of quantum operations acting on qubits and, where applicable, producing classical measurement results.
+
+---
+
+### Quantum Register
+
+A representation of the quantum state of a collection of qubits.
+
+Within the QuTub ecosystem, `QuantumRegister` is used as an execution and validation reference for circuit transformations.
+
+---
+
+### Qubit
+
+The fundamental quantum information unit used by the circuit model.
+
+QuTub distinguishes between **logical qubits** and **physical qubits** when routing and hardware constraints are involved.
+
+---
+
+### QASM
+
+Short for Quantum Assembly Language.
+
+In this project, the term commonly refers to OpenQASM 2.0 input or generated circuit output.
+
+---
+
+## R
+
+### Routing
+
+The process of mapping logical qubits and two-qubit operations onto the physical connectivity of a target device.
+
+If two logical qubits cannot directly interact on the target topology, routing may insert operations such as:
+
+```text
+SWAP
+```
+
+to move their physical locations.
+
+Routing is therefore a **correctness-critical transformation**, not merely an optimization.
+
+---
+
+### Remapping
+
+The tracking or transformation of the relationship between logical and physical qubits during routing.
+
+A remapping may change as SWAP operations are inserted.
+
+The compiler must maintain this mapping consistently throughout the routing process.
+
+---
+
+### Representation
+
+A particular structural form of a circuit at a specific compiler stage.
+
+Examples:
+
+```text
+QASM text
+Source IR
+Routed IR
+Native Circuit
+Backend Circuit
+Executable Circuit
+```
+
+A compiler pass should document the representation it expects and produces.
+
+---
+
+## S
+
+### Semantic Preservation
+
+The requirement that a compiler transformation retain the intended meaning of the original circuit.
+
+This is the central correctness requirement of compilation.
+
+Optimization and lowering are valid only when the required semantics are preserved.
+
+---
+
+### Source Optimization
+
+Optimization performed while the circuit still exists in a relatively high-level representation.
+
+Examples include:
+
+* Cancellation
+* Reordering
+* Redundant operation removal
+* Gate-level simplification
+
+Source optimization should avoid assuming target-specific properties unless those properties are explicitly part of the pass's contract.
+
+---
+
+### State Fidelity
+
+A measure of similarity between two quantum states.
+
+In QuTub testing, fidelity can provide a powerful numerical check for many gate decomposition identities.
+
+For example:
+
+```text
+(fidelity - 1.0).abs() < tolerance
+```
+
+However, state fidelity is not appropriate for every operation, particularly measurements.
+
+---
+
+### SWAP Insertion
+
+The insertion of SWAP operations during routing to satisfy physical connectivity constraints.
+
+Example:
+
+```text
+Before:
+
+q0 ───────────── q2
+       cannot interact
+
+After routing:
+
+q0 ──SWAP── q1 ── operation ── q2
+```
+
+The exact implementation depends on the coupling map and routing strategy.
+
+---
+
+## T
+
+### Target
+
+The execution system for which a circuit is being compiled.
+
+A target may represent:
+
+* A simulator
+* A quantum processor
+* A hardware architecture
+* A specific backend configuration
+
+---
+
+### Target Gate Set
+
+The gate set accepted by the target at a particular compilation boundary.
+
+This may be synonymous with the native gate set for simple targets, but the concepts are not always identical.
+
+---
+
+### Transpilation
+
+The transformation of a quantum circuit from one representation or gate language into another while preserving its intended behavior.
+
+QuTub Transpiler uses the term broadly to include parsing, routing, decomposition, lowering, optimization, and validation.
+
+---
+
+## V
+
+### Validation
+
+The process of establishing that a transformed circuit satisfies the correctness requirements of a compiler pass.
+
+Validation can include:
+
+* Mathematical identities
+* Exact unitary comparison
+* State fidelity
+* Measurement statistics
+* Randomized testing
+* Property-based testing
+* Regression tests
+* Backend constraints
+* Structural invariants
+
+Validation is distinct from testing: testing is one mechanism through which validation is performed.
+
+---
+
+### Virtual Qubit
+
+A software-level representation of a qubit before it is assigned to a physical location.
+
+In many compiler architectures, this is effectively synonymous with logical qubit, although terminology may vary by backend.
+
+---
+
+## Compiler Pipeline Vocabulary
+
+The following terms describe the major architectural stages of QuTub.
+
+| Stage               | Purpose                                            | Typical Representation |
+| ------------------- | -------------------------------------------------- | ---------------------- |
+| Parse               | Convert source text into structured data           | OpenQASM → IR          |
+| Source IR           | Represent circuit semantics                        | Abstract circuit       |
+| Source Optimization | Simplify high-level operations                     | Optimized IR           |
+| Routing             | Satisfy physical connectivity                      | Routed IR              |
+| Decomposition       | Replace abstract gates with lower-level operations | Native-oriented IR     |
+| Backend Lowering    | Adapt to target-specific requirements              | Backend circuit        |
+| Native Optimization | Optimize executable operations                     | Native circuit         |
+| Validation          | Verify correctness and constraints                 | Validated circuit      |
+| Execution           | Run or simulate the circuit                        | Execution target       |
+
+---
+
+## Architectural Distinctions
+
+Several concepts are intentionally kept separate in QuTub.
+
+### Decomposition vs. Optimization
+
+**Decomposition** answers:
+
+> How can this operation be expressed using the available lower-level operations?
+
+**Optimization** answers:
+
+> Given an equivalent circuit, can we make it better according to a defined objective?
+
+These should not be treated as interchangeable.
+
+---
+
+### Routing vs. Optimization
+
+**Routing** answers:
+
+> Can this circuit physically execute on the target topology?
+
+**Optimization** answers:
+
+> Can we execute it more efficiently?
+
+A routing pass may initially prioritize correctness over minimizing SWAP count. Optimization can subsequently improve the resulting circuit.
+
+---
+
+### Native Gate vs. Backend Gate
+
+A **native gate** is an operation directly supported by an execution model.
+
+A **backend gate** may additionally encode target-specific conventions, constraints, or semantics.
+
+The distinction becomes increasingly important as QuTub supports more heterogeneous execution targets.
+
+---
+
+### Fidelity Estimation vs. Fidelity Validation
+
+**Fidelity estimation** predicts expected performance based on an error model.
+
+**Fidelity validation** compares actual or simulated quantum states to determine whether a transformation preserved the intended operation.
+
+These are different measurements serving different purposes.
+
+---
+
+### Logical Qubit vs. Physical Qubit
+
+A **logical qubit** exists in the programmer's circuit.
+
+A **physical qubit** exists in the target device or device model.
+
+Routing establishes and maintains the mapping between them.
+
+---
+
+## Core Design Principle
+
+The following principle should guide future architectural decisions:
+
+> **Every transformation must make its assumptions explicit, preserve the required semantics, and expose enough structure for the next compiler stage to reason about correctness.**
+
+QuTub is not simply a collection of gate rewrite rules. It is a compiler system whose long-term reliability depends on clear representations, explicit invariants, mathematically defensible transformations, reproducible validation, and well-defined boundaries between compilation stages.
+
+When introducing a new architectural concept, prefer terminology that fits this vocabulary. If a new term becomes important enough to appear repeatedly in source code, issues, architecture documents, or contributor discussions, consider adding it to this glossary.
+
