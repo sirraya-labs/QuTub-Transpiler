@@ -144,8 +144,7 @@ Two cleanup passes run in this module, to a fixed point:
 `Backend::coupling_map` is what ties this module to `coupling.rs`/
 `route.rs`: `None` for `TrappedIon` (a trapped-ion chain's shared motional
 mode makes every pair directly reachable), `heavy_hex_for` for `IbmQ`
-(P1.1), still a conservative `linear` chain for `Rigetti` (safe stand-in
-for its real, more-permissive grid — see below).
+(P1.1), `square_grid_for` for `Rigetti` (P1.3) — see below.
 
 **Deliberately not here:** `Backend::Pasqal`. Neutral-atom platforms need
 atom *placement* and blockade-radius routing, not just "express this
@@ -157,9 +156,9 @@ not a shortcut.
 ### `coupling.rs` — physical qubit connectivity
 `CouplingMap` models which physical qubits a backend's native two-qubit
 gate can be applied to directly.
-- `linear(n)` — a chain, `q` adjacent only to `q+1`. Used for `Rigetti`
-  (conservative: routing that succeeds against a line succeeds against the
-  real, more permissive grid too).
+- `linear(n)` — a chain, `q` adjacent only to `q+1`. No longer used by any
+  `Backend` (see below), but kept as the topology-free stand-in for the
+  0/1-qubit case both real-topology constructors fall back on.
 - `heavy_hex_grid(rows, cols)` / `heavy_hex_for(n)` — **(P1.1)** the real
   heavy-hex lattice family IBM's superconducting processors (Eagle, Heron,
   …) actually use: a hexagonal lattice of degree-≤3 "data" qubits with a
@@ -168,6 +167,14 @@ gate can be applied to directly.
   exactly `n` — guaranteed connected, since a BFS prefix of a connected
   graph always is. This is the actual topology family, not a claim about
   any specific chip's exact qubit numbering.
+- `square_grid(rows, cols)` / `square_grid_for(n)` — **(P1.3)** the real
+  square-lattice family Rigetti's current Ankaa-class processors (Ankaa-2,
+  Ankaa-3) actually use: a plain rectangular grid, interior qubits with
+  four-fold connectivity (edges 3, corners 2) — *not* the square-octagonal
+  unit cell of Rigetti's earlier Aspen generation. `square_grid_for(n)`
+  finds the smallest square grid with ≥ `n` qubits and takes the same kind
+  of BFS-order prefix `heavy_hex_for` does, for the same connectivity
+  guarantee.
 - `neighbors(q)` — **(P1.2)** adjacency-list access, added so `route.rs`
   can build a spanning tree of the graph. (`is_adjacent` only answers a
   yes/no for one pair; `shortest_path` is point-to-point; neither gives you
@@ -332,4 +339,3 @@ held to this crate's standard.
 [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup instructions, test
 commands, coding conventions, and PR checklist — this document is
 reference material for *what's here and why*, not a how-to.
-
