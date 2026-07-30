@@ -67,7 +67,6 @@ Ryy
 Rzz
 SWAP
 Controlled-phase
-Measure
 ```
 
 while the execution layer may expose only a smaller calibrated native set.
@@ -154,11 +153,9 @@ creg c[2];
 
 h q[0];
 cx q[0], q[1];
-measure q[0] -> c[0];
-measure q[1] -> c[1];
-```
 
-Full measurement support is included: `measure` statements are parsed, routed, lowered, and executed with Born-rule sampling.
+measure q -> c;
+```
 
 The parser is intentionally strict.
 
@@ -173,14 +170,12 @@ This is particularly important for compiler infrastructure: silently dropping an
 The core native decomposition basis is:
 
 ```text
-{ Rz, Ry, Rzz, Measure }
+{ Rz, Ry, Rzz }
 ```
 
 Single-qubit gates are synthesized through exact rotation identities, including ZYZ-style Euler decomposition.
 
 Two-qubit operations are reduced through exact constructions based on `Rzz` and basis changes.
-
-`Measure` is carried through the entire pipeline unchanged: it is not a unitary rewrite target, and it is never priced as a unitary gate in fidelity estimates.
 
 Conceptually:
 
@@ -190,15 +185,12 @@ flowchart TD
 
     B -->|"Single-qubit"| C["Euler / basis decomposition"]
     B -->|"Two-qubit"| D["Entangling identity"]
-    B -->|"Measure"| E["Pass through unchanged"]
     
-    C --> F["Rz + Ry"]
-    D --> G["Rzz + single-qubit rotations"]
-    E --> H["Measure"]
+    C --> E["Rz + Ry"]
+    D --> F["Rzz + single-qubit rotations"]
 
-    F --> I["Native circuit"]
-    G --> I
-    H --> I
+    E --> G["Native circuit"]
+    F --> G
 ```
 
 The native basis is chosen to match the operations for which the downstream execution model provides calibrated fidelity information.
@@ -298,23 +290,9 @@ flowchart LR
     F --> D
 ```
 
-The coupling-map abstraction currently supports the following real hardware topologies:
-
-* **Linear**: General-purpose fallback
-* **Heavy-Hex**: IBM superconducting processors (Eagle, Heron, ...)
-* **Square Grid**: Rigetti Ankaa-class processors (Ankaa-2, Ankaa-3)
+The coupling-map abstraction currently supports hardware connectivity models such as linear and heavy-hex-style topologies.
 
 Routing is primarily a **correctness transformation** at present rather than a globally optimal SWAP minimizer.
-
-## Lookahead routing
-
-The transpiler includes a SABRE-inspired lookahead routing strategy for improved SWAP performance on complex circuits:
-
-- **Initial layout selection**: Places heavily-interacting qubits close together
-- **Front-layer execution**: Executes reachable gates immediately
-- **Lookahead scoring**: Scores candidate SWAPs by total front-layer distance plus decayed lookahead
-
-The lookahead router can significantly reduce SWAP counts on circuits with multiple interacting qubit pairs.
 
 ---
 
@@ -330,62 +308,13 @@ flowchart TD
     B --> C["Routing / decomposition"]
     C --> D{"Target backend"}
 
-    D --> E["Trapped Ion / Rz-Ry-Rzz"]
-    D --> F["IBM Heavy-Hex"]
-    D --> G["Rigetti Square Grid"]
+    D --> E["Sirraya / Rz-Ry-Rzz"]
+    D --> F["IBM-style backend"]
+    D --> G["Rigetti-style backend"]
+    D --> H["Trapped-ion backend"]
 ```
 
-The following hardware backends are supported with real topologies and native gate sets:
-
-| Backend | Native Gates | Topology |
-|---------|--------------|----------|
-| **Trapped Ion** | `{Rz, Ry, Rzz}` | All-to-all |
-| **IBM** | `{Rz, Rx, Cx}` | Heavy-Hex |
-| **Rigetti** | `{Rz, Rx, Cz}` | Square Grid |
-
-This allows the same circuit representation and compiler infrastructure to be reused while backend-specific native gate constraints and connectivity models remain isolated.
-
----
-
-# Circuit Visualization
-
-The transpiler includes a built-in visualization module for inspecting circuits at every stage of compilation.
-
-```mermaid
-flowchart LR
-    A["Source IR"] --> B["ASCII Diagram"]
-    A --> C["SVG Diagram"]
-    D["Native Circuit"] --> B
-    D --> C
-    E["Backend Circuit"] --> B
-    E --> C
-```
-
-Both ASCII and SVG output are supported, with:
-
-- Proper multi-qubit layout
-- Gate boxes with labels
-- CNOT connections (control dot + vertical line + target)
-- Measurement display
-- Qubit wire tracking
-- Column alignment
-
-Example:
-
-```rust
-use sirraya_qutub_transpiler::viz;
-
-let circuit = qasm::parse(source)?;
-
-// Generate ASCII diagram
-println!("{}", viz::render_ascii(&circuit));
-
-// Generate SVG diagram
-let svg = viz::render_svg(&circuit);
-std::fs::write("circuit.svg", svg)?;
-```
-
-This makes it easy to debug circuits, generate documentation, and produce publication-quality diagrams.
+This allows the same circuit representation and compiler infrastructure to be reused while backend-specific native gate constraints remain isolated.
 
 ---
 
@@ -445,8 +374,6 @@ flowchart LR
 
 This allows the same compiled circuit to be used for both simulation and serialization.
 
-For circuits containing measurements, `emit::run_with_measurement` executes real Born-rule-sampled projective measurements and returns classical outcomes.
-
 ---
 
 # Installation
@@ -480,9 +407,10 @@ Example:
 
 ```rust
 use sirraya_qutub_transpiler::{
-    backend::{lower, Backend},
-    fidelity::estimate_backend_circuit_fidelity,
-    qasm,
+    fidelity::estimate_circuit_fidelity,
+    gate_decomposition::decompose_circuit,
+    QasmParser,
+    Transpiler,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -495,25 +423,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         h q[0];
         cx q[0], q[1];
-        measure q[0] -> c[0];
-        measure q[1] -> c[1];
+        measure q -> c;
     "#;
 
     // Parse OpenQASM 2.0 into the compiler IR.
-    let circuit = qasm::parse(qasm)?;
+    let circuit = QasmParser::parse(qasm)?;
 
-    // Lower to IBM's native gate set.
-    let bc = lower(&circuit, Backend::IbmQ);
+    // Lower into the native gate basis.
+    let decomposed = decompose_circuit(&circuit);
+
+    // Apply native-level optimization.
+    let optimized = Transpiler::optimize(&decomposed);
 
     // Estimate circuit fidelity.
-    let cal = Backend::IbmQ.calibration();
-    let fidelity = estimate_backend_circuit_fidelity(&bc, &cal);
+    let fidelity = estimate_circuit_fidelity(&optimized);
 
     println!("Estimated fidelity: {:.2}%", fidelity * 100.0);
-
-    // Execute and get measurement results.
-    let (state, results) = emit::run_with_measurement(&bc, 1024)?;
-    println!("Measurement results: {:?}", results);
 
     Ok(())
 }
@@ -533,7 +458,7 @@ Run:
 cargo run --example full_pipeline
 ```
 
-This demonstrates the complete transformation from input circuit through compilation, execution, and QASM emission.
+This demonstrates the complete transformation from input circuit through compilation and execution.
 
 ## Gate decomposition reference
 
@@ -645,6 +570,37 @@ The release process validates the transpiler against the actual `sirraya-qutub` 
 
 ---
 
+# Performance and fidelity model
+
+The transpiler can estimate the effect of accumulated gate errors on larger circuits.
+
+The following example uses the documented calibration parameters:
+
+```text
+Single-qubit error:  5 × 10⁻⁵
+Two-qubit error:     1.05 × 10⁻³
+```
+
+For a GHZ preparation workload, the estimated behavior scales approximately as follows:
+
+| Qubits | Two-qubit operations | Estimated fidelity |
+| -----: | -------------------: | -----------------: |
+|      2 |                    1 |             99.85% |
+|      4 |                    3 |             99.58% |
+|      8 |                    7 |             99.05% |
+|     16 |                   15 |             97.98% |
+|     32 |                   31 |             95.88% |
+|     64 |                   63 |             91.81% |
+|     98 |                   97 |             87.68% |
+
+The 98-qubit case corresponds to the stated full-width qubit count of Quantinuum Helios and represents a deliberately demanding scenario: a GHZ preparation requires `n - 1` sequential two-qubit entangling operations.
+
+These values are **model-based estimates**, not experimental benchmark results.
+
+* Compile successfully
+* Produce valid native gates
+* Pass superficial structural checks
+
 # Repository relationship
 
 `sirraya-qutub-transpiler` is intentionally maintained as a separate Rust package from `sirraya-qutub`.
@@ -722,10 +678,7 @@ sirraya-qutub-transpiler/
 │   ├── native.rs
 │   ├── optimize.rs
 │   ├── qasm.rs
-│   ├── route.rs
-│   └── viz/
-│       ├── ascii.rs
-│       └── svg.rs
+│   └── route.rs
 │
 ├── tests/
 │   ├── decompositions.rs
@@ -859,4 +812,3 @@ flowchart TD
 The objective is straightforward:
 
 > **Transform quantum circuits without losing their meaning.**
-```
