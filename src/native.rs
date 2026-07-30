@@ -336,3 +336,42 @@ fn decompose_cp(nc: &mut NativeCircuit, a: usize, b: usize, lambda: f64) {
         nc.push(NativeGate::Rzz(a, b, -phi));
     }
 }
+/// Returns true if `a` and `b` are the same single-qubit unitary up to
+/// an unobservable global phase. Used by this module's own ZYZ tests,
+/// and reused crate-wide (see `ibm_export.rs`) by anything that proves
+/// a gate-decomposition identity by multiplying matrices back together
+/// and checking the product against a known-correct target -- the same
+/// kind of check this module's decompositions are already verified
+/// against in `tests/decompositions.rs`, just made reusable instead of
+/// re-implemented per module.
+pub(crate) fn approx_eq_up_to_global_phase(a: Mat2, b: Mat2) -> bool {
+    let mut phase: Option<C> = None;
+    'outer: for row in 0..2 {
+        for col in 0..2 {
+            if b[row][col].abs() > 1e-9 {
+                let inv_mag_sq = 1.0 / (b[row][col].abs() * b[row][col].abs());
+                let conj = C::new(b[row][col].re, -b[row][col].im);
+                phase = Some(C::new(inv_mag_sq, 0.0) * (a[row][col] * conj));
+                break 'outer;
+            }
+        }
+    }
+    let phase = match phase {
+        Some(p) => p,
+        // `b` is the zero matrix (never a real unitary in practice,
+        // but mathematically "equal up to phase" to anything).
+        None => return true,
+    };
+    if (phase.abs() - 1.0).abs() > 1e-6 {
+        return false;
+    }
+    for row in 0..2 {
+        for col in 0..2 {
+            let rhs = phase * b[row][col];
+            if (a[row][col].re - rhs.re).abs() > 1e-6 || (a[row][col].im - rhs.im).abs() > 1e-6 {
+                return false;
+            }
+        }
+    }
+    true
+}
