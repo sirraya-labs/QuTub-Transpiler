@@ -1,4 +1,4 @@
-# sirraya-qutub-transpiler
+# `sirraya-qutub-transpiler`
 
 [![Crates.io](https://img.shields.io/crates/v/sirraya-qutub-transpiler.svg)](https://crates.io/crates/sirraya-qutub-transpiler)
 [![Documentation](https://docs.rs/sirraya-qutub-transpiler/badge.svg)](https://docs.rs/sirraya-qutub-transpiler)
@@ -9,7 +9,7 @@ A QASM 2.0 importer and multi-backend native-gate compiler for quantum circuits 
 
 ---
 
-## Overview
+## What it does
 
 The transpiler provides a complete pipeline from a high-level circuit description through to execution:
 
@@ -26,18 +26,49 @@ The crate depends on [`sirraya-qutub`](https://crates.io/crates/sirraya-qutub) d
 
 ---
 
-## Installation
+# Why this crate exists
 
-Add this to your `Cargo.toml`:
+Quantum algorithms are usually described using a convenient, hardware-independent gate vocabulary.
 
-```toml
-[dependencies]
-sirraya-qutub-transpiler = "0.1.0"
+Hardware and calibrated simulators are not.
+
+A circuit may naturally contain:
+
+```text
+H
+CX
+T
+Rx
+Ry
+Rz
+Rxx
+Ryy
+Rzz
+SWAP
+Controlled-phase
 ```
+
+while the execution layer may expose only a smaller calibrated native set.
+
+The transpiler provides the boundary between those two worlds.
+
+```mermaid
+flowchart LR
+    A["Algorithm / QASM<br/>Hardware-independent"] --> B["Transpiler"]
+    B --> C["Native Circuit"]
+    C --> D["Calibrated execution model"]
+    D --> E["sirraya-qutub<br/>QuantumRegister"]
+```
+
+This separation is intentional.
+
+The [`sirraya-qutub`](https://crates.io/crates/sirraya-qutub) simulator is responsible for quantum-state simulation and calibrated execution behavior.
+
+This crate is responsible for **transforming and validating circuits before execution**.
 
 ---
 
-## Pipeline
+# Architecture
 
 ```mermaid
 flowchart TD
@@ -112,7 +143,9 @@ Bridges an `IbmQ`-lowered `BackendCircuit` to the exact basis gates IBM hardware
 
 ---
 
-## Usage Examples
+# Quick start
+
+A complete example can be built from three stages:
 
 ### Basic Pipeline (trapped-ion target)
 
@@ -200,7 +233,18 @@ The circuit is submitted with `optimization_level=0`: routing and native-gate lo
 
 ---
 
-## Supported Gates
+# Performance and fidelity model
+
+The transpiler can estimate the effect of accumulated gate errors on larger circuits.
+
+The following example uses the documented calibration parameters:
+
+```text
+Single-qubit error:  5 × 10⁻⁵
+Two-qubit error:     1.05 × 10⁻³
+```
+
+For a GHZ preparation workload, the estimated behavior scales approximately as follows:
 
 Native decomposition costs below are for the trapped-ion `{Rz, Ry, Rzz}` target (`native.rs`). Lowering the same source gate to `IbmQ`/`Rigetti` (`backend.rs`) re-expresses this canonical form in terms of that backend's own native two-qubit gate, at the costs noted.
 
@@ -232,7 +276,7 @@ Every two-qubit source gate costs exactly 2 native two-qubit gates once lowered 
 
 ---
 
-## Testing
+# Design principles
 
 Every decomposition identity is validated against `sirraya_qutub::core::QuantumRegister` directly — the test suite builds circuits, applies gates both directly and through the decomposed/lowered/optimized pipeline, and compares state fidelity or exact matrix equality (up to global phase). This covers the ZYZ synthesizer's branch-ambiguous angle extraction, every backend's routing and lowering path, the peephole optimizer's commuting-gate cases, and the IBM export module's `Rot → Rz/Sx` identity (independently derived and checked numerically across a spread of angles before being pinned down as a regression test).
 
@@ -246,31 +290,75 @@ All tests run against the real `sirraya-qutub` crate pulled from crates.io — n
 
 ---
 
-## Repository Relationship
+# Documentation
 
-This crate is maintained as a **separate package** with an ordinary crates.io version dependency on `sirraya-qutub`, not folded into a workspace. This allows independent versioning and release cycles while maintaining a clear dependency boundary.
+| Resource                                                         | Purpose                                                          |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------- |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)                             | Compiler architecture, mathematical identities, design decisions |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md)                             | Development workflow and contribution guidelines                 |
+| [`docs.rs`](https://docs.rs/sirraya-qutub-transpiler)            | Rust API documentation                                           |
+| [`crates.io`](https://crates.io/crates/sirraya-qutub-transpiler) | Published package and release information                        |
 
 ---
 
-## Contributing
+# Ecosystem
 
 Contributions are welcome. Please ensure:
 
-1. All tests pass (`cargo test`)
-2. Documentation is updated for any new features
-3. Examples are provided for significant additions
-4. Breaking changes are clearly communicated
+```mermaid
+flowchart TD
+    A["Quantum Algorithm"] --> B["OpenQASM / Circuit IR"]
+
+    B --> C["sirraya-qutub-transpiler"]
+
+    C --> D["Parsing"]
+    C --> E["Optimization"]
+    C --> F["Routing"]
+    C --> G["Native decomposition"]
+    C --> H["Backend lowering"]
+
+    D --> I["Native Circuit"]
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+
+    I --> J["sirraya-qutub"]
+
+    J --> K["QuantumRegister"]
+    K --> L["Simulation / Execution"]
+```
+
+This separation allows the compiler layer to evolve independently from the underlying quantum simulation and execution engine.
 
 ---
 
-## License
+# License
 
-This project is licensed under:
+Licensed under:
 
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
+* [MIT License](LICENSE-MIT)
 
 ---
 
-## Authors
+## Sirraya QuTub Transpiler
+
+A compiler boundary between **how a quantum circuit is described** and **how its target execution system can actually run it**.
+
+```mermaid
+flowchart TD
+    A["High-level quantum circuit"] --> B["Parse / IR"]
+    B --> C["Source optimization"]
+    C --> D["Routing"]
+    D --> E["Native decomposition"]
+    E --> F["Backend lowering"]
+    F --> G["Native optimization"]
+    G --> H["Validated native circuit"]
+    H --> I["Simulation / execution"]
+
+    style A stroke-width:2px
+    style H stroke-width:2px
+    style I stroke-width:2px
+```
 
 **Sirraya Labs** — [amir@sirraya.org](mailto:amir@sirraya.org)
