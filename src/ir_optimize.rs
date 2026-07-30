@@ -9,23 +9,58 @@
 //!
 //! The base commutation rule is the universally true one: **two gates
 //! with disjoint qubit sets commute**, unconditionally, because they
-//! act on different tensor factors. On top of that, exactly one
-//! gate-specific rule is implemented: **`Rz(q)` commutes through
-//! `Cx(control, target)` when `q == control`, but not when
-//! `q == target`** -- `Cx` is diagonal in its control's computational
-//! basis (`|0><0| (x) I + |1><1| (x) X`), and `Rz` is diagonal, so the
-//! two act as commuting (simultaneously diagonalizable, on the control
-//! factor) operators; the target wire carries the actual `X`, which
-//! does not commute with a target-side `Rz`. This is the same
-//! distinction `backend.rs`'s native-level peephole pass already
-//! implements and tests (`optimize_floats_rz_through_cx_control_wire`
-//! / `optimize_does_not_float_rz_through_cx_target_wire`), brought up
-//! to this source (pre-decomposition) level. No other gate-type-
-//! specific commutation rule is implemented -- that class of rule is
-//! real and used by production transpilers, but each one needs its own
-//! derivation and test the same way this one and the two-qubit
-//! identities in `native.rs` did, and getting one wrong silently
-//! produces a wrong circuit rather than a missed optimization.
+//! act on different tensor factors. On top of that, three gate-specific
+//! rules are implemented:
+//!
+//! 1. **`Rz(q)` commutes through `Cx(control, target)` when
+//!    `q == control`, but not when `q == target`** -- `Cx` is diagonal
+//!    in its control's computational basis
+//!    (`|0><0| (x) I + |1><1| (x) X`), and `Rz` is diagonal, so the two
+//!    act as commuting (simultaneously diagonalizable, on the control
+//!    factor) operators; the target wire carries the actual `X`, which
+//!    does not commute with a target-side `Rz`. This is the same
+//!    distinction `backend.rs`'s native-level peephole pass already
+//!    implements and tests (`optimize_floats_rz_through_cx_control_wire`
+//!    / `optimize_does_not_float_rz_through_cx_target_wire`), brought up
+//!    to this source (pre-decomposition) level.
+//!
+//! 2. **Any diagonal single-qubit gate (`Z`, `S`, `Sdg`, `T`, `Tdg`,
+//!    `Rz`) on qubit `q` commutes through `Cz(a, b)` when `q == a` or
+//!    `q == b`** -- unlike `Cx`, `Cz` is fully diagonal in the
+//!    computational basis on *both* of its wires
+//!    (`diag(1, 1, 1, -1)`), so there is no asymmetric "control vs.
+//!    target" distinction to preserve: a diagonal gate on *either* wire
+//!    is simultaneously diagonalizable with `Cz` and commutes through
+//!    it unconditionally. This mirrors `backend.rs`'s
+//!    `optimize_cancels_cz_pair_around_rz_on_either_wire` test at the
+//!    native level, brought up to this source level the same way rule 1
+//!    was. A non-diagonal single-qubit gate (`H`, `X`, `Y`, `Rx`, `Ry`)
+//!    does *not* get this treatment -- e.g. `X` anticommutes with the
+//!    `Z`-type action `Cz` applies conditionally, so this rule only ever
+//!    fires for the six diagonal gates named above.
+//!
+//! 3. **`X(q)` commutes through `Cx(control, target)` when
+//!    `q == target`, but not when `q == control`** -- the mirror image
+//!    of rule 1. `Cx` XOR's the control into the target
+//!    (`|c, t> -> |c, t XOR c>`), and `X` XOR's a constant `1` into
+//!    whichever wire it sits on; XOR is commutative and associative, so
+//!    a target-side `X` before or after the `Cx` produces the same
+//!    `t XOR c XOR 1` either way -- confirmed by direct 4x4 matrix
+//!    multiplication (`Cx . (I (x) X) == (I (x) X) . Cx`, entry for
+//!    entry, no global-phase fudge needed since both sides are real
+//!    permutation matrices). A control-side `X`, by contrast, changes
+//!    *which* target output the `Cx` selects, so `Cx . (X (x) I) !=
+//!    (X (x) I) . Cx` -- confirmed the same way, and this asymmetry is
+//!    exactly why rule 1 (the diagonal `Rz`) and rule 3 (the
+//!    permutation-like `X`) land on *opposite* wires of `Cx`: `Rz` is
+//!    diagonal in the basis `Cx`'s control measures in, `X` is the
+//!    generator of the XOR `Cx`'s target undergoes.
+//!
+//! No other gate-type-specific commutation rule is implemented -- that
+//! class of rule is real and used by production transpilers, but each
+//! one needs its own derivation and test the same way these three and
+//! the two-qubit identities in `native.rs` did, and getting one wrong
+//! silently produces a wrong circuit rather than a missed optimization.
 //! Disjoint-support commutativity needs no such proof.
 //!
 //! The `tests` submodule below checks every pass end to end against the
@@ -88,13 +123,58 @@ fn rz_commutes_through_cx_control(a: &Gate, b: &Gate) -> bool {
     matches!((a, b), (Gate::Rz(q, _), Gate::Cx(control, _)) if q == control)
 }
 
+/// `true` if `a` immediately followed by `b` commute, checking `a`
+/// as the `X` and `b` as the `Cx` (see [`commutes`]/this module's doc
+/// comment, rule 3, for the derivation). Order-specific by design,
+/// same convention as [`rz_commutes_through_cx_control`] -- callers
+/// check both orderings via [`commutes`]. Mirror image of rule 1: fires
+/// on the *target* wire, not the control wire.
+fn x_commutes_through_cx_target(a: &Gate, b: &Gate) -> bool {
+    matches!((a, b), (Gate::X(q), Gate::Cx(_, target)) if q == target)
+}
+
+/// The qubit a diagonal single-qubit gate acts on, or `None` if `g`
+/// isn't one of the six diagonal single-qubit gates this module's rule
+/// 2 applies to (see the module doc comment). `Rx`/`Ry`/`H`/`Measure`/
+/// any two-qubit gate all return `None` here -- deliberately narrower
+/// than "every `Gate` variant with one qubit argument", since e.g. `X`
+/// and `Y` are single-qubit but *not* diagonal.
+fn diagonal_single_qubit(g: &Gate) -> Option<usize> {
+    match *g {
+        Gate::Z(q) | Gate::S(q) | Gate::Sdg(q) | Gate::T(q) | Gate::Tdg(q) | Gate::Rz(q, _) => {
+            Some(q)
+        }
+        _ => None,
+    }
+}
+
+/// `true` if `a` immediately followed by `b` commute, checking `a` as
+/// the diagonal single-qubit gate and `b` as the `Cz` (see
+/// [`commutes`]/this module's doc comment, rule 2, for the derivation).
+/// Order-specific by design, same convention as
+/// [`rz_commutes_through_cx_control`] -- callers check both orderings
+/// via [`commutes`]. Unlike the `Cx`-control rule, this fires for
+/// *either* of `Cz`'s two qubit arguments, since `Cz` is symmetric.
+fn diagonal_commutes_through_cz(a: &Gate, b: &Gate) -> bool {
+    match (diagonal_single_qubit(a), b) {
+        (Some(q), Gate::Cz(x, y)) => q == *x || q == *y,
+        _ => false,
+    }
+}
+
 /// `true` if `a` immediately followed by `b` commute: either because
-/// they're [`disjoint`], or because the one gate-specific rule this
-/// module implements applies in either argument order (see this
-/// module's doc comment). This is the check the commuting-reorder
+/// they're [`disjoint`], or because one of the three gate-specific
+/// rules this module implements applies in either argument order (see
+/// this module's doc comment). This is the check the commuting-reorder
 /// pass below actually uses in place of a bare `disjoint` call.
 fn commutes(a: &Gate, b: &Gate) -> bool {
-    disjoint(a, b) || rz_commutes_through_cx_control(a, b) || rz_commutes_through_cx_control(b, a)
+    disjoint(a, b)
+        || rz_commutes_through_cx_control(a, b)
+        || rz_commutes_through_cx_control(b, a)
+        || diagonal_commutes_through_cz(a, b)
+        || diagonal_commutes_through_cz(b, a)
+        || x_commutes_through_cx_target(a, b)
+        || x_commutes_through_cx_target(b, a)
 }
 
 /// `true` if `a` immediately followed by `b` is the identity (same
@@ -370,6 +450,39 @@ mod tests {
     }
 
     #[test]
+    fn commutes_x_through_cx_target_wire_to_cancel() {
+        // X(1) . Cx(0, 1) . X(1): qubit 1 is Cx's target, so rule 3
+        // should let the two X's commute together across the Cx and
+        // cancel, leaving just the Cx -- the mirror image of the
+        // control-wire Rz case above.
+        let mut c = Circuit::new(2);
+        c.push(Gate::X(1)).push(Gate::Cx(0, 1)).push(Gate::X(1));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Cx(0, 1)]);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn does_not_commute_x_through_cx_control_wire() {
+        // X(0) . Cx(0, 1) . X(0): qubit 0 is Cx's CONTROL, not its
+        // target -- this must NOT be treated as commuting or
+        // cancelling. Mirror image of does_not_commute_rz_through_cx_target_wire:
+        // naively cancelling here would silently drop a real
+        // dependency, since flipping the control changes which target
+        // output Cx selects.
+        let mut c = Circuit::new(2);
+        c.push(Gate::X(0)).push(Gate::Cx(0, 1)).push(Gate::X(0));
+        let opt = optimize_ir(&c);
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "control-side X must not commute/cancel through Cx, got {:?}",
+            opt.gates
+        );
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
     fn control_side_rz_floats_through_cx_and_a_disjoint_gate_to_cancel() {
         // Rz(0, t) . Cx(0, 1) . X(2) . Rz(0, -t): the leading Rz(0,t)
         // has to cross both a Cx (via the new control-wire rule) and a
@@ -381,6 +494,67 @@ mod tests {
             .push(Gate::Cx(0, 1))
             .push(Gate::X(2))
             .push(Gate::Rz(0, -0.4));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates.len(), 2, "the two Rz's should have cancelled, got {:?}", opt.gates);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn commutes_rz_through_cz_either_wire_to_cancel() {
+        // Rz(1, t) . Cz(0, 1) . Rz(1, -t): qubit 1 is one of Cz's two
+        // (symmetric) wires, so the gate-specific rule should let the
+        // two Rz's commute together across the Cz and cancel, leaving
+        // just the Cz -- on *either* wire, unlike the Cx-control rule.
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rz(1, 0.4)).push(Gate::Cz(0, 1)).push(Gate::Rz(1, -0.4));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Cz(0, 1)]);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn commutes_s_and_tdg_through_cz_on_the_other_wire_to_cancel() {
+        // S(0) . Cz(0, 1) . Sdg(0): S/Sdg are diagonal and mutually
+        // inverse, sitting on Cz's *other* wire from the Rz test above --
+        // confirms the rule doesn't only fire for the qubit named first
+        // in Cz's argument list.
+        let mut c = Circuit::new(2);
+        c.push(Gate::S(0)).push(Gate::Cz(0, 1)).push(Gate::Sdg(0));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Cz(0, 1)]);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn does_not_commute_non_diagonal_gate_through_cz() {
+        // X(1) . Cz(0, 1) . X(1): X is single-qubit but NOT diagonal, so
+        // it must not be treated as commuting/cancelling through Cz even
+        // though it sits on one of Cz's wires and is self-inverse.
+        let mut c = Circuit::new(2);
+        c.push(Gate::X(1)).push(Gate::Cz(0, 1)).push(Gate::X(1));
+        let opt = optimize_ir(&c);
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "non-diagonal X must not commute/cancel through Cz, got {:?}",
+            opt.gates
+        );
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn diagonal_gate_floats_through_cz_and_a_disjoint_gate_to_cancel() {
+        // Rz(1, t) . Cz(0, 1) . X(2) . Rz(1, -t): the leading Rz(1, t)
+        // has to cross both a Cz (via the new rule) and a qubit-disjoint
+        // X(2) (via the existing disjoint rule) before it can reach and
+        // cancel with the trailing Rz(1, -t) -- exercises the new rule
+        // chained with an existing one, same shape as the analogous
+        // Cx-control test above.
+        let mut c = Circuit::new(3);
+        c.push(Gate::Rz(1, 0.4))
+            .push(Gate::Cz(0, 1))
+            .push(Gate::X(2))
+            .push(Gate::Rz(1, -0.4));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates.len(), 2, "the two Rz's should have cancelled, got {:?}", opt.gates);
         assert_same_action(&c, &opt);
