@@ -12,17 +12,14 @@
 //! act on different tensor factors. On top of that, three gate-specific
 //! rules are implemented:
 //!
-//! 1. **`Rz(q)` commutes through `Cx(control, target)` when
-//!    `q == control`, but not when `q == target`** -- `Cx` is diagonal
-//!    in its control's computational basis
-//!    (`|0><0| (x) I + |1><1| (x) X`), and `Rz` is diagonal, so the two
-//!    act as commuting (simultaneously diagonalizable, on the control
-//!    factor) operators; the target wire carries the actual `X`, which
-//!    does not commute with a target-side `Rz`. This is the same
-//!    distinction `backend.rs`'s native-level peephole pass already
-//!    implements and tests (`optimize_floats_rz_through_cx_control_wire`
-//!    / `optimize_does_not_float_rz_through_cx_target_wire`), brought up
-//!    to this source (pre-decomposition) level.
+//! 1. **Any diagonal single-qubit gate (`Z`, `S`, `Sdg`, `T`, `Tdg`, `Rz`)
+//!    commutes through `Cx(control, target)` when `q == control`, but not
+//!    when `q == target`** -- `Cx` is diagonal in its control's computational
+//!    basis (`|0><0| (x) I + |1><1| (x) X`), and diagonal single-qubit gates
+//!    are diagonal in the same basis, so they act as commuting operators;
+//!    the target wire carries the actual `X`, which does not commute with
+//!    target-side diagonal phase gates. This generalizes the original `Rz`-only
+//!    rule to all diagonal single-qubit gates.
 //!
 //! 2. **Any diagonal single-qubit gate (`Z`, `S`, `Sdg`, `T`, `Tdg`,
 //!    `Rz`) on qubit `q` commutes through `Cz(a, b)` when `q == a` or
@@ -39,22 +36,14 @@
 //!    `Z`-type action `Cz` applies conditionally, so this rule only ever
 //!    fires for the six diagonal gates named above.
 //!
-//! 3. **`X(q)` commutes through `Cx(control, target)` when
-//!    `q == target`, but not when `q == control`** -- the mirror image
-//!    of rule 1. `Cx` XOR's the control into the target
-//!    (`|c, t> -> |c, t XOR c>`), and `X` XOR's a constant `1` into
-//!    whichever wire it sits on; XOR is commutative and associative, so
-//!    a target-side `X` before or after the `Cx` produces the same
-//!    `t XOR c XOR 1` either way -- confirmed by direct 4x4 matrix
-//!    multiplication (`Cx . (I (x) X) == (I (x) X) . Cx`, entry for
-//!    entry, no global-phase fudge needed since both sides are real
-//!    permutation matrices). A control-side `X`, by contrast, changes
-//!    *which* target output the `Cx` selects, so `Cx . (X (x) I) !=
-//!    (X (x) I) . Cx` -- confirmed the same way, and this asymmetry is
-//!    exactly why rule 1 (the diagonal `Rz`) and rule 3 (the
-//!    permutation-like `X`) land on *opposite* wires of `Cx`: `Rz` is
-//!    diagonal in the basis `Cx`'s control measures in, `X` is the
-//!    generator of the XOR `Cx`'s target undergoes.
+//! 3. **Any X-basis single-qubit gate (`X`, `Rx`) commutes through
+//!    `Cx(control, target)` when `q == target`, but not when `q == control`**
+//!    -- the mirror image of rule 1. `Cx` XOR's the control into the target
+//!    (`|c, t> -> |c, t XOR c>`), and `X`/`Rx` generate operations in the
+//!    X-basis; XOR is commutative and associative, so a target-side X-basis
+//!    gate before or after the `Cx` commutes -- confirmed by direct matrix
+//!    multiplication. A control-side X-basis gate, by contrast, changes
+//!    *which* target output the `Cx` selects.
 //!
 //! No other gate-type-specific commutation rule is implemented -- that
 //! class of rule is real and used by production transpilers, but each
@@ -113,29 +102,9 @@ fn disjoint(a: &Gate, b: &Gate) -> bool {
     qa.is_disjoint(&qb)
 }
 
-/// `true` if `a` immediately followed by `b` commute, checking `a`
-/// as the `Rz` and `b` as the `Cx` (see [`commutes`]/this module's
-/// doc comment for the rule and its derivation). Order-specific by
-/// design -- callers check both orderings via [`commutes`] -- so this
-/// stays a single unambiguous pattern match rather than a symmetric
-/// one that has to case on which argument is which gate.
-fn rz_commutes_through_cx_control(a: &Gate, b: &Gate) -> bool {
-    matches!((a, b), (Gate::Rz(q, _), Gate::Cx(control, _)) if q == control)
-}
-
-/// `true` if `a` immediately followed by `b` commute, checking `a`
-/// as the `X` and `b` as the `Cx` (see [`commutes`]/this module's doc
-/// comment, rule 3, for the derivation). Order-specific by design,
-/// same convention as [`rz_commutes_through_cx_control`] -- callers
-/// check both orderings via [`commutes`]. Mirror image of rule 1: fires
-/// on the *target* wire, not the control wire.
-fn x_commutes_through_cx_target(a: &Gate, b: &Gate) -> bool {
-    matches!((a, b), (Gate::X(q), Gate::Cx(_, target)) if q == target)
-}
-
 /// The qubit a diagonal single-qubit gate acts on, or `None` if `g`
 /// isn't one of the six diagonal single-qubit gates this module's rule
-/// 2 applies to (see the module doc comment). `Rx`/`Ry`/`H`/`Measure`/
+/// 1 and 2 apply to (see the module doc comment). `Rx`/`Ry`/`H`/`Measure`/
 /// any two-qubit gate all return `None` here -- deliberately narrower
 /// than "every `Gate` variant with one qubit argument", since e.g. `X`
 /// and `Y` are single-qubit but *not* diagonal.
@@ -148,12 +117,39 @@ fn diagonal_single_qubit(g: &Gate) -> Option<usize> {
     }
 }
 
+/// The qubit an X-basis single-qubit gate acts on (`X` or `Rx`), or `None` if `g`
+/// isn't an X-basis single-qubit gate that rule 3 applies to.
+fn x_basis_single_qubit(g: &Gate) -> Option<usize> {
+    match *g {
+        Gate::X(q) | Gate::Rx(q, _) => Some(q),
+        _ => None,
+    }
+}
+
+/// `true` if `a` immediately followed by `b` commute, checking `a`
+/// as a diagonal single-qubit gate and `b` as the `Cx` (see [`commutes`]/this module's
+/// doc comment for rule 1 and its derivation). Order-specific by design.
+fn diagonal_commutes_through_cx_control(a: &Gate, b: &Gate) -> bool {
+    match (diagonal_single_qubit(a), b) {
+        (Some(q), Gate::Cx(control, _)) => q == *control,
+        _ => false,
+    }
+}
+
+/// `true` if `a` immediately followed by `b` commute, checking `a`
+/// as an X-basis gate (`X` or `Rx`) and `b` as the `Cx` (see [`commutes`]/this module's doc
+/// comment, rule 3, for the derivation). Order-specific by design.
+fn x_basis_commutes_through_cx_target(a: &Gate, b: &Gate) -> bool {
+    match (x_basis_single_qubit(a), b) {
+        (Some(q), Gate::Cx(_, target)) => q == *target,
+        _ => false,
+    }
+}
+
 /// `true` if `a` immediately followed by `b` commute, checking `a` as
 /// the diagonal single-qubit gate and `b` as the `Cz` (see
 /// [`commutes`]/this module's doc comment, rule 2, for the derivation).
-/// Order-specific by design, same convention as
-/// [`rz_commutes_through_cx_control`] -- callers check both orderings
-/// via [`commutes`]. Unlike the `Cx`-control rule, this fires for
+/// Order-specific by design. Unlike the `Cx`-control rule, this fires for
 /// *either* of `Cz`'s two qubit arguments, since `Cz` is symmetric.
 fn diagonal_commutes_through_cz(a: &Gate, b: &Gate) -> bool {
     match (diagonal_single_qubit(a), b) {
@@ -169,12 +165,12 @@ fn diagonal_commutes_through_cz(a: &Gate, b: &Gate) -> bool {
 /// pass below actually uses in place of a bare `disjoint` call.
 fn commutes(a: &Gate, b: &Gate) -> bool {
     disjoint(a, b)
-        || rz_commutes_through_cx_control(a, b)
-        || rz_commutes_through_cx_control(b, a)
+        || diagonal_commutes_through_cx_control(a, b)
+        || diagonal_commutes_through_cx_control(b, a)
+        || x_basis_commutes_through_cx_target(a, b)
+        || x_basis_commutes_through_cx_target(b, a)
         || diagonal_commutes_through_cz(a, b)
         || diagonal_commutes_through_cz(b, a)
-        || x_commutes_through_cx_target(a, b)
-        || x_commutes_through_cx_target(b, a)
 }
 
 /// `true` if `a` immediately followed by `b` is the identity (same
@@ -209,6 +205,40 @@ fn is_inverse_pair(a: &Gate, b: &Gate) -> bool {
     }
 }
 
+/// Attempts to merge two single-qubit axis rotations acting on the same qubit.
+/// Returns `Some(merged_gate)` if merged into a non-zero angle, or `None` if they
+/// cancel completely (near zero angle) or cannot be merged.
+fn try_merge_rotations(a: &Gate, b: &Gate) -> Option<Option<Gate>> {
+    use Gate::*;
+    match (a, b) {
+        (Rx(q1, t1), Rx(q2, t2)) if q1 == q2 => {
+            let total = t1 + t2;
+            if total.abs() < 1e-12 {
+                Some(None) // Complete cancellation
+            } else {
+                Some(Some(Rx(*q1, total)))
+            }
+        }
+        (Ry(q1, t1), Ry(q2, t2)) if q1 == q2 => {
+            let total = t1 + t2;
+            if total.abs() < 1e-12 {
+                Some(None) // Complete cancellation
+            } else {
+                Some(Some(Ry(*q1, total)))
+            }
+        }
+        (Rz(q1, t1), Rz(q2, t2)) if q1 == q2 => {
+            let total = t1 + t2;
+            if total.abs() < 1e-12 {
+                Some(None) // Complete cancellation
+            } else {
+                Some(Some(Rz(*q1, total)))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Removes every adjacent inverse pair, in one linear pass (a stack:
 /// push a gate unless it cancels the top of the stack).
 fn cancel_pass(gates: &[Gate]) -> Vec<Gate> {
@@ -220,6 +250,15 @@ fn cancel_pass(gates: &[Gate]) -> Vec<Gate> {
             .unwrap_or(false);
         if cancels {
             stack.pop();
+        } else if let Some(top) = stack.last() {
+            if let Some(merge_result) = try_merge_rotations(top, g) {
+                stack.pop();
+                if let Some(merged_gate) = merge_result {
+                    stack.push(merged_gate);
+                }
+            } else {
+                stack.push(g.clone());
+            }
         } else {
             stack.push(g.clone());
         }
@@ -229,9 +268,9 @@ fn cancel_pass(gates: &[Gate]) -> Vec<Gate> {
 
 /// For each gate, tries to slide it backward (earlier in the circuit)
 /// past a run of gates it [`commutes`] with (disjoint qubits, or the
-/// one gate-specific rule this module implements -- see the module
+/// gate-specific rules this module implements -- see the module
 /// doc comment), stopping as soon as it would land next to a gate it
-/// can cancel with, or hits a gate it can't pass. This is a single
+/// can cancel/merge with, or hits a gate it can't pass. This is a single
 /// forward scan that greedily pulls cancellable pairs together;
 /// running it to a fixed point with `cancel_pass` (see `optimize`)
 /// handles chains of reorders.
@@ -240,26 +279,43 @@ fn commute_forward_pass(gates: &[Gate]) -> Vec<Gate> {
     for g in gates {
         // Find the furthest-back position we can slide g to: walk
         // backward from the end of `out` while each gate we pass
-        // commutes with g. Stop early if we find a cancel partner.
+        // commutes with g. Stop early if we find a cancel or merge partner.
         let mut insert_at = out.len();
         let mut cancel_at: Option<usize> = None;
+        let mut merged_gate: Option<Gate> = None;
+
         while insert_at > 0 {
             let candidate = &out[insert_at - 1];
+
             if is_inverse_pair(candidate, g) {
                 cancel_at = Some(insert_at - 1);
                 break;
             }
+
+            if let Some(merge_result) = try_merge_rotations(candidate, g) {
+                cancel_at = Some(insert_at - 1);
+                merged_gate = merge_result;
+                break;
+            }
+
             if commutes(candidate, g) {
                 insert_at -= 1;
                 continue;
             }
+
             break;
         }
-        match cancel_at {
-            Some(pos) => {
+
+        match (cancel_at, merged_gate) {
+            (Some(pos), Some(new_gate)) => {
+                out[pos] = new_gate;
+            }
+            (Some(pos), None) => {
                 out.remove(pos);
             }
-            None => out.insert(insert_at, g.clone()),
+            (None, _) => {
+                out.insert(insert_at, g.clone());
+            }
         }
     }
     out
@@ -580,6 +636,38 @@ mod tests {
             c.gates.len(),
             opt.gates.len()
         );
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn commutes_rx_through_cx_target_wire_to_cancel() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rx(1, 0.5)).push(Gate::Cx(0, 1)).push(Gate::Rx(1, -0.5));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Cx(0, 1)]);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn commutes_z_through_cx_control_wire_to_cancel() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Z(0)).push(Gate::Cx(0, 1)).push(Gate::Z(0));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![Gate::Cx(0, 1)]);
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn merges_adjacent_rz_rotations() {
+        let mut c = Circuit::new(1);
+        c.push(Gate::Rz(0, 0.2)).push(Gate::Rz(0, 0.3));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates.len(), 1);
+        if let Gate::Rz(_, angle) = opt.gates[0] {
+            assert!((angle - 0.5).abs() < 1e-12);
+        } else {
+            panic!("Expected Rz gate");
+        }
         assert_same_action(&c, &opt);
     }
 }
