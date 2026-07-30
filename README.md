@@ -39,29 +39,30 @@ sirraya-qutub-transpiler = "0.1.0"
 
 ## Pipeline
 
+```mermaid
+flowchart TD
+    QASM["QASM Text"] --> PARSE["qasm::parse"]
+    PARSE --> IR["IR Circuit"]
+    IR --> OPT["ir_optimize::optimize"]
+    OPT --> OPTIR["Optimized IR Circuit"]
+    OPTIR --> LOWER["backend::lower"]
+    
+    LOWER --> ROUTE["route::route"]
+    ROUTE --> NATIVE["native::decompose"]
+    NATIVE --> RE["backend-specific re-expression"]
+    RE --> BC["BackendCircuit"]
+    
+    BC --> FID["fidelity::estimate_backend_circuit_fidelity"]
+    BC --> EXEC["emit::run_backend_with_measurement"]
+    BC --> DIAG["diagram::Diagram::from_backend"]
+    BC --> IBM["ibm_export::to_ibm_qasm"]
+    
+    IBM --> QASM_OUT["IBM-native OpenQASM 2.0"]
+    QASM_OUT --> SUBMIT["submit_ibm.py"]
+    SUBMIT --> QISKIT["Qiskit Aer / Real Hardware"]
+    
+    DIAG --> ASCII["ASCII / SVG"]
 ```
-QASM Text
-   │  qasm::parse
-   ▼
-IR Circuit  (source-level gate set: H, X, Cx, Rxx, Measure, ...)
-   │  ir_optimize::optimize   — cancellation / commuting reordering
-   ▼
-Optimized IR Circuit
-   │  backend::lower(circuit, Backend::{TrappedIon, IbmQ, Rigetti})
-   │      ├─ route::route            — against the backend's CouplingMap, if any
-   │      ├─ native::decompose       — canonical {Rz, Ry, Rzz} form
-   │      └─ backend-specific re-expression (Rx/Cx, Rx/Cz, or Rz/Ry/Rzz unchanged)
-   ▼
-BackendCircuit  (native to the chosen backend)
-   │  ├─ fidelity::estimate_backend_circuit_fidelity   — quick sanity-check number
-   │  ├─ emit::run_backend[_with_measurement]          — execute on QuantumRegister
-   │  ├─ diagram::Diagram::from_backend                — ASCII / SVG rendering
-   │  └─ ibm_export::to_ibm_qasm  (IbmQ only)           — real IBM basis-gate QASM
-   ▼
-IBM-native OpenQASM 2.0  ──►  submit_ibm.py  ──►  Qiskit Aer simulator, or real hardware
-```
-
-`Diagram` can also render the pipeline's two earlier stages directly (`Diagram::from_circuit` for the source IR, `Diagram::from_native` for the trapped-ion-style `{Rz, Ry, Rzz}` form), so any point in the pipeline is inspectable independently of the rest.
 
 ### 1. QASM Parser (`qasm.rs`)
 
