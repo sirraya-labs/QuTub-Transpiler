@@ -1,6 +1,6 @@
 [package]
 name = "sirraya-qutub-transpiler"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "QASM 2.0 import + native-gate (Rz/Ry/Rzz) decomposition, optimization, and self-contained fidelity estimates for quantum circuits."
 license = "MIT OR Apache-2.0"
@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/sirraya-labs/QuTub-Transpiler"
 homepage = "https://sirraya.org"
 documentation = "https://docs.rs/sirraya-qutub-transpiler"
-keywords = ["quantum", "compiler", "transpiler", "qasm", "circuit-optimization"]
+keywords = ["quantum-computing", "quantum-compiler", "qutub-transpiler", "qasm", "circuit-optimization"]
 categories = ["science", "compilers", "algorithms"]
 authors = ["Sirraya Labs <amir@sirraya.org>"]
 rust-version = "1.70"
