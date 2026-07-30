@@ -11,7 +11,10 @@
 //! [`optimize::optimize`] (native-level peephole cleanup) ->
 //! [`fidelity::estimate_circuit_fidelity`] (quick sanity-check number)
 //! -> [`emit::run`] / [`emit::run_backend`] (actually execute it on
-//! `sirraya_qutub`).
+//! `sirraya_qutub`). [`diagram::Diagram`] can render any of the three
+//! circuit levels in this pipeline (source, native, or backend-lowered)
+//! as an ASCII or SVG circuit diagram, independent of the rest of the
+//! pipeline.
 //!
 //! See each module's doc comment for the reasoning behind its piece of
 //! the pipeline, and `tests/decompositions.rs` for the correctness
@@ -21,6 +24,7 @@
 
 pub mod backend;
 pub mod coupling;
+pub mod diagram;
 pub mod emit;
 pub mod fidelity;
 pub mod ir;
@@ -32,6 +36,7 @@ pub mod route;
 
 pub use backend::{lower, Backend, BackendCircuit, BackendGate};
 pub use coupling::CouplingMap;
+pub use diagram::{Diagram, DiagramInstr};
 pub use ir::{Circuit, Gate};
 pub use ir_optimize::optimize as optimize_ir;
 pub use native::{decompose, NativeCircuit, NativeGate};
