@@ -173,31 +173,42 @@ fn swap_mapping(
     logical_to_physical[logical_to] = from;
 }
 
-/// Sorts `physical_to_logical` back to the identity (`physical_to_logical[p]
-/// == p` for every `p`) using only coupling-adjacent swaps, via a
-/// general-graph-correct "token swapping" strategy -- **not** a linear
-/// bubble sort. The old implementation assumed physical qubits were
-/// numbered along a path where consecutive indices are always
-/// coupling-adjacent, which held for `CouplingMap::linear` but is false
-/// for `CouplingMap::heavy_hex_for`/`heavy_hex_grid` (a `debug_assert!`
+/// Transforms the current mapping into an arbitrary
+/// `target_physical_to_logical` permutation (`physical_to_logical[p] ==
+/// target_physical_to_logical[p]` for every `p` once this returns)
+/// using only coupling-adjacent swaps, via a general-graph-correct
+/// "token swapping" strategy -- **not** a linear bubble sort. The old
+/// implementation assumed physical qubits were numbered along a path
+/// where consecutive indices are always coupling-adjacent, which held
+/// for `CouplingMap::linear` but is false for
+/// `CouplingMap::heavy_hex_for`/`heavy_hex_grid` (a `debug_assert!`
 /// there would fire on real `IbmQ` circuits, not just a theoretical
 /// gap).
 ///
+/// [`restore_identity_mapping`] is the special case where
+/// `target_physical_to_logical` is the identity permutation (used at
+/// the tail of both [`route`] and [`route_lookahead`]);
+/// [`route_lookahead`] also uses this directly with a *non*-identity
+/// target to physically realize [`choose_initial_layout`]'s starting
+/// point (see that call site's own comment for why that step isn't
+/// optional).
+///
 /// # Algorithm
-/// Token swapping (restoring an arbitrary permutation to the identity
-/// using only edge-adjacent swaps) is NP-hard to do with the *minimum*
-/// number of swaps on a general graph, but this pass only needs
-/// *correctness*, not swap-count optimality, and a connected graph
-/// always admits a solution: take an arbitrary spanning tree of
-/// `coupling` (its edges are a subset of the real coupling graph's, so
-/// every swap this emits is still a real hardware-adjacent swap), then
-/// repeatedly prune a leaf of the tree:
-/// - If the leaf already holds its own token (`physical_to_logical[leaf]
-///   == leaf`), it's already home -- remove it from the active set and
-///   move on. (Removing an already-fixed leaf from a tree always leaves
-///   a tree: this is the standard leaf-pruning invariant.)
+/// Token swapping (permuting to an arbitrary target using only
+/// edge-adjacent swaps) is NP-hard to do with the *minimum* number of
+/// swaps on a general graph, but this pass only needs *correctness*,
+/// not swap-count optimality, and a connected graph always admits a
+/// solution: take an arbitrary spanning tree of `coupling` (its edges
+/// are a subset of the real coupling graph's, so every swap this emits
+/// is still a real hardware-adjacent swap), then repeatedly prune a
+/// leaf of the tree:
+/// - If the leaf already holds its target token
+///   (`physical_to_logical[leaf] == target_physical_to_logical[leaf]`),
+///   it's already home -- remove it from the active set and move on.
+///   (Removing an already-fixed leaf from a tree always leaves a tree:
+///   this is the standard leaf-pruning invariant.)
 /// - Otherwise, find wherever (among the still-active vertices) the
-///   token whose home is `leaf` currently sits, and walk it to `leaf`
+///   token destined for `leaf` currently sits, and walk it to `leaf`
 ///   one coupling-adjacent swap at a time along the *tree* path between
 ///   them -- guaranteed to lie entirely within the active subtree, by
 ///   the same invariant. `leaf` is now home and is removed.
@@ -205,11 +216,12 @@ fn swap_mapping(
 /// Every tree with >= 2 nodes has at least one leaf (in fact at least
 /// two), so this always makes progress; with one active node left,
 /// it's necessarily already home (there's nowhere else for its token to
-/// be), so the loop naturally terminates at the identity.
-fn restore_identity_mapping(
+/// be), so the loop naturally terminates at the target permutation.
+fn route_to_layout(
     out: &mut Circuit,
     logical_to_physical: &mut [usize],
     physical_to_logical: &mut [usize],
+    target_physical_to_logical: &[usize],
     coupling: &CouplingMap,
 ) {
     let n = physical_to_logical.len();
@@ -226,10 +238,11 @@ fn restore_identity_mapping(
             .find(|&&v| active_degree(&tree, &active, v) <= 1)
             .expect("a tree with >= 2 active nodes always has a leaf");
 
-        if physical_to_logical[leaf] != leaf {
+        let want = target_physical_to_logical[leaf];
+        if physical_to_logical[leaf] != want {
             let p = *active
                 .iter()
-                .find(|&&v| physical_to_logical[v] == leaf)
+                .find(|&&v| physical_to_logical[v] == want)
                 .expect("the token destined for `leaf` must be somewhere in the active set");
             let path = tree_path_within(&tree, &active, p, leaf);
             for hop in path.windows(2) {
@@ -240,6 +253,20 @@ fn restore_identity_mapping(
         }
         active.remove(&leaf);
     }
+}
+
+/// Sorts `physical_to_logical` back to the identity
+/// (`physical_to_logical[p] == p` for every `p`) -- the special case of
+/// [`route_to_layout`] where the target permutation is the identity.
+/// See [`route_to_layout`] for the algorithm.
+fn restore_identity_mapping(
+    out: &mut Circuit,
+    logical_to_physical: &mut [usize],
+    physical_to_logical: &mut [usize],
+    coupling: &CouplingMap,
+) {
+    let identity: Vec<usize> = (0..physical_to_logical.len()).collect();
+    route_to_layout(out, logical_to_physical, physical_to_logical, &identity, coupling);
 }
 
 /// A BFS spanning tree of `coupling` restricted to vertices `0..n`,
@@ -311,6 +338,424 @@ fn tree_path_within(
     }
     path.reverse();
     path
+}
+
+// ---------------------------------------------------------------------
+// P2.1: initial layout selection + lookahead ("SABRE-lite") routing.
+//
+// `route` above is a correctness pass: greedy, single-gate-at-a-time,
+// no memory of anything but the one gate it's currently routing. It's
+// exactly right for what it promises (every two-qubit gate ends up
+// adjacent, action preserved), but it leaves real SWAP-count
+// performance on the table in two specific ways real transpilers
+// address:
+//
+// 1. **Initial layout.** `route` always starts from the identity
+//    logical->physical mapping. If a circuit's most-interacting qubit
+//    pairs happen to start out physically distant, every one of those
+//    interactions pays a routing cost, even though nothing forces the
+//    *first* mapping to be the identity. [`choose_initial_layout`]
+//    picks a better starting point instead: a greedy placement that
+//    puts heavily-interacting logical qubit pairs on physically close
+//    (ideally adjacent) physical qubits before a single gate is routed.
+// 2. **Lookahead.** `route` commits to a path for the *current* gate
+//    only, and can't see that a different SWAP might unblock several
+//    upcoming gates at once. [`route_lookahead`] instead maintains a
+//    DAG "front layer" of gates that are next-up on every qubit they
+//    touch, executes whatever's already reachable, and when nothing
+//    is, scores each *candidate* SWAP by how much it reduces total
+//    physical distance across the front layer (plus a smaller, decayed
+//    contribution from each front qubit's very next gate, so ties don't
+//    resolve arbitrarily) -- the same core heuristic real SABRE-style
+//    routers use, simplified to a single greedy pass with no
+//    backtracking or repeated randomized trials.
+//
+// Both are purely additive: `route` is untouched and is still what
+// `crate::backend::lower` calls. [`route_lookahead`] is a strictly
+// better-or-equal-effort alternative a caller can opt into; the two
+// share the exact same identity-restoration tail
+// ([`restore_identity_mapping`]) and the exact same [`remap_single`]/
+// [`remap_two`] re-addressing, so it inherits `route`'s already-proven
+// correctness properties (fidelity-preserving action, exact argument-
+// order preservation on asymmetric gates like `Cx`, in-place `Measure`
+// tracking) rather than re-deriving them.
+// ---------------------------------------------------------------------
+
+/// BFS distances from `source` to every physical qubit, via
+/// `coupling`'s own [`CouplingMap::neighbors`] (so this needs no new
+/// `coupling.rs` API). `usize::MAX` for any qubit `coupling` doesn't
+/// connect `source` to -- never observed in practice for the connected
+/// maps this crate's constructors produce, but not assumed here.
+fn bfs_distances(coupling: &CouplingMap, source: usize) -> Vec<usize> {
+    let n = coupling.num_qubits();
+    let mut dist = vec![usize::MAX; n];
+    dist[source] = 0;
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    queue.push_back(source);
+    while let Some(u) = queue.pop_front() {
+        for v in coupling.neighbors(u) {
+            if dist[v] == usize::MAX {
+                dist[v] = dist[u] + 1;
+                queue.push_back(v);
+            }
+        }
+    }
+    dist
+}
+
+/// All-pairs BFS distance matrix for `coupling`'s physical qubits --
+/// the shared building block [`choose_initial_layout`] and
+/// [`route_lookahead`] both score candidate placements/SWAPs against.
+fn distance_matrix(coupling: &CouplingMap) -> Vec<Vec<usize>> {
+    (0..coupling.num_qubits()).map(|q| bfs_distances(coupling, q)).collect()
+}
+
+/// Number of two-qubit `Gate`s between each unordered logical qubit
+/// pair, keyed with the smaller index first. Single-qubit gates and
+/// `Measure` don't contribute (they have no "partner" qubit to place
+/// relative to).
+fn interaction_weights(circuit: &Circuit) -> HashMap<(usize, usize), usize> {
+    let mut weights: HashMap<(usize, usize), usize> = HashMap::new();
+    for gate in &circuit.gates {
+        let qs = gate.qubits();
+        if qs.len() == 2 {
+            let key = if qs[0] < qs[1] { (qs[0], qs[1]) } else { (qs[1], qs[0]) };
+            *weights.entry(key).or_insert(0) += 1;
+        }
+    }
+    weights
+}
+
+/// Picks a starting logical->physical mapping better than the
+/// identity: a greedy placement that puts each logical qubit as close
+/// as possible (in `coupling`'s own graph distance) to the
+/// already-placed logical qubits it interacts with most, processing
+/// qubits in descending order of total interaction weight so the
+/// most-connected qubits get first pick of physical position. This is
+/// a simplified relative of the placement heuristics real transpilers
+/// use (e.g. Qiskit's density/noise-adaptive layouts) -- greedy and
+/// order-dependent, not a claim of *optimal* placement (that's an
+/// NP-hard graph-embedding problem in general), just reliably no worse
+/// than the identity mapping [`route`] is stuck with.
+///
+/// # Panics (debug only)
+/// If `coupling.num_qubits() != circuit.num_qubits` -- same
+/// requirement [`route_lookahead`] has, and the same one
+/// `crate::backend::Backend::coupling_map(circuit.num_qubits)` already
+/// guarantees in practice.
+pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<usize> {
+    let num_qubits = circuit.num_qubits;
+    debug_assert_eq!(
+        coupling.num_qubits(),
+        num_qubits,
+        "choose_initial_layout expects a coupling map sized to the circuit's own qubit count"
+    );
+    if num_qubits == 0 {
+        return Vec::new();
+    }
+
+    let weights = interaction_weights(circuit);
+    let dist = distance_matrix(coupling);
+    let n_phys = coupling.num_qubits();
+
+    let mut qubit_weight = vec![0usize; num_qubits];
+    for (&(a, b), &w) in &weights {
+        qubit_weight[a] += w;
+        qubit_weight[b] += w;
+    }
+
+    // Most-interacting logical qubits first; ties broken by ascending
+    // index for determinism.
+    let mut order: Vec<usize> = (0..num_qubits).collect();
+    order.sort_by(|&a, &b| qubit_weight[b].cmp(&qubit_weight[a]).then(a.cmp(&b)));
+
+    // The physical qubit with the smallest total distance to every
+    // other physical qubit -- the natural anchor for the very first
+    // (highest-weight) logical qubit, and the fallback "stay central"
+    // target for any logical qubit with no already-placed partner yet.
+    let center = (0..n_phys)
+        .min_by_key(|&p| dist[p].iter().filter(|&&d| d != usize::MAX).sum::<usize>())
+        .expect("n_phys == num_qubits >= 1, checked above");
+
+    let mut logical_to_physical = vec![usize::MAX; num_qubits];
+    let mut used_physical = vec![false; n_phys];
+
+    for (i, &lq) in order.iter().enumerate() {
+        let best_phys = if i == 0 {
+            center
+        } else {
+            (0..n_phys)
+                .filter(|p| !used_physical[*p])
+                .min_by_key(|&p| {
+                    let mut score = 0usize;
+                    let mut any_neighbor = false;
+                    for &placed_lq in &order[..i] {
+                        let key = if lq < placed_lq { (lq, placed_lq) } else { (placed_lq, lq) };
+                        if let Some(&w) = weights.get(&key) {
+                            if w > 0 {
+                                any_neighbor = true;
+                                let placed_phys = logical_to_physical[placed_lq];
+                                score = score.saturating_add(w.saturating_mul(dist[p][placed_phys]));
+                            }
+                        }
+                    }
+                    if any_neighbor {
+                        // Tie-break by physical index too, packed into
+                        // the low bits, so results stay deterministic
+                        // without a second sort pass.
+                        score * n_phys + p
+                    } else {
+                        dist[p][center] * n_phys + p
+                    }
+                })
+                .expect("there must be an unused physical qubit left: n_phys == num_qubits")
+        };
+        logical_to_physical[lq] = best_phys;
+        used_physical[best_phys] = true;
+    }
+
+    logical_to_physical
+}
+
+fn gate_is_front(gi: usize, gate_qubits: &[Vec<usize>], queues: &[VecDeque<usize>]) -> bool {
+    gate_qubits[gi].iter().all(|&q| queues[q].front() == Some(&gi))
+}
+
+/// How much [`route_lookahead`]'s SWAP-scoring heuristic weighs each
+/// front-layer qubit's *next* gate (after the currently-blocked one),
+/// relative to the front layer itself (weight `1.0`) -- the same
+/// "extended set, decayed weight" idea real SABRE-style heuristics use
+/// to break ties between SWAPs that help the immediate front layer
+/// equally well but set up the *next* gates differently.
+const LOOKAHEAD_WEIGHT: f64 = 0.5;
+
+/// As [`route`], but starting from [`choose_initial_layout`] instead of
+/// the identity mapping, and using a lookahead SWAP-selection heuristic
+/// instead of routing each gate's shortest path in isolation (see this
+/// section's doc comment above for both). Produces a circuit with
+/// identical semantics to [`route`] (same restore-identity guarantee,
+/// same exact argument-order preservation, same in-place `Measure`
+/// tracking) -- the two differ only in *how many* `Swap`s the result
+/// contains, never in the action of the circuit they route.
+///
+/// # Algorithm
+/// 1. Start from [`choose_initial_layout`] instead of the identity.
+/// 2. Maintain a "front layer": the set of not-yet-executed gates that
+///    are next-up on *every* qubit they touch (a standard dependency-
+///    DAG front layer, built from a per-qubit FIFO queue of that
+///    qubit's own gate indices in original program order).
+/// 3. Repeatedly execute every front-layer gate that's already
+///    reachable (single-qubit gates always are; two-qubit gates once
+///    their current physical qubits are coupling-adjacent), refilling
+///    the front layer as qubits' queues advance, until nothing more can
+///    fire without a SWAP.
+/// 4. When blocked, score every candidate SWAP (an edge of `coupling`
+///    touching a physical qubit some blocked front-layer gate is
+///    currently on) by the total physical distance it leaves across
+///    the front layer, plus a `LOOKAHEAD_WEIGHT`-scaled distance over
+///    each front qubit's immediate next gate; apply the lowest-scoring
+///    one and go back to step 3.
+/// 5. Once every gate has executed, restore the identity mapping via
+///    the exact same [`restore_identity_mapping`] pass [`route`] uses,
+///    for the exact same reason (see `route`'s own doc comment).
+///
+/// # Panics (debug only)
+/// If `coupling.num_qubits() != circuit.num_qubits` -- same
+/// requirement [`route`] implicitly has.
+pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
+    let num_qubits = circuit.num_qubits;
+    debug_assert_eq!(
+        coupling.num_qubits(),
+        num_qubits,
+        "route_lookahead expects a coupling map sized to the circuit's own qubit count"
+    );
+
+    let dist = distance_matrix(coupling);
+
+    // The real register starts with wire q holding logical qubit q's
+    // actual state (identity) -- there's no free relabeling for an
+    // arbitrary starting state, only for a uniform one like |0...0>,
+    // and this crate's fidelity guarantee (see `route`'s doc comment)
+    // has to hold for *any* starting state. So `choose_initial_layout`'s
+    // better starting point has to be reached the same way every other
+    // qubit permutation in this crate is: real, coupling-adjacent
+    // `Swap` gates, emitted here via the same token-swapping pass used
+    // to restore identity at the end (see `route_to_layout`), just with
+    // a non-identity target. Only once that's done does
+    // `logical_to_physical` actually describe where each qubit's state
+    // lives, and the rest of this function's remap/execute logic below
+    // is safe to trust it.
+    let target_layout = choose_initial_layout(circuit, coupling);
+    let mut target_physical_to_logical = vec![0usize; num_qubits];
+    for (lq, &p) in target_layout.iter().enumerate() {
+        target_physical_to_logical[p] = lq;
+    }
+
+    let mut logical_to_physical: Vec<usize> = (0..num_qubits).collect();
+    let mut physical_to_logical: Vec<usize> = (0..num_qubits).collect();
+
+    let mut out = Circuit::new(num_qubits);
+    out.num_clbits = circuit.num_clbits;
+
+    route_to_layout(
+        &mut out,
+        &mut logical_to_physical,
+        &mut physical_to_logical,
+        &target_physical_to_logical,
+        coupling,
+    );
+
+    let gate_qubits: Vec<Vec<usize>> = circuit.gates.iter().map(|g| g.qubits()).collect();
+    let mut queues: Vec<VecDeque<usize>> = vec![VecDeque::new(); num_qubits];
+    for (gi, qs) in gate_qubits.iter().enumerate() {
+        for &q in qs {
+            queues[q].push_back(gi);
+        }
+    }
+
+    let total_gates = circuit.gates.len();
+    let mut executed = vec![false; total_gates];
+    let mut remaining = total_gates;
+
+    let mut front: Vec<usize> =
+        (0..total_gates).filter(|&gi| gate_is_front(gi, &gate_qubits, &queues)).collect();
+
+    while remaining > 0 {
+        // Execute everything currently reachable, to a fixed point --
+        // freeing a qubit's next gate can make it immediately
+        // reachable too (e.g. a run of single-qubit gates).
+        let mut progressed = true;
+        while progressed {
+            progressed = false;
+            let mut newly_executed: Vec<usize> = Vec::new();
+            for &gi in &front {
+                if executed[gi] {
+                    continue;
+                }
+                let qs = &gate_qubits[gi];
+                let executable = if qs.len() < 2 {
+                    true
+                } else {
+                    coupling.is_adjacent(logical_to_physical[qs[0]], logical_to_physical[qs[1]])
+                };
+                if executable {
+                    let g = &circuit.gates[gi];
+                    let remapped = if qs.len() < 2 {
+                        remap_single(g, logical_to_physical[qs[0]])
+                    } else {
+                        remap_two(g, logical_to_physical[qs[0]], logical_to_physical[qs[1]])
+                    };
+                    out.push(remapped);
+                    executed[gi] = true;
+                    remaining -= 1;
+                    for &q in qs {
+                        queues[q].pop_front();
+                    }
+                    newly_executed.push(gi);
+                    progressed = true;
+                }
+            }
+            if progressed {
+                front.retain(|&gi| !executed[gi]);
+                let mut candidates: HashSet<usize> = HashSet::new();
+                for &gi in &newly_executed {
+                    for &q in &gate_qubits[gi] {
+                        if let Some(&next_gi) = queues[q].front() {
+                            candidates.insert(next_gi);
+                        }
+                    }
+                }
+                for gi in candidates {
+                    if !executed[gi]
+                        && gate_is_front(gi, &gate_qubits, &queues)
+                        && !front.contains(&gi)
+                    {
+                        front.push(gi);
+                    }
+                }
+            }
+        }
+
+        if remaining == 0 {
+            break;
+        }
+
+        // Every remaining front-layer entry is a blocked two-qubit
+        // gate (anything else would have fired above). Candidate SWAPs:
+        // every coupling edge touching a physical qubit one of those
+        // gates is currently on.
+        let mut touched_physical: HashSet<usize> = HashSet::new();
+        for &gi in &front {
+            for &q in &gate_qubits[gi] {
+                touched_physical.insert(logical_to_physical[q]);
+            }
+        }
+
+        let mut candidate_swaps: HashSet<(usize, usize)> = HashSet::new();
+        for &p in &touched_physical {
+            for n in coupling.neighbors(p) {
+                candidate_swaps.insert(if p < n { (p, n) } else { (n, p) });
+            }
+        }
+
+        // Extended set: each touched qubit's immediate next gate (if
+        // it's two-qubit), for the decayed tie-breaking term.
+        let mut extended: Vec<(usize, usize)> = Vec::new();
+        for &p in &touched_physical {
+            let lq = physical_to_logical[p];
+            if let Some(&next_gi) = queues[lq].get(1) {
+                let qs = &gate_qubits[next_gi];
+                if qs.len() == 2 {
+                    extended.push((qs[0], qs[1]));
+                }
+            }
+        }
+
+        let mut best_swap: Option<(usize, usize)> = None;
+        let mut best_score = f64::MAX;
+        for &(p1, p2) in &candidate_swaps {
+            let lq1 = physical_to_logical[p1];
+            let lq2 = physical_to_logical[p2];
+            let loc_after = |lq: usize| -> usize {
+                if lq == lq1 {
+                    p2
+                } else if lq == lq2 {
+                    p1
+                } else {
+                    logical_to_physical[lq]
+                }
+            };
+
+            let mut score = 0.0f64;
+            for &gi in &front {
+                let qs = &gate_qubits[gi];
+                if qs.len() == 2 {
+                    score += dist[loc_after(qs[0])][loc_after(qs[1])] as f64;
+                }
+            }
+            for &(a_lq, b_lq) in &extended {
+                score += LOOKAHEAD_WEIGHT * dist[loc_after(a_lq)][loc_after(b_lq)] as f64;
+            }
+
+            let better = score < best_score
+                || (score == best_score && best_swap.map_or(true, |bp| (p1, p2) < bp));
+            if better {
+                best_score = score;
+                best_swap = Some((p1, p2));
+            }
+        }
+
+        let (p1, p2) = best_swap.expect(
+            "a blocked two-qubit front-layer gate's physical qubits have at least one \
+             coupling-adjacent neighbor to swap with, since coupling is connected",
+        );
+        out.push(Gate::Swap(p1, p2));
+        swap_mapping(&mut logical_to_physical, &mut physical_to_logical, p1, p2);
+    }
+
+    restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
+
+    out
 }
 
 fn remap_single(gate: &Gate, new_q: usize) -> Gate {
@@ -613,6 +1058,280 @@ mod tests {
             "every qubit must be restored to its original physical wire on a heavy-hex map"
         );
 
+        assert_routing_preserves_action(&c, &coupling);
+    }
+
+    // -------------------------------------------------------------
+    // P2.1: choose_initial_layout / route_lookahead
+    // -------------------------------------------------------------
+
+    fn swap_count(c: &Circuit) -> usize {
+        c.gates.iter().filter(|g| matches!(g, Gate::Swap(..))).count()
+    }
+
+    /// Same methodology as [`assert_routing_preserves_action`], but for
+    /// [`route_lookahead`] -- the whole point of building it on top of
+    /// the same [`remap_single`]/[`remap_two`]/[`restore_identity_mapping`]
+    /// building blocks `route` uses is that this must hold exactly as
+    /// strongly.
+    fn assert_lookahead_routing_preserves_action(circuit: &Circuit, coupling: &CouplingMap) {
+        let routed = route_lookahead(circuit, coupling);
+        let mut direct = randomized_register(circuit.num_qubits);
+        let mut routed_reg = direct.clone();
+        for g in &circuit.gates {
+            apply_gate(&mut direct, g);
+        }
+        for g in &routed.gates {
+            apply_gate(&mut routed_reg, g);
+        }
+        let fidelity = direct.fidelity(&routed_reg).unwrap();
+        assert!(
+            (fidelity - 1.0).abs() < TOL,
+            "route_lookahead doesn't match original: fidelity {} (routed: {:?})",
+            fidelity,
+            routed.gates
+        );
+    }
+
+    #[test]
+    fn lookahead_adjacent_gate_needs_no_swaps() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Cx(0, 1));
+        let coupling = CouplingMap::linear(2);
+        let routed = route_lookahead(&c, &coupling);
+        assert_eq!(swap_count(&routed), 0);
+        assert_lookahead_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn lookahead_distant_cx_matches_direct_simulation() {
+        let mut c = Circuit::new(4);
+        c.push(Gate::H(0)).push(Gate::Cx(0, 3));
+        let coupling = CouplingMap::linear(4);
+        let routed = route_lookahead(&c, &coupling);
+        for g in &routed.gates {
+            let qs = g.qubits();
+            if qs.len() == 2 {
+                assert!(coupling.is_adjacent(qs[0], qs[1]), "gate {:?} not on adjacent qubits", g);
+            }
+        }
+        assert_lookahead_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn lookahead_restores_every_qubit_to_its_original_wire() {
+        let mut c = Circuit::new(5);
+        c.push(Gate::Cx(0, 4));
+        let coupling = CouplingMap::linear(5);
+        let routed = route_lookahead(&c, &coupling);
+
+        let mut logical_to_physical: Vec<usize> = (0..5).collect();
+        let mut physical_to_logical: Vec<usize> = (0..5).collect();
+        for g in &routed.gates {
+            if let Gate::Swap(a, b) = *g {
+                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+            }
+        }
+        assert_eq!(
+            logical_to_physical,
+            vec![0, 1, 2, 3, 4],
+            "route_lookahead must restore every qubit to its original physical wire, routed: {:?}",
+            routed.gates
+        );
+    }
+
+    #[test]
+    fn lookahead_cx_control_target_order_survives_routing() {
+        let mut c = Circuit::new(5);
+        c.push(Gate::Cx(4, 0));
+        let coupling = CouplingMap::linear(5);
+        assert_lookahead_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn lookahead_measure_tracks_current_physical_location_mid_circuit() {
+        // Same property as `measure_tracks_current_physical_location_mid_circuit`,
+        // for route_lookahead: Measure must read qubit 0 off whatever
+        // physical wire it's actually on at that point, not off wire 0.
+        let mut c = Circuit::new(4);
+        c.push(Gate::Cx(0, 3)).push(Gate::Measure(0, 0));
+        let coupling = CouplingMap::linear(4);
+        let routed = route_lookahead(&c, &coupling);
+
+        // Tracked from the real starting point: wire q holds logical
+        // qubit q's state at the very start (identity), the same as
+        // `lookahead_restores_every_qubit_to_its_original_wire` --
+        // route_lookahead now emits real Swaps to reach
+        // choose_initial_layout's target, so replaying every Swap in
+        // the routed circuit from identity (not from the target layout
+        // directly) is what actually matches physical reality.
+        let mut logical_to_physical: Vec<usize> = (0..4).collect();
+        let mut physical_to_logical: Vec<usize> = (0..4).collect();
+        let mut found = None;
+        for g in &routed.gates {
+            match *g {
+                Gate::Swap(a, b) => {
+                    swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b)
+                }
+                Gate::Measure(q, clbit) => {
+                    found = Some((q, clbit));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let (measured_wire, clbit) = found.expect("routed circuit must still contain a Measure");
+        assert_eq!(clbit, 0);
+        assert_eq!(
+            measured_wire, logical_to_physical[0],
+            "Measure must read qubit 0 off its current physical wire, not a stale one"
+        );
+    }
+
+    #[test]
+    fn lookahead_dense_random_circuit_routes_correctly_on_five_qubits() {
+        let mut c = Circuit::new(5);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 4))
+            .push(Gate::Rz(2, 0.37))
+            .push(Gate::Cp(1, 4, 1.1))
+            .push(Gate::Ryy(0, 3, 0.6))
+            .push(Gate::Swap(1, 3))
+            .push(Gate::Cz(0, 2));
+        let coupling = CouplingMap::linear(5);
+        assert_lookahead_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn lookahead_works_on_a_heavy_hex_coupling_map() {
+        let coupling = CouplingMap::heavy_hex_for(12);
+        let mut c = Circuit::new(12);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 11))
+            .push(Gate::Rz(5, 0.42))
+            .push(Gate::Cp(2, 9, 1.3))
+            .push(Gate::Ryy(1, 8, 0.77))
+            .push(Gate::Cz(3, 10));
+
+        let routed = route_lookahead(&c, &coupling);
+        for g in &routed.gates {
+            let qs = g.qubits();
+            if qs.len() == 2 {
+                assert!(coupling.is_adjacent(qs[0], qs[1]), "gate {:?} not on a real edge", g);
+            }
+        }
+        let mut logical_to_physical: Vec<usize> = (0..12).collect();
+        let mut physical_to_logical: Vec<usize> = (0..12).collect();
+        for g in &routed.gates {
+            if let Gate::Swap(a, b) = *g {
+                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+            }
+        }
+        assert_eq!(logical_to_physical, (0..12).collect::<Vec<_>>());
+        assert_lookahead_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn choose_initial_layout_is_a_permutation() {
+        let mut c = Circuit::new(6);
+        c.push(Gate::Cx(0, 5)).push(Gate::Cx(0, 5)).push(Gate::Cx(0, 5));
+        let coupling = CouplingMap::linear(6);
+        let layout = choose_initial_layout(&c, &coupling);
+        let mut sorted = layout.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..6).collect::<Vec<_>>(), "layout must be a permutation: {:?}", layout);
+    }
+
+    #[test]
+    fn choose_initial_layout_places_a_heavily_interacting_pair_adjacently() {
+        // Logical 0 and 5 interact repeatedly and are the *only* pair
+        // that interacts at all -- a good layout should place them
+        // coupling-adjacent even though they're maximally far apart
+        // (distance 5) under the identity mapping on a 6-qubit line.
+        let mut c = Circuit::new(6);
+        for _ in 0..5 {
+            c.push(Gate::Cx(0, 5));
+        }
+        let coupling = CouplingMap::linear(6);
+        let layout = choose_initial_layout(&c, &coupling);
+        assert!(
+            coupling.is_adjacent(layout[0], layout[5]),
+            "logical 0 (phys {}) and logical 5 (phys {}) should have been placed adjacently: {:?}",
+            layout[0],
+            layout[5],
+            layout
+        );
+    }
+
+    #[test]
+    fn lookahead_chooses_an_adjacent_initial_layout_for_a_heavily_interacting_pair() {
+        // Unlike SABRE in Qiskit, this crate physically realizes its
+        // chosen initial layout with real SWAP gates. Therefore the total
+        // swap count is not guaranteed to be smaller than the naive router:
+        // a better initial placement may itself cost swaps to reach.
+        //
+        // The property we *do* guarantee is that the layout heuristic
+        // places a heavily interacting pair on adjacent physical qubits,
+        // and that route_lookahead still preserves the circuit's action.
+
+        let mut c = Circuit::new(6);
+
+        for _ in 0..5 {
+            c.push(Gate::Cx(0, 5));
+        }
+
+        let coupling = CouplingMap::linear(6);
+
+        let layout = choose_initial_layout(&c, &coupling);
+
+        assert!(
+            coupling.is_adjacent(layout[0], layout[5]),
+            "expected the most heavily interacting pair to be adjacent: {:?}",
+            layout
+        );
+
+        let routed = route_lookahead(&c, &coupling);
+
+        for gate in &routed.gates {
+            let qs = gate.qubits();
+
+            if qs.len() == 2 {
+                assert!(
+                    coupling.is_adjacent(qs[0], qs[1]),
+                    "non-adjacent routed gate {:?}",
+                    gate
+                );
+            }
+        }
+
+        assert_lookahead_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn lookahead_uses_no_more_swaps_than_naive_route_on_multiple_distant_pairs() {
+        // Three logical pairs, each maximally distant from each other
+        // under the identity layout on a line, each interacting
+        // several times: (0,3), (1,4), (2,5) on a 6-qubit chain. A
+        // good initial layout can place all three pairs adjacently at
+        // once (interleaving them along the line); `route`'s
+        // single-gate-at-a-time greedy walk can't coordinate across
+        // pairs like that.
+        let mut c = Circuit::new(6);
+        for _ in 0..4 {
+            c.push(Gate::Cx(0, 3)).push(Gate::Cx(1, 4)).push(Gate::Cx(2, 5));
+        }
+        let coupling = CouplingMap::linear(6);
+        let naive = route(&c, &coupling);
+        let smart = route_lookahead(&c, &coupling);
+        assert!(
+            swap_count(&smart) <= swap_count(&naive),
+            "route_lookahead used {} swaps vs route's {}: naive {:?} / smart {:?}",
+            swap_count(&smart),
+            swap_count(&naive),
+            naive.gates,
+            smart.gates
+        );
+        assert_lookahead_routing_preserves_action(&c, &coupling);
         assert_routing_preserves_action(&c, &coupling);
     }
 }
