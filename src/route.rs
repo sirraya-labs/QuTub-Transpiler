@@ -46,7 +46,7 @@
 //! a routing optimizer.
 
 use crate::coupling::CouplingMap;
-use crate::ir::{Circuit, Gate};
+use crate::ir::{Circuit, Gate, LogicalQubit, PhysicalQubit};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Routes `circuit` against `coupling`, returning a new [`Circuit`]
@@ -110,8 +110,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// target on an asymmetric gate.
 pub fn route(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     let num_qubits = circuit.num_qubits;
-    let mut logical_to_physical: Vec<usize> = (0..num_qubits).collect();
-    let mut physical_to_logical: Vec<usize> = (0..num_qubits).collect();
+    let mut logical_to_physical: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
+    let mut physical_to_logical: Vec<LogicalQubit> = (0..num_qubits).map(LogicalQubit).collect();
     let mut out = Circuit::new(num_qubits);
     out.num_clbits = circuit.num_clbits;
 
@@ -119,35 +119,37 @@ pub fn route(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         let qubits = gate.qubits();
         match qubits.as_slice() {
             &[q] => {
-                let physical = logical_to_physical[q];
-                out.push(remap_single(gate, physical));
+                let logical = LogicalQubit(q);
+                let physical = logical_to_physical[logical.0];
+                out.push(remap_single(gate, physical.0));
             }
             &[first, second] => {
-                let mut physical_first = logical_to_physical[first];
-                let physical_second = logical_to_physical[second];
+                let (first, second) = (LogicalQubit(first), LogicalQubit(second));
+                let mut physical_first = logical_to_physical[first.0];
+                let physical_second = logical_to_physical[second.0];
 
-                if !coupling.is_adjacent(physical_first, physical_second) {
+                if !coupling.is_adjacent(physical_first.0, physical_second.0) {
                     let path = coupling
-                        .shortest_path(physical_first, physical_second)
+                        .shortest_path(physical_first.0, physical_second.0)
                         .expect(
                             "coupling map must be connected between any two qubits a routed \
                              circuit needs to interact",
                         );
                     for hop in path.windows(2) {
-                        let (from, to) = (hop[0], hop[1]);
+                        let (from, to) = (PhysicalQubit(hop[0]), PhysicalQubit(hop[1]));
                         if to == physical_second {
                             // `from` is now adjacent to the fixed
                             // target; stop one hop short rather than
                             // swapping onto it.
                             break;
                         }
-                        out.push(Gate::Swap(from, to));
+                        out.push(Gate::Swap(from.0, to.0));
                         swap_mapping(&mut logical_to_physical, &mut physical_to_logical, from, to);
                         physical_first = to;
                     }
                 }
 
-                out.push(remap_two(gate, physical_first, physical_second));
+                out.push(remap_two(gate, physical_first.0, physical_second.0));
             }
             _ => unreachable!("ir::Gate only ever touches 1 or 2 qubits"),
         }
@@ -161,16 +163,16 @@ pub fn route(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
 /// Updates both mapping directions for a `Swap(from, to)` that's about
 /// to be (or was just) emitted.
 fn swap_mapping(
-    logical_to_physical: &mut [usize],
-    physical_to_logical: &mut [usize],
-    from: usize,
-    to: usize,
+    logical_to_physical: &mut [PhysicalQubit],
+    physical_to_logical: &mut [LogicalQubit],
+    from: PhysicalQubit,
+    to: PhysicalQubit,
 ) {
-    let (logical_from, logical_to) = (physical_to_logical[from], physical_to_logical[to]);
-    physical_to_logical[from] = logical_to;
-    physical_to_logical[to] = logical_from;
-    logical_to_physical[logical_from] = to;
-    logical_to_physical[logical_to] = from;
+    let (logical_from, logical_to) = (physical_to_logical[from.0], physical_to_logical[to.0]);
+    physical_to_logical[from.0] = logical_to;
+    physical_to_logical[to.0] = logical_from;
+    logical_to_physical[logical_from.0] = to;
+    logical_to_physical[logical_to.0] = from;
 }
 
 /// Transforms the current mapping into an arbitrary
@@ -219,9 +221,9 @@ fn swap_mapping(
 /// be), so the loop naturally terminates at the target permutation.
 fn route_to_layout(
     out: &mut Circuit,
-    logical_to_physical: &mut [usize],
-    physical_to_logical: &mut [usize],
-    target_physical_to_logical: &[usize],
+    logical_to_physical: &mut [PhysicalQubit],
+    physical_to_logical: &mut [LogicalQubit],
+    target_physical_to_logical: &[LogicalQubit],
     coupling: &CouplingMap,
 ) {
     let n = physical_to_logical.len();
@@ -230,7 +232,7 @@ fn route_to_layout(
     }
 
     let tree = spanning_tree(coupling, n);
-    let mut active: HashSet<usize> = (0..n).collect();
+    let mut active: HashSet<PhysicalQubit> = (0..n).map(PhysicalQubit).collect();
 
     while active.len() > 1 {
         let leaf = *active
@@ -238,16 +240,16 @@ fn route_to_layout(
             .find(|&&v| active_degree(&tree, &active, v) <= 1)
             .expect("a tree with >= 2 active nodes always has a leaf");
 
-        let want = target_physical_to_logical[leaf];
-        if physical_to_logical[leaf] != want {
+        let want = target_physical_to_logical[leaf.0];
+        if physical_to_logical[leaf.0] != want {
             let p = *active
                 .iter()
-                .find(|&&v| physical_to_logical[v] == want)
+                .find(|&&v| physical_to_logical[v.0] == want)
                 .expect("the token destined for `leaf` must be somewhere in the active set");
             let path = tree_path_within(&tree, &active, p, leaf);
             for hop in path.windows(2) {
                 let (u, v) = (hop[0], hop[1]);
-                out.push(Gate::Swap(u, v));
+                out.push(Gate::Swap(u.0, v.0));
                 swap_mapping(logical_to_physical, physical_to_logical, u, v);
             }
         }
@@ -261,11 +263,11 @@ fn route_to_layout(
 /// See [`route_to_layout`] for the algorithm.
 fn restore_identity_mapping(
     out: &mut Circuit,
-    logical_to_physical: &mut [usize],
-    physical_to_logical: &mut [usize],
+    logical_to_physical: &mut [PhysicalQubit],
+    physical_to_logical: &mut [LogicalQubit],
     coupling: &CouplingMap,
 ) {
-    let identity: Vec<usize> = (0..physical_to_logical.len()).collect();
+    let identity: Vec<LogicalQubit> = (0..physical_to_logical.len()).map(LogicalQubit).collect();
     route_to_layout(out, logical_to_physical, physical_to_logical, &identity, coupling);
 }
 
@@ -273,16 +275,17 @@ fn restore_identity_mapping(
 /// stored as an adjacency list. Every edge here is a real edge of
 /// `coupling` (a subset of it, not a superset), so any swap along a
 /// tree edge is a legal hardware-adjacent swap.
-fn spanning_tree(coupling: &CouplingMap, n: usize) -> HashMap<usize, Vec<usize>> {
+fn spanning_tree(coupling: &CouplingMap, n: usize) -> HashMap<PhysicalQubit, Vec<PhysicalQubit>> {
     let mut visited = vec![false; n];
-    let mut tree: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut tree: HashMap<PhysicalQubit, Vec<PhysicalQubit>> = HashMap::new();
     let mut queue = VecDeque::new();
-    queue.push_back(0);
+    queue.push_back(PhysicalQubit(0));
     visited[0] = true;
     while let Some(u) = queue.pop_front() {
-        for v in coupling.neighbors(u) {
+        for v in coupling.neighbors(u.0) {
             if v < n && !visited[v] {
                 visited[v] = true;
+                let v = PhysicalQubit(v);
                 tree.entry(u).or_default().push(v);
                 tree.entry(v).or_default().push(u);
                 queue.push_back(v);
@@ -293,7 +296,11 @@ fn spanning_tree(coupling: &CouplingMap, n: usize) -> HashMap<usize, Vec<usize>>
 }
 
 /// Number of `v`'s tree-neighbors that are still in `active`.
-fn active_degree(tree: &HashMap<usize, Vec<usize>>, active: &HashSet<usize>, v: usize) -> usize {
+fn active_degree(
+    tree: &HashMap<PhysicalQubit, Vec<PhysicalQubit>>,
+    active: &HashSet<PhysicalQubit>,
+    v: PhysicalQubit,
+) -> usize {
     tree.get(&v)
         .map(|nbrs| nbrs.iter().filter(|&&u| active.contains(&u)).count())
         .unwrap_or(0)
@@ -304,16 +311,16 @@ fn active_degree(tree: &HashMap<usize, Vec<usize>>, active: &HashSet<usize>, v: 
 /// always exists, since leaf-pruning keeps the active-induced subgraph
 /// of a tree connected.
 fn tree_path_within(
-    tree: &HashMap<usize, Vec<usize>>,
-    active: &HashSet<usize>,
-    start: usize,
-    goal: usize,
-) -> Vec<usize> {
+    tree: &HashMap<PhysicalQubit, Vec<PhysicalQubit>>,
+    active: &HashSet<PhysicalQubit>,
+    start: PhysicalQubit,
+    goal: PhysicalQubit,
+) -> Vec<PhysicalQubit> {
     if start == goal {
         return vec![start];
     }
-    let mut visited: HashSet<usize> = HashSet::new();
-    let mut predecessor: HashMap<usize, usize> = HashMap::new();
+    let mut visited: HashSet<PhysicalQubit> = HashSet::new();
+    let mut predecessor: HashMap<PhysicalQubit, PhysicalQubit> = HashMap::new();
     let mut queue = VecDeque::new();
     queue.push_back(start);
     visited.insert(start);
@@ -386,12 +393,12 @@ fn tree_path_within(
 /// `coupling.rs` API). `usize::MAX` for any qubit `coupling` doesn't
 /// connect `source` to -- never observed in practice for the connected
 /// maps this crate's constructors produce, but not assumed here.
-fn bfs_distances(coupling: &CouplingMap, source: usize) -> Vec<usize> {
+fn bfs_distances(coupling: &CouplingMap, source: PhysicalQubit) -> Vec<usize> {
     let n = coupling.num_qubits();
     let mut dist = vec![usize::MAX; n];
-    dist[source] = 0;
+    dist[source.0] = 0;
     let mut queue: VecDeque<usize> = VecDeque::new();
-    queue.push_back(source);
+    queue.push_back(source.0);
     while let Some(u) = queue.pop_front() {
         for v in coupling.neighbors(u) {
             if dist[v] == usize::MAX {
@@ -407,19 +414,20 @@ fn bfs_distances(coupling: &CouplingMap, source: usize) -> Vec<usize> {
 /// the shared building block [`choose_initial_layout`] and
 /// [`route_lookahead`] both score candidate placements/SWAPs against.
 fn distance_matrix(coupling: &CouplingMap) -> Vec<Vec<usize>> {
-    (0..coupling.num_qubits()).map(|q| bfs_distances(coupling, q)).collect()
+    (0..coupling.num_qubits()).map(|q| bfs_distances(coupling, PhysicalQubit(q))).collect()
 }
 
 /// Number of two-qubit `Gate`s between each unordered logical qubit
 /// pair, keyed with the smaller index first. Single-qubit gates and
 /// `Measure` don't contribute (they have no "partner" qubit to place
 /// relative to).
-fn interaction_weights(circuit: &Circuit) -> HashMap<(usize, usize), usize> {
-    let mut weights: HashMap<(usize, usize), usize> = HashMap::new();
+fn interaction_weights(circuit: &Circuit) -> HashMap<(LogicalQubit, LogicalQubit), usize> {
+    let mut weights: HashMap<(LogicalQubit, LogicalQubit), usize> = HashMap::new();
     for gate in &circuit.gates {
         let qs = gate.qubits();
         if qs.len() == 2 {
-            let key = if qs[0] < qs[1] { (qs[0], qs[1]) } else { (qs[1], qs[0]) };
+            let (a, b) = (LogicalQubit(qs[0]), LogicalQubit(qs[1]));
+            let key = if a < b { (a, b) } else { (b, a) };
             *weights.entry(key).or_insert(0) += 1;
         }
     }
@@ -443,7 +451,7 @@ fn interaction_weights(circuit: &Circuit) -> HashMap<(usize, usize), usize> {
 /// requirement [`route_lookahead`] has, and the same one
 /// `crate::backend::Backend::coupling_map(circuit.num_qubits)` already
 /// guarantees in practice.
-pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<usize> {
+pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<PhysicalQubit> {
     let num_qubits = circuit.num_qubits;
     debug_assert_eq!(
         coupling.num_qubits(),
@@ -460,65 +468,71 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<u
 
     let mut qubit_weight = vec![0usize; num_qubits];
     for (&(a, b), &w) in &weights {
-        qubit_weight[a] += w;
-        qubit_weight[b] += w;
+        qubit_weight[a.0] += w;
+        qubit_weight[b.0] += w;
     }
 
     // Most-interacting logical qubits first; ties broken by ascending
     // index for determinism.
-    let mut order: Vec<usize> = (0..num_qubits).collect();
-    order.sort_by(|&a, &b| qubit_weight[b].cmp(&qubit_weight[a]).then(a.cmp(&b)));
+    let mut order: Vec<LogicalQubit> = (0..num_qubits).map(LogicalQubit).collect();
+    order.sort_by(|&a, &b| qubit_weight[b.0].cmp(&qubit_weight[a.0]).then(a.cmp(&b)));
 
     // The physical qubit with the smallest total distance to every
     // other physical qubit -- the natural anchor for the very first
     // (highest-weight) logical qubit, and the fallback "stay central"
     // target for any logical qubit with no already-placed partner yet.
-    let center = (0..n_phys)
-        .min_by_key(|&p| dist[p].iter().filter(|&&d| d != usize::MAX).sum::<usize>())
-        .expect("n_phys == num_qubits >= 1, checked above");
+    let center = PhysicalQubit(
+        (0..n_phys)
+            .min_by_key(|&p| dist[p].iter().filter(|&&d| d != usize::MAX).sum::<usize>())
+            .expect("n_phys == num_qubits >= 1, checked above"),
+    );
 
-    let mut logical_to_physical = vec![usize::MAX; num_qubits];
+    let mut logical_to_physical = vec![PhysicalQubit(usize::MAX); num_qubits];
     let mut used_physical = vec![false; n_phys];
 
     for (i, &lq) in order.iter().enumerate() {
         let best_phys = if i == 0 {
             center
         } else {
-            (0..n_phys)
-                .filter(|p| !used_physical[*p])
-                .min_by_key(|&p| {
-                    let mut score = 0usize;
-                    let mut any_neighbor = false;
-                    for &placed_lq in &order[..i] {
-                        let key = if lq < placed_lq { (lq, placed_lq) } else { (placed_lq, lq) };
-                        if let Some(&w) = weights.get(&key) {
-                            if w > 0 {
-                                any_neighbor = true;
-                                let placed_phys = logical_to_physical[placed_lq];
-                                score = score.saturating_add(w.saturating_mul(dist[p][placed_phys]));
+            PhysicalQubit(
+                (0..n_phys)
+                    .filter(|p| !used_physical[*p])
+                    .min_by_key(|&p| {
+                        let mut score = 0usize;
+                        let mut any_neighbor = false;
+                        for &placed_lq in &order[..i] {
+                            let key =
+                                if lq < placed_lq { (lq, placed_lq) } else { (placed_lq, lq) };
+                            if let Some(&w) = weights.get(&key) {
+                                if w > 0 {
+                                    any_neighbor = true;
+                                    let placed_phys = logical_to_physical[placed_lq.0];
+                                    score = score
+                                        .saturating_add(w.saturating_mul(dist[p][placed_phys.0]));
+                                }
                             }
                         }
-                    }
-                    if any_neighbor {
-                        // Tie-break by physical index too, packed into
-                        // the low bits, so results stay deterministic
-                        // without a second sort pass.
-                        score * n_phys + p
-                    } else {
-                        dist[p][center] * n_phys + p
-                    }
-                })
-                .expect("there must be an unused physical qubit left: n_phys == num_qubits")
+                        if any_neighbor {
+                            // Tie-break by physical index too, packed
+                            // into the low bits, so results stay
+                            // deterministic without a second sort pass.
+                            score * n_phys + p
+                        } else {
+                            dist[p][center.0] * n_phys + p
+                        }
+                    })
+                    .expect("there must be an unused physical qubit left: n_phys == num_qubits"),
+            )
         };
-        logical_to_physical[lq] = best_phys;
-        used_physical[best_phys] = true;
+        logical_to_physical[lq.0] = best_phys;
+        used_physical[best_phys.0] = true;
     }
 
     logical_to_physical
 }
 
-fn gate_is_front(gi: usize, gate_qubits: &[Vec<usize>], queues: &[VecDeque<usize>]) -> bool {
-    gate_qubits[gi].iter().all(|&q| queues[q].front() == Some(&gi))
+fn gate_is_front(gi: usize, gate_qubits: &[Vec<LogicalQubit>], queues: &[VecDeque<usize>]) -> bool {
+    gate_qubits[gi].iter().all(|&q| queues[q.0].front() == Some(&gi))
 }
 
 /// How much [`route_lookahead`]'s SWAP-scoring heuristic weighs each
@@ -586,13 +600,13 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     // lives, and the rest of this function's remap/execute logic below
     // is safe to trust it.
     let target_layout = choose_initial_layout(circuit, coupling);
-    let mut target_physical_to_logical = vec![0usize; num_qubits];
+    let mut target_physical_to_logical = vec![LogicalQubit(0); num_qubits];
     for (lq, &p) in target_layout.iter().enumerate() {
-        target_physical_to_logical[p] = lq;
+        target_physical_to_logical[p.0] = LogicalQubit(lq);
     }
 
-    let mut logical_to_physical: Vec<usize> = (0..num_qubits).collect();
-    let mut physical_to_logical: Vec<usize> = (0..num_qubits).collect();
+    let mut logical_to_physical: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
+    let mut physical_to_logical: Vec<LogicalQubit> = (0..num_qubits).map(LogicalQubit).collect();
 
     let mut out = Circuit::new(num_qubits);
     out.num_clbits = circuit.num_clbits;
@@ -605,11 +619,15 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         coupling,
     );
 
-    let gate_qubits: Vec<Vec<usize>> = circuit.gates.iter().map(|g| g.qubits()).collect();
+    let gate_qubits: Vec<Vec<LogicalQubit>> = circuit
+        .gates
+        .iter()
+        .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+        .collect();
     let mut queues: Vec<VecDeque<usize>> = vec![VecDeque::new(); num_qubits];
     for (gi, qs) in gate_qubits.iter().enumerate() {
         for &q in qs {
-            queues[q].push_back(gi);
+            queues[q.0].push_back(gi);
         }
     }
 
@@ -636,20 +654,27 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
                 let executable = if qs.len() < 2 {
                     true
                 } else {
-                    coupling.is_adjacent(logical_to_physical[qs[0]], logical_to_physical[qs[1]])
+                    coupling.is_adjacent(
+                        logical_to_physical[qs[0].0].0,
+                        logical_to_physical[qs[1].0].0,
+                    )
                 };
                 if executable {
                     let g = &circuit.gates[gi];
                     let remapped = if qs.len() < 2 {
-                        remap_single(g, logical_to_physical[qs[0]])
+                        remap_single(g, logical_to_physical[qs[0].0].0)
                     } else {
-                        remap_two(g, logical_to_physical[qs[0]], logical_to_physical[qs[1]])
+                        remap_two(
+                            g,
+                            logical_to_physical[qs[0].0].0,
+                            logical_to_physical[qs[1].0].0,
+                        )
                     };
                     out.push(remapped);
                     executed[gi] = true;
                     remaining -= 1;
                     for &q in qs {
-                        queues[q].pop_front();
+                        queues[q.0].pop_front();
                     }
                     newly_executed.push(gi);
                     progressed = true;
@@ -660,7 +685,7 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
                 let mut candidates: HashSet<usize> = HashSet::new();
                 for &gi in &newly_executed {
                     for &q in &gate_qubits[gi] {
-                        if let Some(&next_gi) = queues[q].front() {
+                        if let Some(&next_gi) = queues[q.0].front() {
                             candidates.insert(next_gi);
                         }
                     }
@@ -684,26 +709,27 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         // gate (anything else would have fired above). Candidate SWAPs:
         // every coupling edge touching a physical qubit one of those
         // gates is currently on.
-        let mut touched_physical: HashSet<usize> = HashSet::new();
+        let mut touched_physical: HashSet<PhysicalQubit> = HashSet::new();
         for &gi in &front {
             for &q in &gate_qubits[gi] {
-                touched_physical.insert(logical_to_physical[q]);
+                touched_physical.insert(logical_to_physical[q.0]);
             }
         }
 
-        let mut candidate_swaps: HashSet<(usize, usize)> = HashSet::new();
+        let mut candidate_swaps: HashSet<(PhysicalQubit, PhysicalQubit)> = HashSet::new();
         for &p in &touched_physical {
-            for n in coupling.neighbors(p) {
-                candidate_swaps.insert(if p < n { (p, n) } else { (n, p) });
+            for n in coupling.neighbors(p.0) {
+                let n = PhysicalQubit(n);
+                candidate_swaps.insert(if p.0 < n.0 { (p, n) } else { (n, p) });
             }
         }
 
         // Extended set: each touched qubit's immediate next gate (if
         // it's two-qubit), for the decayed tie-breaking term.
-        let mut extended: Vec<(usize, usize)> = Vec::new();
+        let mut extended: Vec<(LogicalQubit, LogicalQubit)> = Vec::new();
         for &p in &touched_physical {
-            let lq = physical_to_logical[p];
-            if let Some(&next_gi) = queues[lq].get(1) {
+            let lq = physical_to_logical[p.0];
+            if let Some(&next_gi) = queues[lq.0].get(1) {
                 let qs = &gate_qubits[next_gi];
                 if qs.len() == 2 {
                     extended.push((qs[0], qs[1]));
@@ -711,18 +737,18 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
             }
         }
 
-        let mut best_swap: Option<(usize, usize)> = None;
+        let mut best_swap: Option<(PhysicalQubit, PhysicalQubit)> = None;
         let mut best_score = f64::MAX;
         for &(p1, p2) in &candidate_swaps {
-            let lq1 = physical_to_logical[p1];
-            let lq2 = physical_to_logical[p2];
-            let loc_after = |lq: usize| -> usize {
+            let lq1 = physical_to_logical[p1.0];
+            let lq2 = physical_to_logical[p2.0];
+            let loc_after = |lq: LogicalQubit| -> PhysicalQubit {
                 if lq == lq1 {
                     p2
                 } else if lq == lq2 {
                     p1
                 } else {
-                    logical_to_physical[lq]
+                    logical_to_physical[lq.0]
                 }
             };
 
@@ -730,11 +756,11 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
             for &gi in &front {
                 let qs = &gate_qubits[gi];
                 if qs.len() == 2 {
-                    score += dist[loc_after(qs[0])][loc_after(qs[1])] as f64;
+                    score += dist[loc_after(qs[0]).0][loc_after(qs[1]).0] as f64;
                 }
             }
             for &(a_lq, b_lq) in &extended {
-                score += LOOKAHEAD_WEIGHT * dist[loc_after(a_lq)][loc_after(b_lq)] as f64;
+                score += LOOKAHEAD_WEIGHT * dist[loc_after(a_lq).0][loc_after(b_lq).0] as f64;
             }
 
             let better = score < best_score
@@ -749,7 +775,7 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
             "a blocked two-qubit front-layer gate's physical qubits have at least one \
              coupling-adjacent neighbor to swap with, since coupling is connected",
         );
-        out.push(Gate::Swap(p1, p2));
+        out.push(Gate::Swap(p1.0, p2.0));
         swap_mapping(&mut logical_to_physical, &mut physical_to_logical, p1, p2);
     }
 
@@ -920,16 +946,21 @@ mod tests {
         let coupling = CouplingMap::linear(5);
         let routed = route(&c, &coupling);
 
-        let mut logical_to_physical: Vec<usize> = (0..5).collect();
-        let mut physical_to_logical: Vec<usize> = (0..5).collect();
+        let mut logical_to_physical: Vec<PhysicalQubit> = (0..5).map(PhysicalQubit).collect();
+        let mut physical_to_logical: Vec<LogicalQubit> = (0..5).map(LogicalQubit).collect();
         for g in &routed.gates {
             if let Gate::Swap(a, b) = *g {
-                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+                swap_mapping(
+                    &mut logical_to_physical,
+                    &mut physical_to_logical,
+                    PhysicalQubit(a),
+                    PhysicalQubit(b),
+                );
             }
         }
         assert_eq!(
             logical_to_physical,
-            vec![0, 1, 2, 3, 4],
+            (0..5).map(PhysicalQubit).collect::<Vec<_>>(),
             "routing must restore every qubit to its original physical wire by the end \
              of the circuit, routed: {:?}",
             routed.gates
@@ -983,14 +1014,17 @@ mod tests {
         // internally, stopping as soon as we see the Measure, to
         // independently derive what physical wire qubit 0 should be on
         // at that point in the *routed* circuit.
-        let mut logical_to_physical: Vec<usize> = (0..4).collect();
-        let mut physical_to_logical: Vec<usize> = (0..4).collect();
+        let mut logical_to_physical: Vec<PhysicalQubit> = (0..4).map(PhysicalQubit).collect();
+        let mut physical_to_logical: Vec<LogicalQubit> = (0..4).map(LogicalQubit).collect();
         let mut found = None;
         for g in &routed.gates {
             match *g {
-                Gate::Swap(a, b) => {
-                    swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b)
-                }
+                Gate::Swap(a, b) => swap_mapping(
+                    &mut logical_to_physical,
+                    &mut physical_to_logical,
+                    PhysicalQubit(a),
+                    PhysicalQubit(b),
+                ),
                 Gate::Measure(q, clbit) => {
                     found = Some((q, clbit));
                     break;
@@ -1001,7 +1035,7 @@ mod tests {
         let (measured_wire, clbit) = found.expect("routed circuit must still contain a Measure");
         assert_eq!(clbit, 0, "the classical bit index must be untouched by routing");
         assert_eq!(
-            measured_wire, logical_to_physical[0],
+            measured_wire, logical_to_physical[0].0,
             "Measure must read qubit 0 off its *current* physical wire, not its original one"
         );
     }
@@ -1045,16 +1079,21 @@ mod tests {
             }
         }
 
-        let mut logical_to_physical: Vec<usize> = (0..12).collect();
-        let mut physical_to_logical: Vec<usize> = (0..12).collect();
+        let mut logical_to_physical: Vec<PhysicalQubit> = (0..12).map(PhysicalQubit).collect();
+        let mut physical_to_logical: Vec<LogicalQubit> = (0..12).map(LogicalQubit).collect();
         for g in &routed.gates {
             if let Gate::Swap(a, b) = *g {
-                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+                swap_mapping(
+                    &mut logical_to_physical,
+                    &mut physical_to_logical,
+                    PhysicalQubit(a),
+                    PhysicalQubit(b),
+                );
             }
         }
         assert_eq!(
             logical_to_physical,
-            (0..12).collect::<Vec<_>>(),
+            (0..12).map(PhysicalQubit).collect::<Vec<_>>(),
             "every qubit must be restored to its original physical wire on a heavy-hex map"
         );
 
@@ -1125,16 +1164,21 @@ mod tests {
         let coupling = CouplingMap::linear(5);
         let routed = route_lookahead(&c, &coupling);
 
-        let mut logical_to_physical: Vec<usize> = (0..5).collect();
-        let mut physical_to_logical: Vec<usize> = (0..5).collect();
+        let mut logical_to_physical: Vec<PhysicalQubit> = (0..5).map(PhysicalQubit).collect();
+        let mut physical_to_logical: Vec<LogicalQubit> = (0..5).map(LogicalQubit).collect();
         for g in &routed.gates {
             if let Gate::Swap(a, b) = *g {
-                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+                swap_mapping(
+                    &mut logical_to_physical,
+                    &mut physical_to_logical,
+                    PhysicalQubit(a),
+                    PhysicalQubit(b),
+                );
             }
         }
         assert_eq!(
             logical_to_physical,
-            vec![0, 1, 2, 3, 4],
+            (0..5).map(PhysicalQubit).collect::<Vec<_>>(),
             "route_lookahead must restore every qubit to its original physical wire, routed: {:?}",
             routed.gates
         );
@@ -1165,14 +1209,17 @@ mod tests {
         // choose_initial_layout's target, so replaying every Swap in
         // the routed circuit from identity (not from the target layout
         // directly) is what actually matches physical reality.
-        let mut logical_to_physical: Vec<usize> = (0..4).collect();
-        let mut physical_to_logical: Vec<usize> = (0..4).collect();
+        let mut logical_to_physical: Vec<PhysicalQubit> = (0..4).map(PhysicalQubit).collect();
+        let mut physical_to_logical: Vec<LogicalQubit> = (0..4).map(LogicalQubit).collect();
         let mut found = None;
         for g in &routed.gates {
             match *g {
-                Gate::Swap(a, b) => {
-                    swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b)
-                }
+                Gate::Swap(a, b) => swap_mapping(
+                    &mut logical_to_physical,
+                    &mut physical_to_logical,
+                    PhysicalQubit(a),
+                    PhysicalQubit(b),
+                ),
                 Gate::Measure(q, clbit) => {
                     found = Some((q, clbit));
                     break;
@@ -1183,7 +1230,7 @@ mod tests {
         let (measured_wire, clbit) = found.expect("routed circuit must still contain a Measure");
         assert_eq!(clbit, 0);
         assert_eq!(
-            measured_wire, logical_to_physical[0],
+            measured_wire, logical_to_physical[0].0,
             "Measure must read qubit 0 off its current physical wire, not a stale one"
         );
     }
@@ -1220,14 +1267,19 @@ mod tests {
                 assert!(coupling.is_adjacent(qs[0], qs[1]), "gate {:?} not on a real edge", g);
             }
         }
-        let mut logical_to_physical: Vec<usize> = (0..12).collect();
-        let mut physical_to_logical: Vec<usize> = (0..12).collect();
+        let mut logical_to_physical: Vec<PhysicalQubit> = (0..12).map(PhysicalQubit).collect();
+        let mut physical_to_logical: Vec<LogicalQubit> = (0..12).map(LogicalQubit).collect();
         for g in &routed.gates {
             if let Gate::Swap(a, b) = *g {
-                swap_mapping(&mut logical_to_physical, &mut physical_to_logical, a, b);
+                swap_mapping(
+                    &mut logical_to_physical,
+                    &mut physical_to_logical,
+                    PhysicalQubit(a),
+                    PhysicalQubit(b),
+                );
             }
         }
-        assert_eq!(logical_to_physical, (0..12).collect::<Vec<_>>());
+        assert_eq!(logical_to_physical, (0..12).map(PhysicalQubit).collect::<Vec<_>>());
         assert_lookahead_routing_preserves_action(&c, &coupling);
     }
 
@@ -1237,7 +1289,7 @@ mod tests {
         c.push(Gate::Cx(0, 5)).push(Gate::Cx(0, 5)).push(Gate::Cx(0, 5));
         let coupling = CouplingMap::linear(6);
         let layout = choose_initial_layout(&c, &coupling);
-        let mut sorted = layout.clone();
+        let mut sorted: Vec<usize> = layout.iter().map(|p| p.0).collect();
         sorted.sort_unstable();
         assert_eq!(sorted, (0..6).collect::<Vec<_>>(), "layout must be a permutation: {:?}", layout);
     }
@@ -1255,10 +1307,10 @@ mod tests {
         let coupling = CouplingMap::linear(6);
         let layout = choose_initial_layout(&c, &coupling);
         assert!(
-            coupling.is_adjacent(layout[0], layout[5]),
+            coupling.is_adjacent(layout[0].0, layout[5].0),
             "logical 0 (phys {}) and logical 5 (phys {}) should have been placed adjacently: {:?}",
-            layout[0],
-            layout[5],
+            layout[0].0,
+            layout[5].0,
             layout
         );
     }
@@ -1285,7 +1337,7 @@ mod tests {
         let layout = choose_initial_layout(&c, &coupling);
 
         assert!(
-            coupling.is_adjacent(layout[0], layout[5]),
+            coupling.is_adjacent(layout[0].0, layout[5].0),
             "expected the most heavily interacting pair to be adjacent: {:?}",
             layout
         );
