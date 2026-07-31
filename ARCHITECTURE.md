@@ -93,6 +93,7 @@ flowchart TD
 | `optimize.rs`    | Native-level peephole optimization         |
 | `emit.rs`        | Execution and QASM emission                |
 | `fidelity.rs`    | Fast fidelity budgeting                    |
+| `diagram.rs`     | ASCII/SVG circuit diagram rendering, at any of the three IR levels (debug/inspection) |
 
 ---
 
@@ -162,11 +163,140 @@ The narrowing to hardware-native gates does **not** happen here. That responsibi
 
 `Circuit` also carries `num_clbits`, mirroring `num_qubits`, because `Gate::Measure` needs a destination for its classical outcome.
 
+### Circuit semantic model
+
+A `Circuit` is exactly three things:
+
+```text
+Circuit
+ |
+ +-- num_qubits    (qubit count; also the valid range for every Gate qubit index)
+ +-- num_clbits    (classical bit count; the valid range for Measure's clbit index)
+ +-- gates: Vec<Gate>   (an ordered sequence — program order is operation order)
+```
+
+There is no separate "metadata" or "compilation information" field at this level. Anything a later pass needs beyond the gate sequence itself — a routing mapping, a backend tag, a pulse schedule — lives in that pass's own output type (`BackendCircuit`, `Schedule`, ...), not bolted onto `Circuit`. This is a deliberate choice: it keeps `Circuit` unambiguous about what it represents (a bare, ordered gate sequence, nothing else) rather than becoming a grab-bag that every downstream pass reads different fields out of.
+
+### Gate representation
+
+`Gate` is a single flat enum, not a trait-object hierarchy or a boxed dynamic-dispatch scheme. Every variant is one of exactly two shapes:
+
+```text
+Single-qubit   -- H, X, Y, Z, S, Sdg, T, Tdg, Rx, Ry, Rz, Measure
+Two-qubit      -- Cx, Cz, Swap, Rxx, Ryy, Rzz, Cp
+```
+
+`Gate::qubits()` returns the qubit indices for either shape uniformly, which is what every pass that needs to reason generically about "which wires does this gate touch" (`ir_optimize.rs`'s disjointness check, `route.rs`'s remapping, `diagram.rs`'s column packing) calls instead of matching on every variant itself.
+
+Extending the gate set means adding an enum variant, one `qubits()` arm, and one `decompose_gate` arm in `native.rs` — no unrelated infrastructure needs to change, which is the extensibility property this representation is chosen for.
+
+### Gate parameter semantics
+
+Every angle parameter (`Rx`/`Ry`/`Rz`/`Rxx`/`Ryy`/`Rzz`'s `theta`, `Cp`'s `lambda`) is:
+
+* in **radians**
+* **not normalized** — `native.rs`/`optimize.rs` wrap angles into `(-2π, 2π]` purely cosmetically during peephole cleanup, but the IR itself imposes no range restriction on a stored angle
+* required to be **finite** — `Circuit::validate()` (below) rejects `NaN`/`±inf`, since both `native.rs`'s ZYZ synthesis and `optimize.rs`'s angle-merging would otherwise silently propagate a NaN through every later decision rather than erroring
+
+Symbolic (non-numeric) parameters are **not supported** anywhere in this IR — every angle is a concrete `f64` at construction time. This is a real, current limitation rather than an oversight left undocumented: a future symbolic-parameter feature would need its own `Gate` variant shape (or a `Rz(usize, Parameter)`-style enum around the angle) and is out of scope for the current representation.
+
+### Logical vs. physical qubits
+
+`LogicalQubit`/`PhysicalQubit` (defined in `ir.rs`) give the two qubit "spaces" this compiler distinguishes real, distinct types:
+
+```text
+LogicalQubit(usize)   -- q0, q1, ... exactly as declared by the input program.
+                         Identity never changes across compilation.
+
+PhysicalQubit(usize)  -- a row in a CouplingMap: a hardware wire position.
+                         Which logical qubit's state lives on a given
+                         physical qubit changes as route::route inserts Swaps.
+```
+
+**Current scope of this distinction.** `Gate`/`Circuit`'s own qubit fields remain plain `usize`, not these newtypes — `Gate`/`Circuit` are reused as the same type both *before* routing (fields mean logical indices) and *after* it (`route::route`'s output, still a `Circuit`, means physical indices). Giving `Gate` a real type-level split (effectively `Gate<Q>`/`Circuit<Q>`) is a larger design change touching every module that builds or consumes a `Circuit`, and is tracked as separate follow-up work rather than folded in here.
+
+**What's already fixed.** The riskiest spot for a logical/physical mix-up isn't `Gate` itself — it's `route.rs`'s own internal bookkeeping, where a `logical_to_physical`/`physical_to_logical` pair of `Vec<usize>` could be passed to each other's argument slot with no compiler error. Migrating that internal state to `LogicalQubit`/`PhysicalQubit` is real, scoped follow-up work (see `route.rs`'s section below for why it isn't done in the same change as the type definitions).
+
+### Routing metadata ownership
+
+`route.rs` is the sole owner of the logical↔physical mapping. It is constructed, mutated, and discarded entirely within `route::route`/`route::route_lookahead`'s own stack frames — no other module holds a reference to it, stores it, or mutates it. Once routing finishes, the mapping's information is fully consumed into the routed `Circuit`'s gate addressing; nothing downstream (`native.rs`, `backend.rs`, `emit.rs`) ever needs to ask "what is qubit N's current physical location," because by the time they see the circuit, every gate is already addressed in physical terms. There is exactly one authoritative owner for this piece of state, and it never outlives the function call that produced it.
+
 ### Measurement is intentionally special
 
 `Gate::Measure` is the one variant that is not a unitary rewrite target.
 
-It represents a **classical side effect**, so several parts of the compiler treat it specially rather than pretending it behaves like an ordinary quantum gate.
+It represents a **classical side effect**, so several parts of the compiler treat it specially rather than pretending it behaves like an ordinary quantum gate:
+
+* `ir_optimize.rs`'s commuting pass never reorders a `Measure` relative to *anything*, even a qubit-disjoint gate — two `Measure`s writing different qubits into the same classical bit are only disjoint by qubit, not by the classical side effect that matters.
+* `optimize.rs`'s peephole pass never merges or drops a `Measure` — it has no "angle" to cancel to zero and is a real effect the caller depends on.
+* `native.rs`/`backend.rs` pass `Measure` through unchanged rather than decomposing it.
+* `emit.rs` only executes it via the `_with_measurement` entry points, which use `QuantumRegister::measure_single_qubit`'s real Born-rule-sampled projective measurement (sample → collapse → renormalize) — the plain `run`/`apply_to` entry points reject a circuit containing `Measure`, since they have nowhere to put a classical outcome.
+* Verification for `Measure` uses shot-based statistical comparison (`tests/measurement.rs`), not the fidelity-based comparison used for unitary gates, because measurement collapses the state — see §11.
+
+### IR invariants
+
+`Circuit::validate()` checks every invariant this crate currently relies on elsewhere by convention, in one place:
+
+1. **Qubit references are valid** — every qubit index any gate touches is `< num_qubits`.
+2. **Classical destinations are valid** — every `Measure`'s clbit index is `< num_clbits`.
+3. **Two-qubit gates don't self-target** — a two-qubit gate's two qubit arguments must be distinct.
+4. **Gate parameters are finite** — no angle is `NaN` or `±inf`.
+
+**Gate arity is deliberately not a runtime check.** `Gate`'s own variant shapes (`Cx(usize, usize)` vs. `H(usize)`) already make a wrong-arity gate a compile error, not a validation failure — there is no way to construct an ill-formed `Gate` in the first place. This is itself a documented answer to "what invariants must hold": some are enforced by the type system, and only the invariants the type system *can't* express (index bounds, distinctness, finiteness) need a runtime check.
+
+`qasm::parse` already range-checks qubit/clbit indices as it parses (see §`qasm.rs`), so `validate()`'s main value is for a `Circuit` built any other way — directly via `Circuit::new`/`push`, or by a future frontend — before it's handed to `route`/`native::decompose`/`backend::lower`, none of which re-check these invariants themselves today.
+
+### Representation boundaries
+
+| Representation      | Logical qubits | Physical mapping | Native gate set        | Backend-specific detail |
+| -------------------- | :------------: | :---------------: | ----------------------- | :----------------------: |
+| `ir::Circuit` (source)      | Yes | No  | No (rich source set)     | No  |
+| `ir::Circuit` (post-`route`) | Yes (unchanged identity) | Yes (baked into gate addressing, mapping itself discarded) | No | No |
+| `native::NativeCircuit`      | Yes | Yes | `{Rz, Ry, Rzz}` | No |
+| `backend::BackendCircuit`    | Yes | Yes | Target-native (`{Rz,Rx,Cx}` / `{Rz,Rx,Cz}` / `{Rz,Ry,Rzz}`) | Yes (via `Backend` tag) |
+
+The one asymmetry worth calling out: routing produces a *new* `ir::Circuit` (same type as its input), not a distinct "RoutedCircuit" type — see "Logical vs. physical qubits" above for why that's a real, scoped limitation rather than an oversight.
+
+### Ownership and mutation rules
+
+Every pass in this crate follows the same convention: **take a shared reference, return an owned new value.**
+
+```text
+fn optimize(circuit: &Circuit) -> Circuit          // ir_optimize.rs
+fn route(circuit: &Circuit, ...) -> Circuit        // route.rs
+fn decompose(circuit: &Circuit) -> NativeCircuit   // native.rs
+fn lower(circuit: &Circuit, ...) -> BackendCircuit // backend.rs
+fn optimize(circuit: &NativeCircuit) -> NativeCircuit // optimize.rs
+```
+
+No pass mutates its input `Circuit`/`NativeCircuit`/`BackendCircuit` in place, and no pass retains a reference to its input past its own call. This means a caller can always compare a circuit before and after a pass (which is exactly what every fidelity-based test in this crate does — see §10), and a pipeline stage never needs to worry about a prior stage's structure being invalidated out from under it.
+
+### Pass contracts
+
+Every pass in this crate already documents its own input representation, precondition, and guarantee in its module doc comment — this section just names that existing convention explicitly rather than introducing a new one:
+
+| Pass | Input representation | Guarantee on output |
+| ---- | --------------------- | -------------------- |
+| `ir_optimize::optimize` | `ir::Circuit` | Same acting circuit; only self-inverse cancellation and disjoint-qubit-safe commuting reorder applied |
+| `route::route` / `route_lookahead` | `ir::Circuit` + `CouplingMap` | Every two-qubit gate lands on a `CouplingMap`-adjacent pair; identical action; identity mapping restored at the end |
+| `native::decompose` | `ir::Circuit` | Output uses only `{Rz, Ry, Rzz, Measure}`; identical action (exact identities, checked in `tests/decompositions.rs`) |
+| `backend::lower` | `ir::Circuit` + `Backend` | Output uses only that backend's native set; routes first if the backend has a `CouplingMap` |
+| `optimize::optimize` (native) | `native::NativeCircuit` | Identical action; adjacent same-axis rotations fused, zero-angle gates dropped, `Measure` untouched |
+
+A pass that can't offer this shape of guarantee (a fixed input representation, a stated output representation, and an explicit "what stays true" guarantee) doesn't belong in this pipeline without first working out what it can promise.
+
+### Structural equality vs. semantic equivalence
+
+The crate draws (in practice, if not previously in so many words) a firm line between two different notions of "the same circuit":
+
+* **Structural equality** — `Gate: PartialEq`/`Circuit: PartialEq` (`Circuit` derives no `PartialEq` today, but `Gate`'s does) compares representation, field for field. Two circuits differing only in, say, gate order that happens to commute are *not* structurally equal even though they act identically.
+* **Semantic equivalence** — "does this circuit act the same way." This crate never checks this algebraically; every non-trivial transformation is instead checked against `sirraya_qutub::core::QuantumRegister::fidelity` on a randomized initial state (§10), or, for `Measure`-containing circuits, via shot-based statistical comparison (§11) — never via `PartialEq`, since a `Circuit` before and after routing, decomposition, or optimization is essentially never structurally equal to its input.
+
+Nothing in this crate currently computes a `Fidelity(A, B) ≈ 1`-style numeric similarity score for two IR-level circuits directly — the fidelity checks in the test suite compare *executed states*, not two `Circuit` values against each other. Distinguishing these three notions matters mainly so a future contributor doesn't reach for `PartialEq` where semantic equivalence (or a fidelity check) is what's actually needed.
+
+### Debugging and inspection
+
+Any of the three circuit levels — `ir::Circuit`, `native::NativeCircuit`, `backend::BackendCircuit` — can be rendered as a human-readable diagram via `diagram.rs`, either as ASCII text or a standalone SVG document. This is the crate's answer to "how do I inspect an IR during debugging": all three gate sets funnel into one shared intermediate diagram model (`Diagram`/`DiagramInstr`), so there's one column-packing algorithm and one pair of renderers regardless of which pipeline stage produced the circuit being inspected.
 
 ---
 
