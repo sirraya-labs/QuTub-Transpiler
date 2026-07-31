@@ -164,4 +164,194 @@ impl Circuit {
         }
         counts
     }
+
+    /// Checks every IR invariant this crate currently relies on
+    /// elsewhere by convention, in one place, so a `Circuit` built any
+    /// way other than `qasm::parse` (which already range-checks as it
+    /// goes -- see its own module doc) can still be checked before
+    /// being handed to `route`/`native::decompose`/`backend::lower`,
+    /// none of which re-check these themselves today.
+    ///
+    /// Checks, in order (returns on the first violation found, same
+    /// style as `qasm::parse`'s own error reporting):
+    /// 1. **Qubit references are valid** -- every qubit index any gate
+    ///    touches is `< self.num_qubits`.
+    /// 2. **Classical destinations are valid** -- every `Measure`'s
+    ///    clbit index is `< self.num_clbits`.
+    /// 3. **Two-qubit gates don't self-target** -- a two-qubit gate's
+    ///    two qubit arguments must be distinct (`Cx(0, 0)` has no
+    ///    physical meaning and every decomposition identity in
+    ///    `native.rs`/`backend.rs` implicitly assumes its two
+    ///    arguments are different wires).
+    /// 4. **Gate parameters are finite** -- no angle parameter
+    ///    (`Rx`/`Ry`/`Rz`/`Rxx`/`Ryy`/`Rzz`/`Cp`'s float argument) is
+    ///    `NaN` or `+-inf`. `native.rs`'s ZYZ synthesis and
+    ///    `optimize.rs`'s angle-merging both silently propagate a NaN
+    ///    into every subsequent decision (`NaN.abs() > EPS` is always
+    ///    true, so a NaN angle is never dropped, never merged
+    ///    correctly, and poisons everything downstream) rather than
+    ///    erroring -- so this is checked here, at construction-time
+    ///    validation, instead of relying on each pass to notice.
+    ///
+    /// Gate *arity* (the right number of qubit arguments per kind) is
+    /// deliberately not checked here: `Gate`'s own variants
+    /// (`Cx(usize, usize)` vs. `H(usize)`, etc.) already make an
+    /// arity mismatch a compile error, not a runtime one -- there is
+    /// no way to construct an ill-formed `Gate` in the first
+    /// place, so a runtime check would only ever be dead code.
+    pub fn validate(&self) -> Result<(), String> {
+        for (i, gate) in self.gates.iter().enumerate() {
+            for q in gate.qubits() {
+                if q >= self.num_qubits {
+                    return Err(format!(
+                        "gate {} ({:?}): qubit index {} out of range for {} qubit(s)",
+                        i, gate, q, self.num_qubits
+                    ));
+                }
+            }
+            if let Gate::Measure(_, c) = *gate {
+                if c >= self.num_clbits {
+                    return Err(format!(
+                        "gate {} ({:?}): classical bit index {} out of range for {} clbit(s)",
+                        i, gate, c, self.num_clbits
+                    ));
+                }
+            }
+            let qs = gate.qubits();
+            if qs.len() == 2 && qs[0] == qs[1] {
+                return Err(format!(
+                    "gate {} ({:?}): a two-qubit gate's arguments must be distinct, both are {}",
+                    i, gate, qs[0]
+                ));
+            }
+            let angle = match *gate {
+                Gate::Rx(_, a) | Gate::Ry(_, a) | Gate::Rz(_, a) => Some(a),
+                Gate::Rxx(_, _, a) | Gate::Ryy(_, _, a) | Gate::Rzz(_, _, a) => Some(a),
+                Gate::Cp(_, _, a) => Some(a),
+                _ => None,
+            };
+            if let Some(a) = angle {
+                if !a.is_finite() {
+                    return Err(format!(
+                        "gate {} ({:?}): parameter {} is not finite (NaN or infinite)",
+                        i, gate, a
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_circuit_is_valid() {
+        let c = Circuit::new(3);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn well_formed_circuit_is_valid() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 2;
+        c.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Measure(0, 0)).push(Gate::Measure(1, 1));
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_qubit_index_out_of_range_on_a_single_qubit_gate() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::H(5));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_qubit_index_out_of_range_on_a_two_qubit_gate() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Cx(0, 9));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_clbit_index_out_of_range_for_measure() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::Measure(0, 7));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_measure_with_in_range_clbit_even_if_num_clbits_was_never_set_explicitly() {
+        // num_clbits defaults to 0 (see Circuit::new), so a Measure
+        // pushed without first bumping num_clbits should be rejected,
+        // not silently accepted -- this is the mirror case of the
+        // rejects_ test above, confirming the check isn't vacuously
+        // true for the default-zero case.
+        let mut c = Circuit::new(1);
+        c.push(Gate::Measure(0, 0));
+        assert!(c.validate().is_err(), "num_clbits is still 0, clbit 0 is out of range");
+    }
+
+    #[test]
+    fn rejects_two_qubit_gate_with_identical_arguments() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Cx(0, 0));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_swap_with_identical_arguments() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Swap(1, 1));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_nan_angle() {
+        let mut c = Circuit::new(1);
+        c.push(Gate::Rz(0, f64::NAN));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_infinite_angle() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rzz(0, 1, f64::INFINITY));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_infinite_cp_lambda() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Cp(0, 1, f64::NEG_INFINITY));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_zero_and_negative_finite_angles() {
+        let mut c = Circuit::new(1);
+        c.push(Gate::Rx(0, 0.0)).push(Gate::Ry(0, -3.7));
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn error_message_identifies_the_offending_gate_index() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::H(0)).push(Gate::H(1)).push(Gate::Cx(0, 12));
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("gate 2"), "error should name the offending gate's index: {}", err);
+    }
+
+    #[test]
+    fn gate_qubits_matches_expected_arity() {
+        // Sanity check on the qubits() helper validate() itself relies
+        // on, for both shapes it distinguishes.
+        assert_eq!(Gate::H(3).qubits(), vec![3]);
+        assert_eq!(Gate::Measure(2, 0).qubits(), vec![2]);
+        assert_eq!(Gate::Cx(0, 1).qubits(), vec![0, 1]);
+        assert_eq!(Gate::Rzz(4, 5, 0.1).qubits(), vec![4, 5]);
+    }
 }
