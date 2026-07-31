@@ -94,6 +94,9 @@ flowchart TD
 | `emit.rs`        | Execution and QASM emission                |
 | `fidelity.rs`    | Fast fidelity budgeting                    |
 | `diagram.rs`     | ASCII/SVG circuit diagram rendering, at any of the three IR levels (debug/inspection) |
+| `pulse.rs`       | Pulse-level scheduling: lowers an already-lowered `BackendCircuit` into a hardware-channel `Schedule`, using a per-backend calibration table. Optional, downstream of everything above — nothing upstream needs to know it exists. |
+| `waveform_sim.rs`| Numerically integrates a single pulse instruction against a two-level qubit model, to check a `pulse.rs` calibration table's `rot` entries actually achieve the rotation angle they claim. Sits below `pulse.rs`, same "optional, nothing upstream depends on it" relationship. |
+| `ibm_export.rs`  | Real IBM-hardware-native export: expands a `BackendCircuit` lowered for `Backend::IbmQ` into IBM's actual physical basis gates (`rz`, `sx`, `x`, `cx`, `measure`) and emits OPENQASM 2.0 text a real Qiskit/IBM job-submission pipeline can consume (paired with `submit_ibm.py`, since there's no official Rust SDK for IBM Quantum Platform). Distinct from `emit::to_qasm`, which round-trips only through this crate's own `qasm::parse`. |
 
 ---
 
@@ -131,7 +134,17 @@ flowchart TD
     EXEC --> SIM["sirraya_qutub::QuantumRegister"]
 
     EXEC --> QOUT["emit::to_qasm"]
+
+    IBMO --> IBMEXP["ibm_export::to_ibm_qasm<br/>(IbmQ only — real rz/sx/x/cx/measure basis)"]
+    IBMEXP --> QISKIT["Qiskit / IBM job submission<br/>(via submit_ibm.py)"]
+
+    TIO -.optional, downstream only.-> PULSE["pulse::schedule<br/>BackendCircuit → hardware-channel Schedule"]
+    IBMO -.optional, downstream only.-> PULSE
+    RIGO -.optional, downstream only.-> PULSE
+    PULSE -.optional, downstream only.-> WAVE["waveform_sim::integrate<br/>calibration self-check"]
 ```
+
+`pulse.rs`/`waveform_sim.rs`/`ibm_export.rs` are drawn with dashed/branch edges deliberately: nothing upstream of `backend::lower`'s output needs to change, or even know these exist, for a caller to opt into any of them.
 
 `lib.rs`'s own documentation contains the same high-level architecture diagram and serves as the compact map of the crate.
 
