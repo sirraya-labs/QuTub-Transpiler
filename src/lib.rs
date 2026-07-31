@@ -16,6 +16,14 @@
 //! as an ASCII or SVG circuit diagram, independent of the rest of the
 //! pipeline.
 //!
+//! [`pulse::schedule`] is a separate, optional downstream stage: it
+//! lowers a [`BackendCircuit`] (the output of [`backend::lower`]) into
+//! a hardware-channel [`pulse::Schedule`] against a per-backend
+//! [`pulse::PulseCalibration`]. It sits below everything else in the
+//! pipeline above and doesn't participate in it -- nothing upstream of
+//! `backend::lower` needs to change, or even know it exists, for a
+//! caller to opt into it.
+//!
 //! See each module's doc comment for the reasoning behind its piece of
 //! the pipeline, and `tests/decompositions.rs` for the correctness
 //! checks against `native`/`optimize` (run against the real dependency,
@@ -32,6 +40,7 @@ pub mod ir;
 pub mod ir_optimize;
 pub mod native;
 pub mod optimize;
+pub mod pulse;
 pub mod qasm;
 pub mod route;
 
@@ -42,6 +51,11 @@ pub use ir::{Circuit, Gate};
 pub use ir_optimize::optimize as optimize_ir;
 pub use native::{decompose, NativeCircuit, NativeGate};
 pub use optimize::optimize;
+pub use pulse::{
+    ibm_heron_r2_pulse_calibration, rigetti_ankaa3_pulse_calibration, schedule, Channel,
+    Envelope, PulseCalibration, PulseInstruction, Schedule, SingleQubitPulseCalibration,
+    TwoQubitPulseCalibration,
+};
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
 pub use route::route;
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, IbmInstr};
