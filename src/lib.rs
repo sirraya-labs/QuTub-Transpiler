@@ -24,6 +24,15 @@
 //! `backend::lower` needs to change, or even know it exists, for a
 //! caller to opt into it.
 //!
+//! [`waveform_sim::integrate`] sits below `pulse` in turn: it doesn't
+//! touch a [`pulse::Schedule`] at all, only a single
+//! [`pulse::PulseInstruction::Play`] in isolation, numerically
+//! simulating it against a two-level qubit to check whether a
+//! `PulseCalibration`'s `rot` table is physically self-consistent --
+//! the piece `pulse.rs` itself names as out of scope. Like `pulse`
+//! relative to the rest of the pipeline, nothing above it needs to
+//! change, or even know it exists.
+//!
 //! See each module's doc comment for the reasoning behind its piece of
 //! the pipeline, and `tests/decompositions.rs` for the correctness
 //! checks against `native`/`optimize` (run against the real dependency,
@@ -43,6 +52,7 @@ pub mod optimize;
 pub mod pulse;
 pub mod qasm;
 pub mod route;
+pub mod waveform_sim;
 
 pub use backend::{lower, Backend, BackendCircuit, BackendGate};
 pub use coupling::CouplingMap;
@@ -52,10 +62,14 @@ pub use ir_optimize::optimize as optimize_ir;
 pub use native::{decompose, NativeCircuit, NativeGate};
 pub use optimize::optimize;
 pub use pulse::{
-    ibm_heron_r2_pulse_calibration, rigetti_ankaa3_pulse_calibration, schedule, Channel,
-    Envelope, PulseCalibration, PulseInstruction, Schedule, SingleQubitPulseCalibration,
+    ibm_heron_r2_pulse_calibration, rigetti_ankaa3_pulse_calibration,
+    trapped_ion_pulse_calibration, schedule, Channel, Envelope, PulseCalibration,
+    PulseInstruction, Schedule, SingleQubitPulseCalibration, TwoQubitContinuousPulseCalibration,
     TwoQubitPulseCalibration,
 };
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
 pub use route::route;
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, IbmInstr};
+pub use waveform_sim::{
+    integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,
+};

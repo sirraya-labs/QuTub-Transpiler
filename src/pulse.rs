@@ -19,9 +19,12 @@
 //! overlapping on the same channel, causally consistent per-qubit
 //! ordering). It does **not** simulate the resulting waveforms against
 //! a Hamiltonian to check the calibration table is *correct* -- that
-//! is real, separate work (a rotating-frame two-level integrator)
-//! that should only be built once this structural layer is solid, the
-//! same incremental order the rest of this crate was built in.
+//! is [`crate::waveform_sim`]'s job, a separate module built once this
+//! structural layer was solid, the same incremental order the rest of
+//! this crate was built in. `waveform_sim` only checks
+//! [`SingleQubitPulseCalibration`]/`Rot` (a genuinely two-level
+//! problem); it has nothing to say about `two_qubit`/`rzz`, which
+//! would need a larger Hilbert space -- see its own doc comment.
 //!
 //! # Virtual-Z
 //! On real superconducting hardware, `Rz` is essentially never a
@@ -38,18 +41,25 @@
 //! enforces by construction (see its loop body).
 //!
 //! # Backend coverage
-//! [`Backend::IbmQ`] ([`ibm_heron_r2_pulse_calibration`]) and
-//! [`Backend::Rigetti`] ([`rigetti_ankaa3_pulse_calibration`]) both
+//! [`Backend::IbmQ`] ([`ibm_heron_r2_pulse_calibration`]),
+//! [`Backend::Rigetti`] ([`rigetti_ankaa3_pulse_calibration`]), and
+//! [`Backend::TrappedIon`] ([`trapped_ion_pulse_calibration`]) all
 //! have calibration tables and are wired through [`schedule`] --
 //! `schedule`'s `Cx`/`Cz` handling was already backend-agnostic (one
 //! match arm, `BackendGate::Cx(a,b) | BackendGate::Cz(a,b)`), so
 //! adding `Rigetti` needed no change to `schedule` itself, only a new
-//! calibration table. `TrappedIon`'s native `Rzz` doesn't decompose
-//! into the `Rot`/`Cx`/`Cz` cases this module's scheduler currently
-//! handles at all -- an explicit follow-on, not a silently-wrong path:
-//! [`schedule`] returns `Err` rather than guessing for anything it
-//! doesn't know how to schedule, including a calibration/circuit
-//! backend mismatch.
+//! calibration table. `TrappedIon`'s native `Rzz` needed one new match
+//! arm plus a new calibration shape -- unlike `Cx`/`Cz`, which are
+//! fixed-angle gates calibrated once, `Rzz(a, b, theta)` is
+//! continuously-variable, so it's calibrated the same way `Rot` is
+//! ([`TwoQubitContinuousPulseCalibration::pi_amplitude`], scaled
+//! linearly by `theta / PI`) rather than the way `Cx`/`Cz` are
+//! ([`TwoQubitPulseCalibration`], one fixed pulse). `PulseCalibration::rzz`
+//! is `None` for `IbmQ`/`Rigetti` -- backends whose native two-qubit
+//! gate is fixed-angle have nothing to put there -- so [`schedule`]
+//! still returns `Err` rather than guessing if an `Rzz` ever reaches a
+//! calibration table that has no entry for it, including a
+//! calibration/circuit backend mismatch.
 //!
 //! # On the calibration numbers themselves
 //! [`ibm_heron_r2_pulse_calibration`]'s duration/amplitude/sigma
@@ -227,6 +237,24 @@ pub struct TwoQubitPulseCalibration {
     pub amplitude: f64,
 }
 
+/// Calibrated pulse parameters for a backend's native continuously-
+/// variable two-qubit gate (`Rzz` on `TrappedIon`; see `backend.rs`).
+/// Unlike [`TwoQubitPulseCalibration`] (`Cx`/`Cz`, both fixed-angle),
+/// `Rzz(a, b, theta)` is continuously-variable in `theta`, the same
+/// way `Rot` is -- so this scales the same way
+/// [`SingleQubitPulseCalibration`] does: amplitude linear in the
+/// rotation angle from a calibrated pi-pulse, not a single fixed
+/// pulse.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TwoQubitContinuousPulseCalibration {
+    pub duration_ns: f64,
+    pub sigma_ns: f64,
+    pub risefall_ns: f64,
+    /// Amplitude of a calibrated `Rzz(a, b, PI)` pulse. `Rzz(a, b, theta)`
+    /// scales this linearly: `amplitude(theta) = pi_amplitude * theta / PI`.
+    pub pi_amplitude: f64,
+}
+
 /// Per-backend calibration data [`schedule`] looks up gate pulses
 /// from. Uniform across every qubit and every qubit pair for now --
 /// see this module's doc comment on why that's a named simplification,
@@ -236,6 +264,13 @@ pub struct PulseCalibration {
     pub backend: Backend,
     pub rot: SingleQubitPulseCalibration,
     pub two_qubit: TwoQubitPulseCalibration,
+    /// Calibration for `BackendGate::Rzz`, `TrappedIon`'s native
+    /// continuously-variable two-qubit gate. `None` for `IbmQ` and
+    /// `Rigetti`, whose native two-qubit gate is the fixed-angle
+    /// `Cx`/`Cz` covered by `two_qubit` instead -- there's nothing to
+    /// calibrate here for them. [`schedule`] returns `Err` for an
+    /// `Rzz` gate against a calibration table where this is `None`.
+    pub rzz: Option<TwoQubitContinuousPulseCalibration>,
     pub readout_duration_ns: f64,
 }
 
@@ -243,7 +278,9 @@ pub struct PulseCalibration {
 /// the same real hardware family `Backend::calibration`'s
 /// `crate::fidelity::PublishedCalibration::ibm_heron_r2()` targets.
 /// See this module's doc comment for why these particular numbers are
-/// illustrative rather than measured.
+/// illustrative rather than measured. This table's `rot` is also the
+/// reference point [`crate::waveform_sim`]'s Rabi-rate constant is
+/// derived from -- see that module's doc comment.
 pub fn ibm_heron_r2_pulse_calibration() -> PulseCalibration {
     PulseCalibration {
         backend: Backend::IbmQ,
@@ -259,6 +296,7 @@ pub fn ibm_heron_r2_pulse_calibration() -> PulseCalibration {
             risefall_ns: 32.0,
             amplitude: 0.4,
         },
+        rzz: None,
         readout_duration_ns: 3300.0,
     }
 }
@@ -289,7 +327,58 @@ pub fn rigetti_ankaa3_pulse_calibration() -> PulseCalibration {
             risefall_ns: 20.0,
             amplitude: 0.35,
         },
+        rzz: None,
         readout_duration_ns: 800.0,
+    }
+}
+
+/// A first-pass calibration table for [`Backend::TrappedIon`]. Same
+/// illustrative-not-measured caveat as [`ibm_heron_r2_pulse_calibration`]
+/// and [`rigetti_ankaa3_pulse_calibration`] -- order-of-magnitude only.
+/// Trapped-ion gates are physically slower than superconducting ones
+/// (motional-mode-mediated entangling gates and Raman-transition
+/// single-qubit gates, not fixed-frequency microwave/flux pulses), so
+/// both `rot` and `rzz` here carry materially longer `duration_ns`
+/// than either superconducting table: microseconds rather than
+/// tens/hundreds of nanoseconds. `two_qubit` (`Cx`/`Cz`) is populated
+/// for structural completeness but isn't exercised by a real
+/// `TrappedIon`-lowered circuit -- `backend::lower` for `TrappedIon`
+/// produces `Rzz`, not `Cx`/`Cz` (see this module's doc comment on
+/// backend coverage). `rot.drag_beta` is `0.0`: DRAG is specifically a
+/// superconducting-transmon leakage-suppression technique (see this
+/// module's doc comment on Drag) and doesn't apply to a Raman-driven
+/// trapped-ion qubit -- and, unlike `rot.pi_amplitude` below, that's
+/// not a number [`crate::waveform_sim`] checks, just a fact about the
+/// hardware. `rot.pi_amplitude` *was* chosen so that a calibrated
+/// `Rot(q, PI)` actually integrates to a pi rotation under
+/// `waveform_sim`'s model, at this `duration_ns`/`sigma_ns` -- unlike
+/// [`rigetti_ankaa3_pulse_calibration`]'s `rot`, which weakly fails
+/// that same check (see `waveform_sim`'s tests). Both are "illustrative,
+/// not measured" in the same sense, but only one of the two is also
+/// internally self-consistent; that inconsistency in Rigetti's numbers
+/// is a real, recorded finding, not a bug in `waveform_sim`.
+pub fn trapped_ion_pulse_calibration() -> PulseCalibration {
+    PulseCalibration {
+        backend: Backend::TrappedIon,
+        rot: SingleQubitPulseCalibration {
+            duration_ns: 5000.0,
+            sigma_ns: 1250.0,
+            drag_beta: 0.0,
+            pi_amplitude: 0.0014224,
+        },
+        two_qubit: TwoQubitPulseCalibration {
+            duration_ns: 100_000.0,
+            sigma_ns: 5000.0,
+            risefall_ns: 10_000.0,
+            amplitude: 0.5,
+        },
+        rzz: Some(TwoQubitContinuousPulseCalibration {
+            duration_ns: 100_000.0,
+            sigma_ns: 5000.0,
+            risefall_ns: 10_000.0,
+            pi_amplitude: 0.5,
+        }),
+        readout_duration_ns: 200_000.0,
     }
 }
 
@@ -301,9 +390,11 @@ pub fn rigetti_ankaa3_pulse_calibration() -> PulseCalibration {
 /// in program order); two gates sharing a qubit are serialized.
 ///
 /// Returns `Err` rather than guessing for anything this scheduler
-/// doesn't (yet) know how to handle: a calibration/circuit backend
-/// mismatch, or `BackendGate::Rzz` (`TrappedIon`'s native two-qubit
-/// gate -- see this module's doc comment on backend coverage).
+/// doesn't know how to handle: a calibration/circuit backend
+/// mismatch, or a `BackendGate::Rzz` against a calibration table
+/// whose `rzz` field is `None` (true of [`ibm_heron_r2_pulse_calibration`]
+/// and [`rigetti_ankaa3_pulse_calibration`] -- see this module's doc
+/// comment on backend coverage).
 pub fn schedule(bc: &BackendCircuit, cal: &PulseCalibration) -> Result<Schedule, String> {
     if bc.backend != cal.backend {
         return Err(format!(
@@ -363,12 +454,30 @@ pub fn schedule(bc: &BackendCircuit, cal: &PulseCalibration) -> Result<Schedule,
                 busy_until.insert(a, end);
                 busy_until.insert(b, end);
             }
-            BackendGate::Rzz(a, b, _) => {
-                return Err(format!(
-                    "pulse scheduling for Rzz (TrappedIon's native two-qubit gate, on \
-                     qubits {a},{b}) isn't implemented yet -- see this module's doc \
-                     comment on backend coverage"
-                ));
+            BackendGate::Rzz(a, b, theta) => {
+                let rzz_cal = cal.rzz.ok_or_else(|| {
+                    format!(
+                        "pulse scheduling for Rzz (TrappedIon's native two-qubit gate, on \
+                         qubits {a},{b}) has no calibration entry on backend {:?} -- see \
+                         this module's doc comment on backend coverage",
+                        cal.backend
+                    )
+                })?;
+                let t = qubit_time(a, &busy_until).max(qubit_time(b, &busy_until));
+                let amplitude = rzz_cal.pi_amplitude * theta / PI;
+                instructions.push(PulseInstruction::Play {
+                    channel: Channel::Control(a, b),
+                    start_time_ns: t,
+                    duration_ns: rzz_cal.duration_ns,
+                    envelope: Envelope::GaussianSquare {
+                        sigma_ns: rzz_cal.sigma_ns,
+                        risefall_ns: rzz_cal.risefall_ns,
+                    },
+                    amplitude,
+                });
+                let end = t + rzz_cal.duration_ns;
+                busy_until.insert(a, end);
+                busy_until.insert(b, end);
             }
             BackendGate::Measure(q, _c) => {
                 let t = qubit_time(q, &busy_until);
@@ -582,6 +691,108 @@ mod tests {
         assert!(
             sched.has_no_overlaps(),
             "schedule for a real Rigetti-lowered circuit must not overlap: {:?}",
+            sched.instructions
+        );
+        assert!(sched.duration_ns() > 0.0);
+    }
+
+    #[test]
+    fn trapped_ion_calibration_schedules_rzz() {
+        let bc = BackendCircuit {
+            backend: Backend::TrappedIon,
+            num_qubits: 2,
+            num_clbits: 0,
+            gates: vec![BackendGate::Rzz(0, 1, PI)],
+        };
+        let tcal = trapped_ion_pulse_calibration();
+        let sched = schedule(&bc, &tcal).unwrap();
+        assert!(sched.has_no_overlaps());
+        assert_eq!(sched.instructions.len(), 1);
+        match sched.instructions[0] {
+            PulseInstruction::Play { channel, start_time_ns, duration_ns, amplitude, .. } => {
+                assert_eq!(channel, Channel::Control(0, 1));
+                assert_eq!(start_time_ns, 0.0);
+                assert_eq!(duration_ns, tcal.rzz.unwrap().duration_ns);
+                assert_eq!(amplitude, tcal.rzz.unwrap().pi_amplitude, "Rzz(.., PI) should play at the full calibrated pi-pulse amplitude");
+            }
+            ref other => panic!("expected a Play instruction on Control(0,1), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rzz_amplitude_scales_linearly_with_angle() {
+        let bc = BackendCircuit {
+            backend: Backend::TrappedIon,
+            num_qubits: 2,
+            num_clbits: 0,
+            gates: vec![BackendGate::Rzz(0, 1, PI / 2.0)],
+        };
+        let tcal = trapped_ion_pulse_calibration();
+        let sched = schedule(&bc, &tcal).unwrap();
+        match sched.instructions[0] {
+            PulseInstruction::Play { amplitude, .. } => {
+                assert_eq!(
+                    amplitude,
+                    tcal.rzz.unwrap().pi_amplitude / 2.0,
+                    "Rzz(.., PI/2) should play at half the calibrated pi-pulse amplitude"
+                );
+            }
+            ref other => panic!("expected a Play instruction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rzz_occupies_both_qubits() {
+        // Rzz(0,1) . Rot(0, PI): the Rot must not start until the Rzz
+        // (which busies BOTH qubits) has ended -- same invariant as
+        // entangling_gate_occupies_both_qubits, but for TrappedIon's
+        // native two-qubit gate instead of Cx.
+        let bc = BackendCircuit {
+            backend: Backend::TrappedIon,
+            num_qubits: 2,
+            num_clbits: 0,
+            gates: vec![BackendGate::Rzz(0, 1, PI), BackendGate::Rot(0, PI)],
+        };
+        let tcal = trapped_ion_pulse_calibration();
+        let sched = schedule(&bc, &tcal).unwrap();
+        assert!(sched.has_no_overlaps());
+        let rot = sched
+            .instructions
+            .iter()
+            .find(|i| matches!(i, PulseInstruction::Play { channel: Channel::Drive(0), .. }))
+            .unwrap();
+        assert_eq!(
+            rot.start_time_ns(),
+            tcal.rzz.unwrap().duration_ns,
+            "Rot(0) must wait for the Rzz to finish on qubit 0: {rot:?}"
+        );
+    }
+
+    #[test]
+    fn schedules_a_real_trapped_ion_lowered_circuit_without_overlaps() {
+        // Same end-to-end shape as the IbmQ/Rigetti tests above, but
+        // through Backend::TrappedIon's Rzz-native path -- confirms
+        // schedule's new Rzz handling actually holds up against the
+        // real lowering pipeline, not just a hand-built BackendGate
+        // vector.
+        let mut c = Circuit::new(2);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rz(1, 0.3))
+            .push(Gate::Measure(0, 0))
+            .push(Gate::Measure(1, 1));
+        c.num_clbits = 2;
+
+        let bc = backend::lower(&c, Backend::TrappedIon);
+        assert!(
+            bc.gates.iter().any(|g| matches!(g, BackendGate::Rzz(..))),
+            "sanity check: TrappedIon's lowering should actually use Rzz, or this test \
+             isn't exercising the path it claims to"
+        );
+        let sched = schedule(&bc, &trapped_ion_pulse_calibration()).unwrap();
+        assert!(
+            sched.has_no_overlaps(),
+            "schedule for a real TrappedIon-lowered circuit must not overlap: {:?}",
             sched.instructions
         );
         assert!(sched.duration_ns() > 0.0);
