@@ -4,6 +4,63 @@
 //! `sirraya_qutub::core::QuantumRegister`'s `apply_*` surface) -- the
 //! narrowing to a hardware-native set happens in [`crate::native`].
 
+/// A qubit as addressed by the *input program*: `q0`, `q1`, ... exactly
+/// as declared in a `qreg` (or however a non-QASM frontend numbers its
+/// qubits). Logical identity never changes -- `route::route` moves a
+/// logical qubit's *physical* location, never renumbers the logical
+/// qubit itself (see [`PhysicalQubit`] and `route.rs`'s module doc).
+///
+/// Deliberately a thin, zero-cost newtype (`#[repr(transparent)]`-
+/// equivalent) rather than a richer type: the only thing this needs to
+/// guarantee is that a logical index and a physical index can't be
+/// passed to each other's slot by accident, not that either carries
+/// any other invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LogicalQubit(pub usize);
+
+/// A qubit as addressed by *hardware wire position* after routing: a
+/// row in a [`crate::coupling::CouplingMap`]. Which logical qubit's
+/// state currently lives on a given physical qubit changes over the
+/// course of a circuit as `route::route` inserts `Swap`s -- see
+/// `route.rs`'s module doc for the full logical/physical mapping
+/// story.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PhysicalQubit(pub usize);
+
+impl From<usize> for LogicalQubit {
+    fn from(q: usize) -> Self {
+        LogicalQubit(q)
+    }
+}
+impl From<usize> for PhysicalQubit {
+    fn from(q: usize) -> Self {
+        PhysicalQubit(q)
+    }
+}
+impl std::fmt::Display for LogicalQubit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "q{}", self.0)
+    }
+}
+impl std::fmt::Display for PhysicalQubit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "p{}", self.0)
+    }
+}
+
+// NOTE on scope: `Gate`'s own qubit fields below are deliberately left
+// as plain `usize`, not `LogicalQubit`/`PhysicalQubit`, in this pass.
+// `Gate`/`Circuit` are reused as-is both *before* routing (qubit
+// fields mean logical indices) and *after* it (`route::route`'s
+// output `Circuit` -- same `Gate` type -- means physical indices).
+// Giving `Gate` a real logical/physical type parameter is a real,
+// larger design change (effectively `Gate<Q>`/`Circuit<Q>`, touching
+// every module that builds or consumes a `Circuit`) and is tracked as
+// separate follow-up work rather than folded into this change. What
+// *is* fixed here is the actual bug-prone spot: `route.rs`'s internal
+// `logical_to_physical`/`physical_to_logical` bookkeeping, which used
+// to be two parallel `Vec<usize>` that were easy to mix up, and now
+// use these two distinct types instead.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gate {
     H(usize),
