@@ -640,6 +640,45 @@ mod tests {
     }
 
     #[test]
+    fn does_not_commute_diagonal_gate_through_cx_target_wire() {
+        // S(1) . Cx(0, 1) . Sdg(1): S/Sdg are diagonal, but diagonal
+        // gates only commute through Cx on the CONTROL wire (rule 1)
+        // -- qubit 1 here is the TARGET, where only X-basis gates
+        // (rule 3) commute. Being an inverse pair isn't enough on its
+        // own; they're not adjacent, and the widened rule 1 must not
+        // be mistaken for applying to the target wire too.
+        let mut c = Circuit::new(2);
+        c.push(Gate::S(1)).push(Gate::Cx(0, 1)).push(Gate::Sdg(1));
+        let opt = optimize_ir(&c);
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "target-side diagonal gate must not commute/cancel through Cx, got {:?}",
+            opt.gates
+        );
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
+    fn does_not_commute_rx_through_cx_control_wire() {
+        // Rx(0, t) . Cx(0, 1) . Rx(0, -t): Rx is X-basis, but X-basis
+        // gates only commute through Cx on the TARGET wire (rule 3)
+        // -- qubit 0 here is the CONTROL, where only diagonal gates
+        // (rule 1) commute. Mirror image of the test above: confirms
+        // the widened rule 3 doesn't leak onto the control wire either.
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rx(0, 0.4)).push(Gate::Cx(0, 1)).push(Gate::Rx(0, -0.4));
+        let opt = optimize_ir(&c);
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "control-side X-basis gate must not commute/cancel through Cx, got {:?}",
+            opt.gates
+        );
+        assert_same_action(&c, &opt);
+    }
+
+    #[test]
     fn commutes_rx_through_cx_target_wire_to_cancel() {
         let mut c = Circuit::new(2);
         c.push(Gate::Rx(1, 0.5)).push(Gate::Cx(0, 1)).push(Gate::Rx(1, -0.5));
