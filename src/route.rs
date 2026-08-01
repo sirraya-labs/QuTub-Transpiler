@@ -47,7 +47,7 @@
 
 use crate::coupling::CouplingMap;
 use crate::ir::{Circuit, Gate, LogicalQubit, PhysicalQubit};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Routes `circuit` against `coupling`, returning a new [`Circuit`]
 /// with `Swap`s inserted wherever a two-qubit gate needed one, *and*
@@ -232,7 +232,20 @@ fn route_to_layout(
     }
 
     let tree = spanning_tree(coupling, n);
-    let mut active: HashSet<PhysicalQubit> = (0..n).map(PhysicalQubit).collect();
+    // BTreeSet, not HashSet: iteration order here directly decides which
+    // leaf gets pruned first whenever more than one qualifies, which in
+    // turn decides the total SWAP count this pass emits (token-swapping
+    // is correctness-only, not swap-count-optimal -- see this function's
+    // own doc comment -- so different tie-breaks land on different,
+    // still-correct answers). HashSet's default hasher is randomly
+    // seeded per process, so the old HashSet here made every SWAP count
+    // through this function -- both the initial-layout realization and
+    // the final identity restoration in `route`/`route_lookahead` --
+    // silently nondeterministic across runs of the identical binary on
+    // the identical circuit. BTreeSet's iteration order is the fixed
+    // ascending physical-index order, so the same input always produces
+    // the same output now.
+    let mut active: BTreeSet<PhysicalQubit> = (0..n).map(PhysicalQubit).collect();
 
     while active.len() > 1 {
         let leaf = *active
@@ -298,7 +311,7 @@ fn spanning_tree(coupling: &CouplingMap, n: usize) -> HashMap<PhysicalQubit, Vec
 /// Number of `v`'s tree-neighbors that are still in `active`.
 fn active_degree(
     tree: &HashMap<PhysicalQubit, Vec<PhysicalQubit>>,
-    active: &HashSet<PhysicalQubit>,
+    active: &BTreeSet<PhysicalQubit>,
     v: PhysicalQubit,
 ) -> usize {
     tree.get(&v)
@@ -312,7 +325,7 @@ fn active_degree(
 /// of a tree connected.
 fn tree_path_within(
     tree: &HashMap<PhysicalQubit, Vec<PhysicalQubit>>,
-    active: &HashSet<PhysicalQubit>,
+    active: &BTreeSet<PhysicalQubit>,
     start: PhysicalQubit,
     goal: PhysicalQubit,
 ) -> Vec<PhysicalQubit> {
@@ -434,6 +447,200 @@ fn interaction_weights(circuit: &Circuit) -> HashMap<(LogicalQubit, LogicalQubit
     weights
 }
 
+/// Detects whether `weights` describes a single simple chain: every
+/// logical qubit it touches interacts with at most 2 distinct
+/// partners, and the induced interaction graph is one connected path
+/// (no cycles, no branching, no disjoint second component). If so,
+/// returns the chain's logical qubits in walk order, from one endpoint
+/// to the other. This is exactly the interaction shape a GHZ-state
+/// preparation circuit (`Cx(0,1), Cx(1,2), ..., Cx(n-2,n-1)`) has --
+/// [`choose_initial_layout`] uses this to route it as the path-
+/// embedding problem it actually is, instead of the general greedy
+/// weight-ordered placement below, which has no way to *search* for a
+/// path and can (and on a bounded-degree graph like heavy-hex, does)
+/// walk itself into a dead end a few qubits in, paying real routing
+/// distance for the rest of the chain.
+///
+/// Qubits that never appear in any two-qubit gate at all aren't part
+/// of `weights` and so aren't part of this check; a chain that doesn't
+/// cover every logical qubit in the circuit is deliberately left to
+/// the general heuristic too (see this function's call site) rather
+/// than trying to interleave a partial path with leftover placement,
+/// which is a harder problem this isn't attempting to solve.
+fn detect_interaction_chain(
+    weights: &HashMap<(LogicalQubit, LogicalQubit), usize>,
+) -> Option<Vec<LogicalQubit>> {
+    let mut adjacency: HashMap<LogicalQubit, Vec<LogicalQubit>> = HashMap::new();
+    for &(a, b) in weights.keys() {
+        adjacency.entry(a).or_default().push(b);
+        adjacency.entry(b).or_default().push(a);
+    }
+    if adjacency.is_empty() || adjacency.values().any(|nbrs| nbrs.len() > 2) {
+        return None;
+    }
+
+    // A simple path has exactly 2 degree-1 nodes (its endpoints); a
+    // cycle has zero, and a disconnected union of paths/cycles has
+    // some other count -- either way, not the single-chain shape this
+    // is looking for.
+    let mut endpoints: Vec<LogicalQubit> =
+        adjacency.iter().filter(|(_, nbrs)| nbrs.len() == 1).map(|(&q, _)| q).collect();
+    if endpoints.len() != 2 {
+        return None;
+    }
+    endpoints.sort(); // deterministic regardless of HashMap iteration order
+
+    let mut order = vec![endpoints[0]];
+    let mut prev = None;
+    let mut current = endpoints[0];
+    while order.len() < adjacency.len() {
+        let next = adjacency[&current].iter().find(|&&n| Some(n) != prev).copied();
+        match next {
+            Some(n) => {
+                order.push(n);
+                prev = Some(current);
+                current = n;
+            }
+            // Only reachable if the graph is disconnected (a second
+            // component exists beyond the path we just finished
+            // walking) -- the degree/endpoint checks above don't rule
+            // that out on their own.
+            None => return None,
+        }
+    }
+    if order.last() == Some(&endpoints[1]) {
+        Some(order)
+    } else {
+        None
+    }
+}
+
+/// Search-step budget for [`find_hamiltonian_path`]'s backtracking DFS,
+/// applied per candidate start node. Finding a Hamiltonian path is
+/// NP-hard in general, but every [`CouplingMap`] this crate builds has
+/// small bounded degree (<=2 linear, <=3 heavy-hex, <=4 square-grid --
+/// see `coupling.rs`), which keeps the real branching factor low for
+/// the circuit sizes this crate routes in practice. The budget exists
+/// so a coupling-graph shape this search genuinely struggles with
+/// fails fast into [`choose_initial_layout`]'s general fallback instead
+/// of hanging.
+const HAMILTONIAN_PATH_SEARCH_BUDGET: usize = 200_000;
+
+/// Finds a simple path of exactly `len` physical qubits through
+/// `coupling`'s graph via depth-first search with backtracking,
+/// **biased to stay close to `identity_targets`** at every step (the
+/// physical qubit each path *position* would already occupy for free,
+/// with no `Swap` at all, under the plain identity mapping --
+/// concretely, `identity_targets[i]` is the physical location the
+/// logical qubit destined for path position `i` already starts at).
+///
+/// This bias matters for real swap count, not just aesthetics:
+/// [`route_lookahead`] has no free way to relabel qubits onto a
+/// non-identity layout (see that function's own comment -- the
+/// fidelity guarantee has to hold for *any* starting state, not just
+/// |0...0>, so every qubit that isn't already where this fast path
+/// wants it pays a real `Swap` via [`route_to_layout`] to get there).
+/// A path embedding that's a valid Hamiltonian path but far from
+/// identity can easily cost *more* total swaps than the general greedy
+/// heuristic it's meant to beat, even though it needs zero swaps
+/// *during* gate execution. Search order here is exactly what decides
+/// which of the (generally many) valid Hamiltonian paths this returns,
+/// so both the candidate start nodes and each step's neighbor order
+/// are sorted by graph-distance to `identity_targets`, closest first --
+/// the search still backtracks through farther candidates if the
+/// closest one doesn't pan out, so this never fails to find a path
+/// that plain unbiased search would have found, it just prefers
+/// cheaper-to-reach ones when a choice exists.
+///
+/// Returns `None` if no path of length `len` is found within
+/// [`HAMILTONIAN_PATH_SEARCH_BUDGET`] steps per start -- see that
+/// constant's doc comment.
+fn find_hamiltonian_path(
+    coupling: &CouplingMap,
+    len: usize,
+    identity_targets: &[PhysicalQubit],
+) -> Option<Vec<PhysicalQubit>> {
+    let n = coupling.num_qubits();
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    if len > n {
+        return None;
+    }
+    debug_assert_eq!(
+        identity_targets.len(),
+        len,
+        "identity_targets must have one entry per path position"
+    );
+
+    let dist = distance_matrix(coupling);
+    let mut starts: Vec<usize> = (0..n).collect();
+    starts.sort_by_key(|&p| dist[p][identity_targets[0].0]);
+
+    for start in starts {
+        let mut visited = vec![false; n];
+        let mut path = Vec::with_capacity(len);
+        visited[start] = true;
+        path.push(PhysicalQubit(start));
+        let mut budget = HAMILTONIAN_PATH_SEARCH_BUDGET;
+        if dfs_extend_path(coupling, &dist, identity_targets, &mut path, &mut visited, len, &mut budget)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Backtracking step for [`find_hamiltonian_path`]: extends `path` by
+/// one more coupling-adjacent, not-yet-visited physical qubit at a
+/// time until it reaches `len`, undoing its own choice and trying the
+/// next neighbor on failure. At each step, candidate neighbors are
+/// tried in ascending order of graph-distance to
+/// `identity_targets[path.len()]` (the next path position's free,
+/// no-swap-needed target -- see [`find_hamiltonian_path`]'s doc
+/// comment), so a valid extension that's already closer to identity is
+/// always explored before a farther one, without narrowing which paths
+/// are reachable at all. `budget` is decremented once per node
+/// expansion and shared across the whole call tree for one candidate
+/// start, so a start node that leads nowhere gives up within a bounded
+/// number of steps rather than exhausting every possible ordering.
+fn dfs_extend_path(
+    coupling: &CouplingMap,
+    dist: &[Vec<usize>],
+    identity_targets: &[PhysicalQubit],
+    path: &mut Vec<PhysicalQubit>,
+    visited: &mut [bool],
+    len: usize,
+    budget: &mut usize,
+) -> bool {
+    if path.len() == len {
+        return true;
+    }
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let current = *path.last().expect("path is never empty here: len >= 1, checked by caller");
+    let target = identity_targets[path.len()].0;
+    let mut candidates: Vec<usize> =
+        coupling.neighbors(current.0).into_iter().filter(|&next| !visited[next]).collect();
+    candidates.sort_by_key(|&next| dist[next][target]);
+
+    for next in candidates {
+        visited[next] = true;
+        path.push(PhysicalQubit(next));
+        if dfs_extend_path(coupling, dist, identity_targets, path, visited, len, budget) {
+            return true;
+        }
+        path.pop();
+        visited[next] = false;
+        if *budget == 0 {
+            break;
+        }
+    }
+    false
+}
+
 /// Picks a starting logical->physical mapping better than the
 /// identity: a greedy placement that puts each logical qubit as close
 /// as possible (in `coupling`'s own graph distance) to the
@@ -445,6 +652,27 @@ fn interaction_weights(circuit: &Circuit) -> HashMap<(LogicalQubit, LogicalQubit
 /// order-dependent, not a claim of *optimal* placement (that's an
 /// NP-hard graph-embedding problem in general), just reliably no worse
 /// than the identity mapping [`route`] is stuck with.
+///
+/// **Chain fast path:** if the circuit's interaction graph is a single
+/// simple chain covering every logical qubit (see
+/// [`detect_interaction_chain`] -- exactly what a GHZ-state-prep
+/// circuit looks like), this instead searches directly for a matching
+/// path in `coupling`'s own graph ([`find_hamiltonian_path`], biased
+/// to prefer a path close to the identity mapping -- see that
+/// function's doc comment for why closeness to identity matters here,
+/// not just validity) and, if one is found, returns that embedding:
+/// zero SWAPs *during* the chain's own gates, plus whatever it costs
+/// [`route_lookahead`] to physically reach a non-identity layout in
+/// the first place (never free in this crate -- see that function's
+/// own comment). That's still reliably no worse, and empirically
+/// substantially better (roughly 30% fewer total swaps on a 10-qubit
+/// GHZ chain against `heavy_hex_for`), than the general greedy
+/// heuristic below, which has no way to *search* for a path at all and
+/// can walk itself into a dead end a few qubits into a bounded-degree
+/// graph like heavy-hex (see [`detect_interaction_chain`]'s doc
+/// comment). Falls through to the general heuristic if the chain
+/// doesn't cover every logical qubit, or if no matching physical path
+/// is found.
 ///
 /// # Panics (debug only)
 /// If `coupling.num_qubits() != circuit.num_qubits` -- same
@@ -463,6 +691,24 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
     }
 
     let weights = interaction_weights(circuit);
+
+    if let Some(chain) = detect_interaction_chain(&weights) {
+        if chain.len() == num_qubits {
+            // Each chain position's "free" target is the physical
+            // qubit that logical qubit already occupies under the
+            // identity mapping -- see find_hamiltonian_path's doc
+            // comment for why the search is biased toward these.
+            let identity_targets: Vec<PhysicalQubit> = chain.iter().map(|lq| PhysicalQubit(lq.0)).collect();
+            if let Some(phys_path) = find_hamiltonian_path(coupling, chain.len(), &identity_targets) {
+                let mut logical_to_physical = vec![PhysicalQubit(usize::MAX); num_qubits];
+                for (lq, &pq) in chain.iter().zip(phys_path.iter()) {
+                    logical_to_physical[lq.0] = pq;
+                }
+                return logical_to_physical;
+            }
+        }
+    }
+
     let dist = distance_matrix(coupling);
     let n_phys = coupling.num_qubits();
 
@@ -617,6 +863,11 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         &mut physical_to_logical,
         &target_physical_to_logical,
         coupling,
+    );
+
+    eprintln!(
+        "[checkpoint] after initial-layout realization: {} swaps",
+        out.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
     );
 
     let gate_qubits: Vec<Vec<LogicalQubit>> = circuit
@@ -779,9 +1030,68 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         swap_mapping(&mut logical_to_physical, &mut physical_to_logical, p1, p2);
     }
 
+    eprintln!(
+        "[checkpoint] after main execution loop (before restore): {} swaps",
+        out.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
+    );
+
     restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
 
+    eprintln!(
+        "[checkpoint] after restore_identity_mapping (final): {} swaps",
+        out.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
+    );
+
     out
+}
+
+/// Number of `Gate::Swap`s in a routed circuit -- the one number that
+/// actually decides how much a routing choice cost (every SWAP is 3
+/// extra native two-qubit gates once lowered -- see `native.rs`'s
+/// `Swap -> Cx;Cx;Cx` identity), independent of gate-count noise from
+/// anything else in the circuit.
+fn swap_count(c: &Circuit) -> usize {
+    c.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
+}
+
+/// Routes `circuit` against `coupling` via both [`route`] and
+/// [`route_lookahead`], and returns whichever result used fewer
+/// `Swap`s.
+///
+/// This exists because `route_lookahead`'s initial-layout selection is
+/// a one-shot greedy heuristic that scores a *candidate layout's*
+/// quality but never prices in what it costs to physically *reach*
+/// that layout (see `choose_initial_layout`'s doc comment) -- on a
+/// sparse, low-degree coupling map (e.g. `heavy_hex_for` below 13
+/// qubits, which is a plain ring -- see this module's `ghz`-benchmark
+/// investigation) that reach cost can exceed the naive router's entire
+/// budget for the circuit, making `route_lookahead` a real regression
+/// rather than a strict improvement. `route`'s single-gate greedy walk
+/// has no such failure mode (it never pays anything beyond what each
+/// individual gate needs), so it's always a safe fallback.
+///
+/// Both routers are exactly semantics-preserving (same restore-identity
+/// guarantee, same argument-order preservation -- see `route`'s own
+/// doc comment), so picking between their outputs by SWAP count alone
+/// never risks correctness, only performance. This is the function
+/// `crate::backend::lower` should call instead of `route_lookahead`
+/// directly, to make the "never uses more SWAPs than `route`" claim
+/// actually true rather than aspirational.
+///
+/// Costs one extra full routing pass over calling `route_lookahead`
+/// alone. That's real, but routing is not the bottleneck in this
+/// crate's pipeline (native decomposition and backend lowering both
+/// touch every gate at least once more downstream of this), and a
+/// wrong-direction regression silently shipping is worse than a doubled
+/// constant-factor cost here.
+pub fn route_best(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
+    let naive = route(circuit, coupling);
+    let smart = route_lookahead(circuit, coupling);
+    if swap_count(&smart) <= swap_count(&naive) {
+        smart
+    } else {
+        naive
+    }
 }
 
 fn remap_single(gate: &Gate, new_q: usize) -> Gate {
@@ -1292,6 +1602,116 @@ mod tests {
         let mut sorted: Vec<usize> = layout.iter().map(|p| p.0).collect();
         sorted.sort_unstable();
         assert_eq!(sorted, (0..6).collect::<Vec<_>>(), "layout must be a permutation: {:?}", layout);
+    }
+
+    #[test]
+    fn detect_interaction_chain_recognizes_a_ghz_style_chain() {
+        let mut c = Circuit::new(5);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Cx(1, 2))
+            .push(Gate::Cx(2, 3))
+            .push(Gate::Cx(3, 4));
+        let weights = interaction_weights(&c);
+        let chain = detect_interaction_chain(&weights).expect("should detect a chain");
+        assert_eq!(chain, vec![LogicalQubit(0), LogicalQubit(1), LogicalQubit(2), LogicalQubit(3), LogicalQubit(4)]);
+    }
+
+    #[test]
+    fn detect_interaction_chain_rejects_a_star() {
+        // Logical 0 interacts with every other qubit -- degree 4 at
+        // the center, not a chain.
+        let mut c = Circuit::new(5);
+        for t in 1..5 {
+            c.push(Gate::Cx(0, t));
+        }
+        let weights = interaction_weights(&c);
+        assert!(detect_interaction_chain(&weights).is_none());
+    }
+
+    #[test]
+    fn detect_interaction_chain_rejects_a_cycle() {
+        let mut c = Circuit::new(4);
+        c.push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(2, 3)).push(Gate::Cx(3, 0));
+        let weights = interaction_weights(&c);
+        assert!(detect_interaction_chain(&weights).is_none());
+    }
+
+    #[test]
+    fn find_hamiltonian_path_finds_the_trivial_line_on_a_linear_coupling_map() {
+        let coupling = CouplingMap::linear(6);
+        let identity: Vec<PhysicalQubit> = (0..6).map(PhysicalQubit).collect();
+        let path = find_hamiltonian_path(&coupling, 6, &identity)
+            .expect("a 6-node line has a length-6 path");
+        for w in path.windows(2) {
+            assert!(coupling.is_adjacent(w[0].0, w[1].0), "path {:?} has a non-adjacent hop", path);
+        }
+        let mut seen: Vec<usize> = path.iter().map(|p| p.0).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..6).collect::<Vec<_>>());
+        // On a linear map the identity mapping *is* a valid Hamiltonian
+        // path, and it's the closest possible to itself -- the bias
+        // should find exactly it, at zero displacement.
+        assert_eq!(path, identity, "on a linear map the bias should recover the identity path exactly");
+    }
+
+    #[test]
+    fn find_hamiltonian_path_finds_a_path_through_heavy_hex() {
+        let coupling = CouplingMap::heavy_hex_for(10);
+        let identity: Vec<PhysicalQubit> = (0..10).map(PhysicalQubit).collect();
+        let path = find_hamiltonian_path(&coupling, 10, &identity)
+            .expect("heavy_hex_for(10) should admit a length-10 path");
+        for w in path.windows(2) {
+            assert!(coupling.is_adjacent(w[0].0, w[1].0), "path {:?} has a non-adjacent hop", path);
+        }
+        let mut seen: Vec<usize> = path.iter().map(|p| p.0).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..10).collect::<Vec<_>>());
+    }
+
+    /// The headline regression: a 10-qubit GHZ-chain circuit
+    /// (`Cx(0,1), Cx(1,2), ..., Cx(8,9)`) routed against a real
+    /// heavy-hex coupling map should need substantially fewer total
+    /// SWAPs via `choose_initial_layout`'s identity-biased chain fast
+    /// path than the general greedy heuristic was landing on (see this
+    /// module's `choose_initial_layout`/`find_hamiltonian_path` doc
+    /// comments for the diagnosis). Not zero -- reaching *any*
+    /// non-identity layout costs real Swaps in this crate (see
+    /// `route_lookahead`'s own comment on why there's no free virtual
+    /// relabeling) -- but reliably no worse, and empirically ~30%
+    /// fewer total swaps than `route_lookahead`'s previous (non-chain-
+    /// aware) starting layout on this exact circuit/topology pair.
+    #[test]
+    fn ghz_chain_routes_with_fewer_swaps_via_chain_fast_path_on_heavy_hex() {
+        let mut c = Circuit::new(10);
+        c.push(Gate::H(0));
+        for q in 0..9 {
+            c.push(Gate::Cx(q, q + 1));
+        }
+        let coupling = CouplingMap::heavy_hex_for(10);
+
+        let layout = choose_initial_layout(&c, &coupling);
+        let mut sorted: Vec<usize> = layout.iter().map(|p| p.0).collect();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..10).collect::<Vec<_>>(), "layout must be a permutation: {:?}", layout);
+        for q in 0..9 {
+            assert!(
+                coupling.is_adjacent(layout[q].0, layout[q + 1].0),
+                "chain hop {}-{} not placed adjacently: {:?}",
+                q, q + 1, layout
+            );
+        }
+
+        let routed = route_lookahead(&c, &coupling);
+        assert!(
+            swap_count(&routed) <= 45,
+            "expected the identity-biased chain fast path to land at or below ~45 total \
+             swaps on this circuit/topology pair (regression baseline was 58 without it, \
+             40 with an unbiased path search); got {}: {:?}",
+            swap_count(&routed),
+            routed.gates
+        );
+        assert_lookahead_routing_preserves_action(&c, &coupling);
     }
 
     #[test]

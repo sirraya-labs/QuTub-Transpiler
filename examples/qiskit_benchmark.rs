@@ -25,18 +25,59 @@
 
 use sirraya_qutub_transpiler::coupling::CouplingMap;
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
-use sirraya_qutub_transpiler::{fidelity, optimize_ir, qasm, lower, Backend};
+use sirraya_qutub_transpiler::{fidelity, optimize_ir, qasm, lower, Backend, BackendCircuit, BackendGate};
 use std::fs;
 
-/// Standard GHZ-state preparation: `H` on qubit 0, then a `Cx` ladder
-/// out to every other qubit. A staple correctness/scaling benchmark
-/// (also used in `fidelity_scaling.rs`) precisely because its
-/// structure is trivial to reason about by hand.
+/// **Topology caveat (why this benchmark table includes both `ghz_10`
+/// and `ghz_16`):** `CouplingMap::heavy_hex_for(n)` picks the smallest
+/// `d x d` hexagon grid with `>= n` qubits, and a single hexagon
+/// (`d=1`) already has 12 qubits -- so for any `n <= 12`,
+/// `heavy_hex_for(n)` is a plain 12-cycle with the tail truncated, max
+/// degree 2 everywhere. Heavy-hex's actual defining feature (interior
+/// degree-3 "branch" qubits, from two hexagons sharing a wall) doesn't
+/// exist in the coupling map at all until `n >= 13`. `ghz_10` is a
+/// real, useful regression case (see `route.rs`'s
+/// `ghz_chain_routes_with_fewer_swaps_via_chain_fast_path_on_heavy_hex`
+/// test, which target-picks a similarly small `n` on purpose), but a
+/// benchmark table that only ever routes against `n <= 12` is silently
+/// never exercising heavy-hex's actual branching structure, degree-3
+/// nodes included -- `ghz_16` below is included specifically to fix
+/// that gap for this comparison table.
+///
+/// Standard GHZ-state preparation, built as a **linear CNOT chain**:
+/// `H` on qubit 0, then `Cx(q, q+1)` for every adjacent pair. Produces
+/// the exact same target state as the more commonly-seen "star"
+/// construction (`H(0)` then `Cx(0, q)` fanning out from a single hub
+/// qubit for every other `q`) -- but the two have completely different
+/// interaction graphs, and that difference is the whole reason this
+/// function builds the chain, not the star.
+///
+/// # Why not the star
+/// This function used to build the star. That's a legitimate GHZ
+/// circuit, but a bad benchmark choice for *this* crate specifically:
+/// `route.rs`'s `choose_initial_layout` has a dedicated "chain fast
+/// path" (`detect_interaction_chain` -> `find_hamiltonian_path`) built
+/// around exactly the linear-chain interaction shape below -- its own
+/// test suite has a test proving the star shape is *rejected* by that
+/// detector (`detect_interaction_chain_rejects_a_star`, in
+/// `route.rs`), on the grounds that a degree-`(n-1)` hub qubit isn't a
+/// chain at all. A star-shaped GHZ never gets to use the fast path
+/// this crate actually built for GHZ-shaped circuits, and separately,
+/// no numbering or layout choice can route a degree-`(n-1)` hub onto a
+/// max-degree-3 heavy-hex qubit for free regardless -- that's a
+/// structural mismatch between the circuit and the topology, not
+/// something a routing pass can optimize around. Benchmarking the star
+/// was measuring that structural mismatch, not this crate's router.
+/// The chain construction is also the standard hardware-efficient way
+/// to prepare a GHZ state on any bounded-degree device in practice
+/// (every qubit here needs at most 2 neighbors, matching heavy-hex's
+/// minimum degree) -- not a construction chosen to flatter this
+/// benchmark.
 fn ghz(num_qubits: usize) -> Circuit {
     let mut c = Circuit::new(num_qubits);
     c.push(Gate::H(0));
-    for q in 1..num_qubits {
-        c.push(Gate::Cx(0, q));
+    for q in 0..num_qubits.saturating_sub(1) {
+        c.push(Gate::Cx(q, q + 1));
     }
     c
 }
@@ -139,11 +180,57 @@ fn circuit_to_portable_qasm(c: &Circuit, name: &str) -> String {
 }
 
 /// Same critical-path depth estimate used by `routing_demo.rs`: the
-/// longest chain of gates touching any single qubit.
+/// longest chain of gates touching any single qubit. Kept for
+/// reference/debugging on the *source*-level circuit, but **not** what
+/// gets printed in this benchmark's table -- see [`backend_depth`]'s
+/// doc comment for why the source-level number isn't the one to
+/// compare against Qiskit's.
+#[allow(dead_code)]
 fn depth(c: &Circuit) -> usize {
     let mut last_layer = vec![0usize; c.num_qubits];
     for gate in &c.gates {
         let qs = gate.qubits();
+        let layer = qs.iter().map(|&q| last_layer[q]).max().unwrap_or(0) + 1;
+        for q in qs {
+            last_layer[q] = layer;
+        }
+    }
+    last_layer.into_iter().max().unwrap_or(0)
+}
+
+/// The same critical-path depth estimate as [`depth`], but over a
+/// lowered, routed [`sirraya_qutub_transpiler::backend::BackendCircuit`]
+/// instead of the source-level [`Circuit`] -- **this** is the number
+/// this benchmark's table actually prints and compares against
+/// Qiskit's own depth column.
+///
+/// This distinction matters and used to be silently wrong: `main`
+/// below builds `bc` via `optimize_ir` -> `lower(_, Backend::IbmQ)`
+/// (which routes against heavy-hex, inserting `Swap`s, and expands
+/// every gate to the `{rz, sx/rot, cx}` native basis), but the printed
+/// "depth" column was computed by calling `depth(circuit)` on the
+/// original, un-routed, un-lowered *source* circuit instead of on
+/// `bc`. Qiskit's own depth column, by contrast, is measured on its
+/// fully transpiled output circuit -- so the two numbers were never
+/// actually describing the same thing (e.g. `ghz_16`'s old printed
+/// depth of `16` was the depth of a 16-gate abstract GHZ ladder, not
+/// of the 417-gate circuit this crate actually routed and lowered).
+/// [`BackendGate::qubits`] doesn't exist as a public helper the way
+/// [`Gate::qubits`] does, so this reimplements the same one-line
+/// qubit-extraction match `depth` above uses, specialized to
+/// `BackendGate`'s variants (`Rz`/`Rot`/`Measure` touch one qubit;
+/// `Cx`/`Cz`/`Rzz` touch two).
+fn backend_depth(c: &BackendCircuit) -> usize {
+    let mut last_layer = vec![0usize; c.num_qubits];
+    for gate in &c.gates {
+        let qs: Vec<usize> = match *gate {
+            BackendGate::Rz(q, _) | BackendGate::Rot(q, _) | BackendGate::Measure(q, _) => {
+                vec![q]
+            }
+            BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => {
+                vec![a, b]
+            }
+        };
         let layer = qs.iter().map(|&q| last_layer[q]).max().unwrap_or(0) + 1;
         for q in qs {
             last_layer[q] = layer;
@@ -179,6 +266,7 @@ fn export_coupling_map(coupling: &CouplingMap, path: &str) {
 fn main() {
     let benchmarks: Vec<(&str, Circuit)> = vec![
         ("ghz_10", ghz(10)),
+        ("ghz_16", ghz(16)),
         ("ansatz_6q_3layer", hardware_efficient_ansatz(6, 3)),
         ("layered_random_8q_4round", layered_random(8, 4)),
     ];
@@ -186,8 +274,8 @@ fn main() {
     fs::create_dir_all("qiskit_benchmark_qasm").expect("failed to create output dir");
 
     println!(
-        "{:<28}  {:>10}  {:>6}  {:>10}  {:>10}  {:>12}",
-        "benchmark", "src gates", "depth", "1q (IBM)", "2q (IBM)", "est fidelity"
+        "{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>12}",
+        "benchmark", "src gates", "depth (IBM)", "1q (IBM)", "2q (IBM)", "est fidelity"
     );
 
     for (name, circuit) in &benchmarks {
@@ -217,10 +305,10 @@ fn main() {
         export_coupling_map(&coupling, &format!("qiskit_benchmark_qasm/{}_coupling.txt", name));
 
         println!(
-            "{:<28}  {:>10}  {:>6}  {:>10}  {:>10}  {:>11.6}%",
+            "{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>11.6}%",
             name,
             circuit.gates.len(),
-            depth(circuit),
+            backend_depth(&bc),
             single,
             two,
             est_fidelity * 100.0
