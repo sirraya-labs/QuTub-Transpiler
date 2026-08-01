@@ -2,70 +2,82 @@
 //! of only the trapped-ion-style `{Rz, Ry, Rzz}` target in [`crate::native`].
 //!
 //! # Backends implemented
-//! - [`Backend::TrappedIon`] -- `{Rz, Ry, Rzz}`. Delegates straight to
-//!   [`crate::native::decompose`] (unchanged, already tested).
-//! - [`Backend::IbmQ`] -- `{Rz, Rx, Cx}`, modeling IBM's superconducting
-//!   basis (virtual-Z framing + a native two-qubit `CNOT`).
-//! - [`Backend::Rigetti`] -- `{Rz, Rx, Cz}`, modeling Rigetti's
-//!   superconducting basis (`CZ`-native rather than `CNOT`-native).
+//! Each backend is an implementation of [`crate::backend_spec::BackendSpec`]
+//! in its own file, referenced by one [`Backend`] constant -- see
+//! `backend/spec.rs`'s module doc for why this is a trait rather than a
+//! closed `match`-per-variant enum, and for what a new backend needs to
+//! implement to plug in here.
+//! - [`Backend::TrappedIon`] (`backend/trapped_ion.rs`) -- `{Rz, Ry, Rzz}`.
+//!   Its native gate set already *is* [`crate::native::decompose`]'s own
+//!   canonical output, so lowering is just relabeling (see
+//!   `BackendSpec::is_native_decompose_target`).
+//! - [`Backend::IbmQ`] (`backend/ibmq.rs`) -- `{Rz, Rx, Cx}`, modeling
+//!   IBM's superconducting basis (virtual-Z framing + a native two-qubit
+//!   `CNOT`).
+//! - [`Backend::Rigetti`] (`backend/rigetti.rs`) -- `{Rz, Rx, Cz}`,
+//!   modeling Rigetti's superconducting basis (`CZ`-native rather than
+//!   `CNOT`-native).
 //!
-//! Two new circuit identities do the actual work here, on top of the
-//! ones already in `native.rs`:
-//! 1. `Ry(theta) == Rx(-pi/2) . Rz(theta) . Rx(pi/2)` -- reused
-//!    directly from the `RYY` decomposition in `native.rs` (same
-//!    Y = Rx(-pi/2).Z.Rx(pi/2) fact, exponentiated), so IBMQ/Rigetti's
-//!    single-qubit gates reuse the *same* ZYZ synthesis as the
-//!    trapped-ion target and just re-express the resulting `Ry` calls.
-//! 2. `Rzz(a, b, theta) == Cx(a, b) . Rz(b, theta) . Cx(a, b)` -- new,
-//!    and the reason `Cx` is exactly as cheap on `IbmQ` as `Rzz` is on
-//!    `TrappedIon` (one native two-qubit gate), while every *other*
-//!    two-qubit gate that isn't already `Cx` costs more.
+//! Two circuit identities, generic across every non-`TrappedIon`
+//! backend, do the actual re-expansion work in *this* file (each
+//! backend's own file supplies only the piece that's genuinely
+//! backend-specific -- see `push_two_qubit_zz`'s doc comment):
+//! 1. `Ry(theta) == Rx(-pi/2) . Rz(theta) . Rx(pi/2)` (see [`push_ry`])
+//!    -- reused directly from the `RYY` decomposition in `native.rs`
+//!    (same Y = Rx(-pi/2).Z.Rx(pi/2) fact, exponentiated), so any
+//!    `Rx`-axis backend's single-qubit gates reuse the *same* ZYZ
+//!    synthesis as the trapped-ion target and just re-express the
+//!    resulting `Ry` calls.
+//! 2. `Rzz(a, b, theta) == Cx(a, b) . Rz(b, theta) . Cx(a, b)` -- the
+//!    reason `Cx` is exactly as cheap on `IbmQ` as `Rzz` is on
+//!    `TrappedIon` (one native two-qubit gate). `IbmQ` uses this
+//!    directly; `Rigetti` (`Cz`-native, no native `Cx`) uses a
+//!    shortened variant of it -- see `backend/rigetti.rs`'s own doc
+//!    comment for the third identity that gets it there in 2 `H`'s
+//!    instead of 4.
 //!
-//! `Rigetti` (`Cz`-native, no native `Cx`) lowers the same
-//! `Cx(a,b).Rz(b,theta).Cx(a,b)` intermediate, but *not* by naively
-//! substituting `Cx(a,b) == H(b).Cz(a,b).H(b)` twice (which would cost
-//! 4 `H`'s). Instead it uses a third identity:
-//! 3. `H(b) . Rz(b, theta) . H(b) == Rx(b, theta)` -- exact, because
-//!    conjugating the Pauli `Z` generator by `H` gives `X`
-//!    (`H.Z.H == X`), so conjugating `Rz(theta) = exp(-i*theta*Z/2)` by
-//!    `H` gives `Rx(theta) = exp(-i*theta*X/2)` at the operator-
-//!    exponential level. Substituting this into the naive
-//!    `H.Cz.H . Rz(theta) . H.Cz.H` expansion collapses the *middle*
-//!    `H . Rz(theta) . H` into a single native `Rx` (Rigetti's `Rot`),
-//!    leaving `H(b) . Cz(a,b) . Rx(b,theta) . Cz(a,b) . H(b)` -- 2 `H`'s
-//!    instead of 4, same 2 `Cz`'s as before. `push_rzz`'s `Rigetti` arm
-//!    below builds exactly this shorter form directly, rather than
-//!    calling a generic `Cx`-via-`Cz` helper twice and relying on a
-//!    peephole pass to notice the cancellation after the fact.
-//!
-//! # What's not here: Pasqal (neutral atoms)
+//! # What's not here: Pasqal (neutral atoms) or a real photonic backend
 //! Neutral-atom platforms (Pasqal, and analog/digital Rydberg-blockade
-//! devices generally) aren't a fourth entry in this same enum on
-//! purpose. Their native "two-qubit gate" is a blockade interaction
-//! between whichever atoms are currently within blockade radius of each
-//! other in a *movable, laser-tweezer-defined* 2D/3D layout -- so
-//! "compiling to Pasqal's native gates" is inseparable from *placing*
-//! the atoms and routing which pairs are ever simultaneously in
-//! blockade range, which is a materially different problem from
-//! "express this unitary in terms of a fixed two-qubit gate" (the
-//! problem this module and `native.rs` solve). Pasqal does also expose
-//! a "digital" mode with a fixed local `CZ`-like gate (making it
-//! superficially similar to `Rigetti` here), but modeling it correctly
-//! still needs blockade-radius/layout constraints this crate doesn't
-//! have -- shipping a `Backend::Pasqal` that reused the `Rigetti` path
-//! under a different name would be presenting an untested, physically
-//! incomplete backend as equivalent to the two above, which were tested
-//! the same way `native.rs` was. Left as a follow-on.
+//! devices generally) aren't a fourth [`BackendSpec`] on purpose. Their
+//! native "two-qubit gate" is a blockade interaction between whichever
+//! atoms are currently within blockade radius of each other in a
+//! *movable, laser-tweezer-defined* 2D/3D layout -- so "compiling to
+//! Pasqal's native gates" is inseparable from *placing* the atoms and
+//! routing which pairs are ever simultaneously in blockade range, which
+//! is a materially different problem from "express this unitary in
+//! terms of a fixed two-qubit gate" (the problem this module and
+//! `native.rs` solve, and what `BackendSpec::push_two_qubit_zz` assumes
+//! every implementor is doing -- see `backend/spec.rs`'s module doc).
+//! Pasqal does also expose a "digital" mode with a fixed local
+//! `CZ`-like gate (making it superficially similar to `Rigetti` here),
+//! but modeling it correctly still needs blockade-radius/layout
+//! constraints this crate doesn't have.
+//!
+//! A photonic backend runs into the same wall from a different
+//! direction: linear-optical qubits (dual-rail, or continuous-variable
+//! encodings) don't have a `BackendGate::Rot`/`Rzz`-shaped native gate
+//! set at all -- their primitives are beamsplitters and phase shifters
+//! acting on modes, not qubit-indexed rotations, and (for dual-rail,
+//! KLM-style) two-qubit gates are probabilistic/measurement-induced
+//! rather than deterministic unitaries. `BackendSpec` as written can't
+//! express that honestly. Shipping a `Backend::Photonic` that reused
+//! `Rigetti`'s or `IbmQ`'s gate identities under a different name would
+//! be presenting untested, physically wrong gate identities as
+//! equivalent to the three backends above, which were each tested
+//! against the real simulator the way `native.rs` was. A real photonic
+//! backend needs its own gate representation (likely a new
+//! `BackendGate`-like enum, not a `BackendSpec` impl of this one) --
+//! left as a follow-on, same as Pasqal.
 
 use crate::ir::{Circuit, Gate};
 use std::f64::consts::FRAC_PI_2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backend {
-    TrappedIon,
-    IbmQ,
-    Rigetti,
-}
+mod ibmq;
+mod rigetti;
+mod spec;
+mod trapped_ion;
+
+pub use spec::{Backend, BackendSpec, RotAxis};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BackendGate {
@@ -105,7 +117,7 @@ impl BackendCircuit {
             gates: Vec::new(),
         }
     }
-    fn push(&mut self, g: BackendGate) {
+    pub(crate) fn push(&mut self, g: BackendGate) {
         self.gates.push(g);
     }
 
@@ -128,7 +140,7 @@ impl BackendCircuit {
     }
 }
 
-const EPS: f64 = 1e-9;
+pub(crate) const EPS: f64 = 1e-9;
 
 /// Lowers a source-level circuit straight to `backend`'s native gate set.
 ///
@@ -150,66 +162,62 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
         None => circuit,
     };
 
-    match backend {
-        Backend::TrappedIon => {
-            // Already-tested path: reuse native.rs verbatim.
-            let native = crate::native::decompose(circuit);
-            let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
-            bc.num_clbits = native.num_clbits;
-            for g in &native.gates {
-                bc.push(match *g {
-                    crate::native::NativeGate::Rz(q, a) => BackendGate::Rz(q, a),
-                    crate::native::NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
-                    crate::native::NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
-                    crate::native::NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
-                });
-            }
-            optimize(&mut bc);
-            bc
+    // Reuse the same Rz/Ry/Rzz canonical form for every backend
+    // (native.rs), then hand each gate to `backend`'s own
+    // `BackendSpec` to re-express in its native gate set.
+    let native = crate::native::decompose(circuit);
+    let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
+    bc.num_clbits = native.num_clbits;
+
+    if backend.is_native_decompose_target() {
+        // This backend's native gate set already *is*
+        // native::decompose's canonical output (true only for
+        // TrappedIon today) -- nothing to re-express, just relabel.
+        for g in &native.gates {
+            bc.push(match *g {
+                crate::native::NativeGate::Rz(q, a) => BackendGate::Rz(q, a),
+                crate::native::NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
+                crate::native::NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
+                crate::native::NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
+            });
         }
-        Backend::IbmQ | Backend::Rigetti => {
-            // Reuse the same Rz/Ry/Rzz canonical form (native.rs), then
-            // re-express each gate in terms of this backend's native
-            // Rx/Cx (IbmQ) or Rx/Cz (Rigetti).
-            let native = crate::native::decompose(circuit);
-            let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
-            bc.num_clbits = native.num_clbits;
-            for g in &native.gates {
-                match *g {
-                    crate::native::NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
-                    crate::native::NativeGate::Ry(q, a) => push_ry_via_rx(&mut bc, q, a),
-                    crate::native::NativeGate::Rzz(a, b, t) => push_rzz(&mut bc, backend, a, b, t),
-                    crate::native::NativeGate::Measure(q, c) => bc.push(BackendGate::Measure(q, c)),
-                }
+        optimize(&mut bc);
+    } else {
+        let axis = backend.rot_axis();
+        for g in &native.gates {
+            match *g {
+                crate::native::NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
+                crate::native::NativeGate::Ry(q, a) => push_ry(&mut bc, axis, q, a),
+                crate::native::NativeGate::Rzz(a, b, t) => backend.push_two_qubit_zz(&mut bc, a, b, t),
+                crate::native::NativeGate::Measure(q, c) => bc.push(BackendGate::Measure(q, c)),
             }
-            // The per-gate ZYZ re-expansion above (especially `H` inside
-            // `push_rzz`'s Rigetti arm, and every `Ry` via
-            // `push_ry_via_rx`) is emitted independently of its
-            // neighbors, so plenty of adjacent/commuting single-qubit
-            // rotations are left unmerged -- and worse, `optimize`'s
-            // `Rot` fusion only ever merges two *literally adjacent*
-            // `Rot`s; a run like `Rot(pi/2).Rz(theta).Rot(-pi/2)` (one
-            // `push_ry_via_rx` block) sitting next to another such
-            // block from a neighboring source gate is really one
-            // single-qubit unitary wearing up to 6+ gates, and no
-            // adjacent-pair rule ever collapses that. `resynthesize`
-            // (see its doc comment) closes that gap by collapsing the
-            // whole run algebraically instead of pattern-matching
-            // adjacent pairs; running it back-to-back with `optimize`
-            // to a fixed point lets a two-qubit cancellation freed up
-            // by one pass expose a longer single-qubit run for the
-            // other, and vice versa.
-            loop {
-                let before = bc.gates.len();
-                resynthesize(&mut bc);
-                optimize(&mut bc);
-                if bc.gates.len() == before {
-                    break;
-                }
+        }
+        // The per-gate ZYZ re-expansion above (especially `H` inside a
+        // `push_two_qubit_zz` like Rigetti's, and every `Ry` via
+        // `push_ry`) is emitted independently of its neighbors, so
+        // plenty of adjacent/commuting single-qubit rotations are left
+        // unmerged -- and worse, `optimize`'s `Rot` fusion only ever
+        // merges two *literally adjacent* `Rot`s; a run like
+        // `Rot(pi/2).Rz(theta).Rot(-pi/2)` (one `push_ry` Rx-axis
+        // block) sitting next to another such block from a neighboring
+        // source gate is really one single-qubit unitary wearing up to
+        // 6+ gates, and no adjacent-pair rule ever collapses that.
+        // `resynthesize` (see its doc comment) closes that gap by
+        // collapsing the whole run algebraically instead of
+        // pattern-matching adjacent pairs; running it back-to-back
+        // with `optimize` to a fixed point lets a two-qubit
+        // cancellation freed up by one pass expose a longer
+        // single-qubit run for the other, and vice versa.
+        loop {
+            let before = bc.gates.len();
+            resynthesize(&mut bc);
+            optimize(&mut bc);
+            if bc.gates.len() == before {
+                break;
             }
-            bc
         }
     }
+    bc
 }
 
 /// `Ry(theta) == Rx(-pi/2) . Rz(theta) . Rx(pi/2)` (apply `Rx(pi/2)`
@@ -221,49 +229,35 @@ fn push_ry_via_rx(bc: &mut BackendCircuit, q: usize, theta: f64) {
     bc.push(BackendGate::Rot(q, -FRAC_PI_2));
 }
 
-/// `Rzz(a, b, theta) == Cx(a, b) . Rz(b, theta) . Cx(a, b)`. On `IbmQ`
-/// this is used directly (identity 2). On `Rigetti` the *shortened*
-/// form is built directly -- `H(b) . Cz(a,b) . Rx(b,theta) . Cz(a,b) .
-/// H(b)` -- via identity 3 in this module's doc comment, rather than
-/// substituting `Cx(a,b) == H(b).Cz(a,b).H(b)` twice and paying for 4
-/// `H`'s when 2 suffice.
-fn push_rzz(bc: &mut BackendCircuit, backend: Backend, a: usize, b: usize, theta: f64) {
-    if theta.abs() < EPS {
-        return;
-    }
-    match backend {
-        Backend::IbmQ => {
-            bc.push(BackendGate::Cx(a, b));
-            bc.push(BackendGate::Rz(b, theta));
-            bc.push(BackendGate::Cx(a, b));
-        }
-        Backend::Rigetti => {
-            // H(b).Cz(a,b).H(b) . Rz(b,theta) . H(b).Cz(a,b).H(b)
-            //   == H(b).Cz(a,b) . [H(b).Rz(b,theta).H(b)] . Cz(a,b).H(b)
-            //   == H(b).Cz(a,b) . Rx(b,theta) . Cz(a,b).H(b)     (identity 3)
-            push_h(bc, b);
-            bc.push(BackendGate::Cz(a, b));
-            bc.push(BackendGate::Rot(b, theta)); // Rot == Rx on Rigetti
-            bc.push(BackendGate::Cz(a, b));
-            push_h(bc, b);
-        }
-        Backend::TrappedIon => unreachable!("push_rzz only called for IbmQ/Rigetti"),
+/// Pushes a `Ry(q, theta)` in terms of whichever axis `axis` is this
+/// backend's native `Rot`: emitted directly for `RotAxis::Ry`
+/// (`TrappedIon`), or via [`push_ry_via_rx`]'s identity for
+/// `RotAxis::Rx` (every other backend so far). Shared by [`lower`] (for
+/// every source `Ry`) and [`push_h`] (which needs a `Ry` mid-identity
+/// regardless of which axis it's re-expressing `H` for).
+pub(crate) fn push_ry(bc: &mut BackendCircuit, axis: RotAxis, q: usize, theta: f64) {
+    match axis {
+        RotAxis::Ry => bc.push(BackendGate::Rot(q, theta)),
+        RotAxis::Rx => push_ry_via_rx(bc, q, theta),
     }
 }
 
 /// Lowers a single `H(q)` by re-running it through the *same*
-/// `native::decompose` + `push_ry_via_rx` path every other single-qubit
-/// gate takes here (rather than hand-deriving `H`'s specific `Rz`/`Ry`
+/// `native::decompose` + [`push_ry`] path every other single-qubit gate
+/// takes here (rather than hand-deriving `H`'s specific `Rz`/`Ry`
 /// angles a second time and risking a fresh sign error the way the
-/// first version of `native.rs`'s ZYZ synthesis did).
-fn push_h(bc: &mut BackendCircuit, q: usize) {
+/// first version of `native.rs`'s ZYZ synthesis did). `axis` is the
+/// caller's own backend's native rotation axis -- see each
+/// `push_two_qubit_zz` implementation that needs an `H` (e.g.
+/// `backend/rigetti.rs`) for why.
+pub(crate) fn push_h(bc: &mut BackendCircuit, axis: RotAxis, q: usize) {
     let mut h_circuit = Circuit::new(q + 1);
     h_circuit.push(Gate::H(q));
     let canonical = crate::native::decompose(&h_circuit);
     for g in &canonical.gates {
         match *g {
             crate::native::NativeGate::Rz(qq, a) => bc.push(BackendGate::Rz(qq, a)),
-            crate::native::NativeGate::Ry(qq, a) => push_ry_via_rx(bc, qq, a),
+            crate::native::NativeGate::Ry(qq, a) => push_ry(bc, axis, qq, a),
             crate::native::NativeGate::Rzz(..) => unreachable!("H never decomposes to Rzz"),
             crate::native::NativeGate::Measure(..) => {
                 unreachable!("H never decomposes to Measure")
@@ -303,15 +297,15 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
     use crate::native::{m_identity, m_rx, m_ry, m_rz, matmul, zyz_decompose, Mat2};
     use std::collections::HashMap;
 
-    let backend = bc.backend;
+    let axis = bc.backend.rot_axis();
 
-    fn single_qubit_matrix(backend: Backend, g: BackendGate) -> Option<(usize, Mat2)> {
+    fn single_qubit_matrix(axis: RotAxis, g: BackendGate) -> Option<(usize, Mat2)> {
         match g {
             BackendGate::Rz(q, a) => Some((q, m_rz(a))),
             BackendGate::Rot(q, a) => {
-                let m = match backend {
-                    Backend::TrappedIon => m_ry(a),
-                    Backend::IbmQ | Backend::Rigetti => m_rx(a),
+                let m = match axis {
+                    RotAxis::Ry => m_ry(a),
+                    RotAxis::Rx => m_rx(a),
                 };
                 Some((q, m))
             }
@@ -319,11 +313,11 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
         }
     }
 
-    fn emit_synth(out: &mut Vec<BackendGate>, q: usize, m: Mat2, backend: Backend) {
+    fn emit_synth(out: &mut Vec<BackendGate>, q: usize, m: Mat2, axis: RotAxis) {
         let (delta, gamma, beta) = zyz_decompose(m);
-        let (first_z, mid, last_z) = match backend {
-            Backend::TrappedIon => (delta, gamma, beta),
-            Backend::IbmQ | Backend::Rigetti => (delta - FRAC_PI_2, gamma, beta + FRAC_PI_2),
+        let (first_z, mid, last_z) = match axis {
+            RotAxis::Ry => (delta, gamma, beta),
+            RotAxis::Rx => (delta - FRAC_PI_2, gamma, beta + FRAC_PI_2),
         };
         if !is_identity_angle(first_z) {
             out.push(BackendGate::Rz(q, wrap_angle(first_z)));
@@ -336,9 +330,9 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
         }
     }
 
-    fn flush(q: usize, acc: &mut HashMap<usize, Mat2>, out: &mut Vec<BackendGate>, backend: Backend) {
+    fn flush(q: usize, acc: &mut HashMap<usize, Mat2>, out: &mut Vec<BackendGate>, axis: RotAxis) {
         if let Some(m) = acc.remove(&q) {
-            emit_synth(out, q, m, backend);
+            emit_synth(out, q, m, axis);
         }
     }
 
@@ -346,34 +340,34 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
     let mut out: Vec<BackendGate> = Vec::with_capacity(bc.gates.len());
 
     for g in bc.gates.drain(..) {
-        if let Some((q, m)) = single_qubit_matrix(backend, g) {
+        if let Some((q, m)) = single_qubit_matrix(axis, g) {
             let entry = acc.entry(q).or_insert_with(m_identity);
             *entry = matmul(m, *entry);
             continue;
         }
         match g {
             BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => {
-                flush(a, &mut acc, &mut out, backend);
-                flush(b, &mut acc, &mut out, backend);
+                flush(a, &mut acc, &mut out, axis);
+                flush(b, &mut acc, &mut out, axis);
                 out.push(g);
             }
             BackendGate::Rzz(a, b, _) => {
-                flush(a, &mut acc, &mut out, backend);
-                flush(b, &mut acc, &mut out, backend);
+                flush(a, &mut acc, &mut out, axis);
+                flush(b, &mut acc, &mut out, axis);
                 out.push(g);
             }
             BackendGate::Measure(q, _) => {
                 // A real event on wire q: any pending single-qubit
                 // rotation accumulated for it must be emitted first,
                 // the same as for a two-qubit gate touching q.
-                flush(q, &mut acc, &mut out, backend);
+                flush(q, &mut acc, &mut out, axis);
                 out.push(g);
             }
             BackendGate::Rz(..) | BackendGate::Rot(..) => unreachable!("handled above"),
         }
     }
     for q in acc.keys().copied().collect::<Vec<_>>() {
-        flush(q, &mut acc, &mut out, backend);
+        flush(q, &mut acc, &mut out, axis);
     }
     bc.gates = out;
 }
@@ -400,7 +394,7 @@ fn is_identity_angle(theta: f64) -> bool {
 /// Peephole-optimizes an already-lowered [`BackendCircuit`] in place.
 /// Every gate emitted by [`lower`] comes from an *independent* ZYZ
 /// re-expansion (each `Ry`/`H` re-derives its own `Rz`/`Rot` triple via
-/// [`push_ry_via_rx`] / [`push_h`]), so adjacent single-qubit rotations
+/// [`push_ry`] / [`push_h`]), so adjacent single-qubit rotations
 /// on the same wire are frequently left unmerged, `Rz` -- being
 /// diagonal -- is left un-commuted through neighboring two-qubit gates
 /// it could otherwise pass straight through, and repeated two-qubit
@@ -437,8 +431,8 @@ fn is_identity_angle(theta: f64) -> bool {
 ///    matters concretely for `Cx`: `Cx(a,b).Rz(a,t).Cx(a,b)` really
 ///    does cancel around the control-side `Rz`, collapsing to just
 ///    `Rz(a,t)` -- but `Cx(a,b).Rz(b,t).Cx(a,b)` does **not** cancel;
-///    it equals `Rzz(a,b,t)` (the same identity `push_rzz` builds in
-///    the other direction), so a genuinely-flushed target-side `Rz`
+///    it equals `Rzz(a,b,t)` (the same identity `IbmQSpec::push_two_qubit_zz`
+///    builds in the other direction), so a genuinely-flushed target-side `Rz`
 ///    must invalidate the pending cancellation rather than be ignored.
 ///
 /// Any rotation that nets out to an identity (mod `2*PI`) is dropped
@@ -641,42 +635,10 @@ pub fn optimize(bc: &mut BackendCircuit) {
         .collect();
 }
 
-impl Backend {
-    /// The [`crate::fidelity::PublishedCalibration`] matching this
-    /// backend's modeled hardware, so a `BackendCircuit`'s fidelity can
-    /// be estimated with the right published numbers for the gate set
-    /// it was actually lowered to -- using `TrappedIon`'s
-    /// `quantinuum_helios_2026()` figures against an `IbmQ` gate count
-    /// would silently mix hardware that was never benchmarked together.
-    pub fn calibration(self) -> crate::fidelity::PublishedCalibration {
-        match self {
-            Backend::TrappedIon => crate::fidelity::PublishedCalibration::quantinuum_helios_2026(),
-            Backend::IbmQ => crate::fidelity::PublishedCalibration::ibm_heron_r2(),
-            Backend::Rigetti => crate::fidelity::PublishedCalibration::rigetti_ankaa3(),
-        }
-    }
-
-    /// The physical qubit connectivity `lower` routes against before
-    /// doing anything else. `None` for `TrappedIon` -- a trapped-ion
-    /// chain's shared motional mode makes every qubit pair directly
-    /// reachable, so there's nothing to route (see `coupling.rs`'s
-    /// module doc).
-    ///
-    /// `IbmQ` routes against a real heavy-hex lattice
-    /// (`CouplingMap::heavy_hex_for`, P1.1) -- IBM's actual published
-    /// superconducting-device topology family, not a stand-in.
-    /// `Rigetti` routes against a real square lattice
-    /// (`CouplingMap::square_grid_for`, P1.3) -- Rigetti's actual
-    /// published Ankaa-class topology family (see `coupling.rs`), not
-    /// the conservative `linear` stand-in it used to fall back on.
-    pub fn coupling_map(self, num_qubits: usize) -> Option<crate::coupling::CouplingMap> {
-        match self {
-            Backend::TrappedIon => None,
-            Backend::IbmQ => Some(crate::coupling::CouplingMap::heavy_hex_for(num_qubits)),
-            Backend::Rigetti => Some(crate::coupling::CouplingMap::square_grid_for(num_qubits)),
-        }
-    }
-}
+// `Backend::calibration` / `Backend::coupling_map` now live as inherent
+// methods on `Backend` itself in `backend/spec.rs`, delegating to each
+// backend's own `BackendSpec` implementation -- see that module's doc
+// comment for why this moved out of a `match self { ... }` here.
 
 #[cfg(test)]
 mod tests {
@@ -708,9 +670,9 @@ mod tests {
         for g in &bc.gates {
             match *g {
                 BackendGate::Rz(q, a) => reg.apply_rz(q, a).unwrap(),
-                BackendGate::Rot(q, a) => match bc.backend {
-                    Backend::TrappedIon => reg.apply_ry(q, a).unwrap(),
-                    Backend::IbmQ | Backend::Rigetti => reg.apply_rx(q, a).unwrap(),
+                BackendGate::Rot(q, a) => match bc.backend.rot_axis() {
+                    RotAxis::Ry => reg.apply_ry(q, a).unwrap(),
+                    RotAxis::Rx => reg.apply_rx(q, a).unwrap(),
                 },
                 BackendGate::Cx(a, b) => reg.apply_cnot(a, b).unwrap(),
                 BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b).unwrap(),

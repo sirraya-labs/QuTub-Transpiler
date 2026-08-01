@@ -38,7 +38,7 @@
 //! document string, not a `crate::visualize`-style embedded widget
 //! (this is a library function with no chat/tool dependency).
 
-use crate::backend::{Backend, BackendCircuit, BackendGate};
+use crate::backend::{BackendCircuit, BackendGate, RotAxis};
 use crate::ir::{Circuit, Gate};
 use crate::native::{NativeCircuit, NativeGate};
 
@@ -197,9 +197,9 @@ impl Diagram {
     /// never silently disagree with what the circuit actually executes
     /// as.
     pub fn from_backend(circuit: &BackendCircuit) -> Self {
-        let rot_axis = match circuit.backend {
-            Backend::TrappedIon => "RY",
-            Backend::IbmQ | Backend::Rigetti => "RX",
+        let rot_axis = match circuit.backend.rot_axis() {
+            RotAxis::Ry => "RY",
+            RotAxis::Rx => "RX",
         };
         let mut instrs = Vec::with_capacity(circuit.gates.len());
         for gate in &circuit.gates {

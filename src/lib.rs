@@ -33,11 +33,23 @@
 //! relative to the rest of the pipeline, nothing above it needs to
 //! change, or even know it exists.
 //!
+//! [`backend::Backend`] is an open extension point, not a fixed list:
+//! it's a handle onto a [`backend::BackendSpec`] implementation,
+//! and each of the three backends shipped today
+//! (`backend/trapped_ion.rs`, `backend/ibmq.rs`, `backend/rigetti.rs`)
+//! implements that trait in its own file. Adding a new backend means
+//! implementing `BackendSpec` once, in a new file under `src/backend/`,
+//! and registering one `Backend::` constant -- see `backend/spec.rs`'s
+//! module doc for the design rationale and exactly what a new
+//! implementation needs to provide (and its scope limits, illustrated
+//! there by what a neutral-atom or photonic backend would additionally
+//! require).
+//!
 //! See each module's doc comment for the reasoning behind its piece of
 //! the pipeline, and `tests/decompositions.rs` for the correctness
 //! checks against `native`/`optimize` (run against the real dependency,
-//! not just asserted). `ir_optimize` and `backend` each carry their own
-//! `#[cfg(test)]` unit tests in-module.
+//! not just asserted). `ir_optimize` and `backend` (and its `spec`
+//! submodule) each carry their own `#[cfg(test)]` unit tests in-module.
 
 pub mod backend;
 pub mod coupling;
@@ -54,7 +66,7 @@ pub mod qasm;
 pub mod route;
 pub mod waveform_sim;
 
-pub use backend::{lower, Backend, BackendCircuit, BackendGate};
+pub use backend::{lower, Backend, BackendCircuit, BackendGate, BackendSpec, RotAxis};
 pub use coupling::CouplingMap;
 pub use diagram::{Diagram, DiagramInstr};
 pub use ir::{Circuit, Gate};
