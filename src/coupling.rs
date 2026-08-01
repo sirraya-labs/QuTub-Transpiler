@@ -24,10 +24,34 @@
 //! for heavy-hex device topologies), then subdivides every edge once.
 //! `heavy_hex_grid` builds that lattice exactly; `heavy_hex_for(n)`
 //! finds the smallest hexagon grid with at least `n` qubits and takes a
-//! BFS-order prefix of exactly `n` -- guaranteed connected, since a
-//! breadth-first prefix of a connected graph always is (every non-root
+//! DFS-order prefix of exactly `n` -- guaranteed connected, since a
+//! depth-first prefix of a connected graph always is (every non-root
 //! node in the prefix was discovered through an edge to an
 //! already-included, earlier node).
+//!
+//! # Why DFS, not BFS, for the node numbering
+//! This used to be a BFS-order prefix, which is connected for the same
+//! reason a DFS one is -- but BFS numbering is much worse for the thing
+//! that numbering actually gets used for downstream: `route.rs`'s
+//! `choose_initial_layout`/`find_hamiltonian_path` specifically search
+//! for a physical qubit path that lines up with the *identity* mapping
+//! (physical index == logical index), because that's the one layout a
+//! circuit can reach with zero `Swap`s. BFS visits *every* neighbor of
+//! a node before moving on, so on any node of degree >= 2 (i.e.
+//! essentially everywhere in this topology) only the first of those
+//! neighbors can land on the very next index -- consecutive BFS indices
+//! are graph-adjacent almost nowhere beyond the root, which made the
+//! identity-mapping search's "free" case nearly unreachable in
+//! practice (confirmed empirically: for `heavy_hex_for(16)`, only 1 of
+//! 15 consecutive-index pairs `(i, i+1)` was an actual coupling edge
+//! under the old BFS numbering). DFS numbering, by contrast, keeps
+//! extending into a fresh, unvisited neighbor before backtracking, so
+//! consecutive indices stay graph-adjacent except right at a
+//! backtrack -- for the `d=1` case (`n <= 12`, a bare 12-cycle) this
+//! numbering traces the entire cycle as a genuine Hamiltonian path, so
+//! `find_hamiltonian_path` can realize the identity layout with
+//! *zero* `Swap`s instead of paying real routing distance to reach a
+//! numbering-artifact-driven detour.
 //!
 //! This still isn't a claim about any *specific* chip's exact physical
 //! qubit numbering (real devices retire/reroute around individual bad
@@ -47,10 +71,13 @@
 //! qubits three, corners two -- *not* the square-octagonal unit cell
 //! Rigetti's earlier Aspen generation used. [`CouplingMap::square_grid`]
 //! builds that grid exactly; [`CouplingMap::square_grid_for`] finds the
-//! smallest square grid with at least `n` qubits and takes a BFS-order
+//! smallest square grid with at least `n` qubits and takes a DFS-order
 //! prefix of exactly `n`, for the same reason [`CouplingMap::heavy_hex_for`]
-//! does: a breadth-first prefix of a connected graph is always
-//! connected.
+//! does: a depth-first prefix of a connected graph is always connected
+//! -- and, per this module's doc comment above on why heavy-hex made
+//! the same switch, DFS keeps far more consecutive-index pairs
+//! graph-adjacent than BFS did, which is what actually matters for
+//! `route.rs`'s identity-biased layout search.
 //!
 //! As with heavy-hex, this is the real *topology family*, not a claim
 //! about any specific chip's own published qubit numbering.
@@ -84,10 +111,11 @@ impl CouplingMap {
     /// module's doc comment for the construction and its verification
     /// against the published "12 qubits per hexagon" figure at `m=n=1`.
     ///
-    /// Node numbering is a deterministic BFS order from a fixed corner
-    /// of the lattice (see [`heavy_hex_bfs_map`]), so it's stable
+    /// Node numbering is a deterministic DFS order from a fixed corner
+    /// of the lattice (see [`heavy_hex_dfs_map`]), so it's stable
     /// across calls but not meant to line up with any real device's
-    /// own published qubit numbering (see this module's doc comment).
+    /// own published qubit numbering (see this module's doc comment,
+    /// including why DFS rather than BFS).
     ///
     /// # Panics
     /// If `rows == 0` or `cols == 0` -- there is no such thing as a
@@ -102,15 +130,18 @@ impl CouplingMap {
         );
         let hex_edges = hexagonal_lattice_edges(rows, cols);
         let heavy_edges = subdivide_edges(&hex_edges);
-        heavy_hex_bfs_map(&heavy_edges, HeavyHexNode::Data(0, 0), None)
+        heavy_hex_dfs_map(&heavy_edges, HeavyHexNode::Data(0, 0), None)
     }
 
     /// The smallest heavy-hex lattice with at least `num_qubits`
     /// qubits, truncated to exactly `num_qubits` by taking a
-    /// breadth-first prefix from a fixed corner -- guaranteed
-    /// connected (a BFS prefix of a connected graph always is: every
-    /// non-root node in the prefix was discovered through an edge to
-    /// an already-included, earlier node). This is what
+    /// depth-first prefix from a fixed corner -- guaranteed connected
+    /// (a DFS prefix of a connected graph always is: every non-root
+    /// node in the prefix was discovered through an edge to an
+    /// already-included, earlier node), and -- unlike the BFS-order
+    /// prefix this used to take -- keeps consecutive physical indices
+    /// graph-adjacent almost everywhere, not just at the root (see
+    /// this module's doc comment). This is what
     /// [`crate::backend::Backend::coupling_map`] uses for `IbmQ`.
     ///
     /// `num_qubits <= 1` returns a topology-free map (no edges needed
@@ -129,7 +160,7 @@ impl CouplingMap {
             let heavy_edges = subdivide_edges(&hex_edges);
             let total = heavy_hex_node_count(&heavy_edges);
             if total >= num_qubits {
-                let mut cm = heavy_hex_bfs_map(
+                let mut cm = heavy_hex_dfs_map(
                     &heavy_edges,
                     HeavyHexNode::Data(0, 0),
                     Some(num_qubits),
@@ -155,10 +186,11 @@ impl CouplingMap {
     /// superconducting processors (Ankaa-2, Ankaa-3) use -- see this
     /// module's doc comment.
     ///
-    /// Node numbering is a deterministic BFS order from a fixed corner
-    /// of the grid (see [`square_grid_bfs_map`]), so it's stable across
+    /// Node numbering is a deterministic DFS order from a fixed corner
+    /// of the grid (see [`square_grid_dfs_map`]), so it's stable across
     /// calls but not meant to line up with any real device's own
-    /// published qubit numbering (see this module's doc comment).
+    /// published qubit numbering (see this module's doc comment,
+    /// including why DFS rather than BFS).
     ///
     /// # Panics
     /// If `rows == 0` or `cols == 0` -- there is no such thing as a
@@ -172,15 +204,17 @@ impl CouplingMap {
             cols
         );
         let edges = square_grid_edges(rows, cols);
-        square_grid_bfs_map(&edges, (0, 0), None)
+        square_grid_dfs_map(&edges, (0, 0), None)
     }
 
     /// The smallest square grid with at least `num_qubits` qubits,
-    /// truncated to exactly `num_qubits` by taking a breadth-first
+    /// truncated to exactly `num_qubits` by taking a depth-first
     /// prefix from a fixed corner -- guaranteed connected, for the same
-    /// reason [`CouplingMap::heavy_hex_for`] is (a BFS prefix of a
-    /// connected graph always is). This is what
-    /// [`crate::backend::Backend::coupling_map`] uses for `Rigetti`.
+    /// reason [`CouplingMap::heavy_hex_for`] is (a DFS prefix of a
+    /// connected graph always is), and with the same consecutive-index
+    /// adjacency benefit described in this module's doc comment. This
+    /// is what [`crate::backend::Backend::coupling_map`] uses for
+    /// `Rigetti`.
     ///
     /// `num_qubits <= 1` returns a topology-free map, matching
     /// [`CouplingMap::linear`]/[`CouplingMap::heavy_hex_for`]'s
@@ -197,7 +231,7 @@ impl CouplingMap {
             let total = side * side;
             if total >= num_qubits {
                 let edges = square_grid_edges(side, side);
-                let mut cm = square_grid_bfs_map(&edges, (0, 0), Some(num_qubits));
+                let mut cm = square_grid_dfs_map(&edges, (0, 0), Some(num_qubits));
                 debug_assert_eq!(
                     cm.num_qubits, num_qubits,
                     "a side x side square grid with >= num_qubits total qubits is always \
@@ -246,12 +280,23 @@ impl CouplingMap {
             return Some(vec![start]);
         }
 
-        let mut adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
-        for &(a, b) in &self.edges {
-            adjacency.entry(a).or_default().push(b);
-            adjacency.entry(b).or_default().push(a);
-        }
-
+        // NOTE: deliberately calls `self.neighbors(current)` (which
+        // sorts before returning) rather than building its own
+        // adjacency list by iterating `self.edges` directly. `edges`
+        // is a `HashSet<(usize, usize)>`, and `HashSet`'s default
+        // hasher is randomly seeded per process -- iterating it (the
+        // old code here did, via `for &(a, b) in &self.edges`) put
+        // each node's neighbors in a different order on every run,
+        // even for the identical `CouplingMap`. That doesn't change
+        // *whether* a shortest path is found, but it silently changes
+        // *which* shortest path wins whenever more than one exists at
+        // the same length (any branching point, e.g. a heavy-hex
+        // degree-3 node) -- BFS's first-discovered predecessor is the
+        // one that gets kept, so a reordered neighbor list picks a
+        // different, still-shortest, but different path. `route.rs`'s
+        // naive `route` calls this directly for every non-adjacent
+        // two-qubit gate, so that nondeterminism propagated straight
+        // into its SWAP count on any topology with real branching.
         let mut visited = vec![false; self.num_qubits];
         let mut predecessor = vec![usize::MAX; self.num_qubits];
         let mut queue = VecDeque::new();
@@ -262,13 +307,11 @@ impl CouplingMap {
             if current == goal {
                 break;
             }
-            if let Some(neighbors) = adjacency.get(&current) {
-                for &next in neighbors {
-                    if !visited[next] {
-                        visited[next] = true;
-                        predecessor[next] = current;
-                        queue.push_back(next);
-                    }
+            for next in self.neighbors(current) {
+                if !visited[next] {
+                    visited[next] = true;
+                    predecessor[next] = current;
+                    queue.push_back(next);
                 }
             }
         }
@@ -378,13 +421,23 @@ fn heavy_hex_node_count(heavy_edges: &[(HeavyHexNode, HeavyHexNode)]) -> usize {
     seen.len()
 }
 
-/// Assigns integer qubit indices to a heavy-hex graph via BFS from
+/// Assigns integer qubit indices to a heavy-hex graph via DFS from
 /// `start`, and builds the resulting [`CouplingMap`]. If `limit` is
-/// `Some(n)`, only the first `n` BFS-visited nodes get an index (and
+/// `Some(n)`, only the first `n` DFS-visited nodes get an index (and
 /// only edges between two indexed nodes survive) -- see
 /// [`CouplingMap::heavy_hex_for`]'s doc comment for why that prefix is
-/// always connected.
-fn heavy_hex_bfs_map(
+/// always connected, and this module's doc comment for why DFS is used
+/// here instead of BFS (consecutive indices stay graph-adjacent almost
+/// everywhere, not just at the root).
+///
+/// Iterative (explicit stack), not recursive: this graph is small in
+/// practice, but there's no principled bound on `limit` that would
+/// make a fixed recursion depth safe in general. Neighbors of each
+/// node are pushed in descending sorted order so the *smallest*
+/// unvisited neighbor is popped (and thus visited) next -- same
+/// left-to-right, deterministic visitation order the old BFS version
+/// had via its sorted adjacency lists.
+fn heavy_hex_dfs_map(
     heavy_edges: &[(HeavyHexNode, HeavyHexNode)],
     start: HeavyHexNode,
     limit: Option<usize>,
@@ -400,10 +453,9 @@ fn heavy_hex_bfs_map(
 
     let mut order: Vec<HeavyHexNode> = Vec::new();
     let mut visited: HashSet<HeavyHexNode> = HashSet::new();
-    let mut queue: VecDeque<HeavyHexNode> = VecDeque::new();
-    queue.push_back(start);
+    let mut stack: Vec<HeavyHexNode> = vec![start];
     visited.insert(start);
-    while let Some(node) = queue.pop_front() {
+    while let Some(node) = stack.pop() {
         if let Some(lim) = limit {
             if order.len() >= lim {
                 break;
@@ -411,9 +463,9 @@ fn heavy_hex_bfs_map(
         }
         order.push(node);
         if let Some(neighbors) = adjacency.get(&node) {
-            for &next in neighbors {
+            for &next in neighbors.iter().rev() {
                 if visited.insert(next) {
-                    queue.push_back(next);
+                    stack.push(next);
                 }
             }
         }
@@ -467,14 +519,15 @@ fn square_grid_edges(rows: usize, cols: usize) -> Vec<(GridCoord, GridCoord)> {
     out
 }
 
-/// Assigns integer qubit indices to a square-grid graph via BFS from
+/// Assigns integer qubit indices to a square-grid graph via DFS from
 /// `start`, and builds the resulting [`CouplingMap`]. If `limit` is
-/// `Some(n)`, only the first `n` BFS-visited nodes get an index (and
+/// `Some(n)`, only the first `n` DFS-visited nodes get an index (and
 /// only edges between two indexed nodes survive) -- see
 /// [`CouplingMap::square_grid_for`]'s doc comment for why that prefix
-/// is always connected. Mirrors [`heavy_hex_bfs_map`] exactly, just
-/// over `GridCoord` instead of `HeavyHexNode`.
-fn square_grid_bfs_map(
+/// is always connected. Mirrors [`heavy_hex_dfs_map`] exactly, just
+/// over `GridCoord` instead of `HeavyHexNode` -- see that function's
+/// doc comment for why DFS is used instead of the BFS this used to be.
+fn square_grid_dfs_map(
     edges: &[(GridCoord, GridCoord)],
     start: GridCoord,
     limit: Option<usize>,
@@ -490,10 +543,9 @@ fn square_grid_bfs_map(
 
     let mut order: Vec<GridCoord> = Vec::new();
     let mut visited: HashSet<GridCoord> = HashSet::new();
-    let mut queue: VecDeque<GridCoord> = VecDeque::new();
-    queue.push_back(start);
+    let mut stack: Vec<GridCoord> = vec![start];
     visited.insert(start);
-    while let Some(node) = queue.pop_front() {
+    while let Some(node) = stack.pop() {
         if let Some(lim) = limit {
             if order.len() >= lim {
                 break;
@@ -501,9 +553,9 @@ fn square_grid_bfs_map(
         }
         order.push(node);
         if let Some(neighbors) = adjacency.get(&node) {
-            for &next in neighbors {
+            for &next in neighbors.iter().rev() {
                 if visited.insert(next) {
-                    queue.push_back(next);
+                    stack.push(next);
                 }
             }
         }
@@ -796,6 +848,61 @@ mod tests {
                 let degree = (0..n).filter(|&other| other != q && map.is_adjacent(q, other)).count();
                 assert!(degree <= 4, "square_grid_for({}): qubit {} has degree {} > 4", n, q, degree);
             }
+        }
+    }
+
+    /// The actual reason for the BFS -> DFS switch (see this module's
+    /// doc comment): `route.rs`'s `find_hamiltonian_path` needs a
+    /// physical path close to the identity mapping to route a chain
+    /// circuit (e.g. GHZ-state prep) with few or zero `Swap`s. Under
+    /// the old BFS numbering this was nearly unreachable in practice
+    /// (empirically ~1 real edge out of every `n-1` consecutive-index
+    /// pairs); this pins down that DFS numbering restores it for a
+    /// spread of sizes spanning both a single hexagon (`n <= 12`, a
+    /// bare cycle -- should be a *perfect* Hamiltonian path, 100%) and
+    /// a multi-hexagon grid with real degree-3 branch points (`n > 12`
+    /// -- allow the rare backtrack, but require the identity path to
+    /// still be almost entirely intact).
+    #[test]
+    fn heavy_hex_for_dfs_numbering_keeps_the_identity_mapping_nearly_a_hamiltonian_path() {
+        for &n in &[5usize, 10, 12, 13, 16, 25, 50, 77] {
+            let map = CouplingMap::heavy_hex_for(n);
+            let present = (0..n - 1).filter(|&i| map.is_adjacent(i, i + 1)).count();
+            let total = n - 1;
+            if n <= 12 {
+                assert_eq!(
+                    present, total,
+                    "heavy_hex_for({}) is a bare cycle (see this module's doc comment) -- \
+                     DFS numbering should trace it as a perfect Hamiltonian path, but only \
+                     {}/{} consecutive-index pairs are adjacent",
+                    n, present, total
+                );
+            } else {
+                assert!(
+                    present * 10 >= total * 9,
+                    "heavy_hex_for({}): DFS numbering should keep at least 90% of \
+                     consecutive-index pairs graph-adjacent (only backtracking at real \
+                     degree-3 branch points), got {}/{}",
+                    n, present, total
+                );
+            }
+        }
+    }
+
+    /// Same check as the heavy-hex one above, for the square-grid
+    /// generator's DFS numbering.
+    #[test]
+    fn square_grid_for_dfs_numbering_keeps_the_identity_mapping_nearly_a_hamiltonian_path() {
+        for &n in &[5usize, 9, 10, 16, 25, 50, 77] {
+            let map = CouplingMap::square_grid_for(n);
+            let present = (0..n - 1).filter(|&i| map.is_adjacent(i, i + 1)).count();
+            let total = n - 1;
+            assert!(
+                present * 10 >= total * 8,
+                "square_grid_for({}): DFS numbering should keep at least 80% of \
+                 consecutive-index pairs graph-adjacent, got {}/{}",
+                n, present, total
+            );
         }
     }
 
