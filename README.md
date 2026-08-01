@@ -103,7 +103,7 @@ A deliberately narrow OpenQASM 2.0 subset parser covering the dialect `sirraya-q
 
 Cancels adjacent inverse pairs and commutes gates past disjoint or compatible neighbors to expose non-adjacent cancellations, before any backend-specific decomposition happens. `Gate::Measure` is never reordered relative to any other gate, including another `Measure` writing the same classical bit.
 
-### 3. Backend Lowering (`backend.rs`)
+### 3. Backend Lowering (`backend/`)
 
 Three execution targets, selected via `Backend`:
 
@@ -113,7 +113,9 @@ Three execution targets, selected via `Backend`:
 | `Backend::IbmQ` | `{Rz, Rx, Cx}` | Heavy-hex lattice (matches IBM's published Eagle/Heron-family topology) |
 | `Backend::Rigetti` | `{Rz, Rx, Cz}` | Square grid (matches Rigetti's Ankaa-class topology) |
 
-`TrappedIon` delegates directly to the `{Rz, Ry, Rzz}` decomposition in `native.rs`. `IbmQ` and `Rigetti` reuse the same canonical form and then re-express it in terms of their own native two-qubit gate — `Rzz(a,b,θ) == Cx(a,b).Rz(b,θ).Cx(a,b)` for IBM's `Cx`, and a shortened `H.Cz.Rx.Cz.H` form for Rigetti's `Cz` that avoids paying for redundant `H` conjugations. A `resynthesize`/`optimize` fixed-point loop then collapses the resulting single-qubit rotation runs.
+`Backend` is an open extension point, not a closed enum: it's a handle onto a `BackendSpec` trait implementation (`backend/spec.rs`), and each backend implements that trait in its own file — `backend/trapped_ion.rs`, `backend/ibmq.rs`, `backend/rigetti.rs`. `backend.rs` itself holds the shared engine every backend runs through: the generic per-gate lowering loop, the `resynthesize`/`optimize` fixed-point pass, and `BackendGate`/`BackendCircuit`. Adding a new backend means implementing `BackendSpec` in a new file under `backend/` and registering one `Backend::` constant — no existing match statement needs to change (see `backend/spec.rs`'s module doc for exactly what a new backend needs to supply, and its scope limits).
+
+`TrappedIon`'s `BackendSpec` implementation delegates directly to the `{Rz, Ry, Rzz}` decomposition in `native.rs` (its native gate set already *is* that canonical form). `IbmQ` and `Rigetti` reuse the same canonical form and then re-express it in terms of their own native two-qubit gate — `Rzz(a,b,θ) == Cx(a,b).Rz(b,θ).Cx(a,b)` for IBM's `Cx`, and a shortened `H.Cz.Rx.Cz.H` form for Rigetti's `Cz` that avoids paying for redundant `H` conjugations. A `resynthesize`/`optimize` fixed-point loop then collapses the resulting single-qubit rotation runs.
 
 Every two-qubit gate a circuit contains that isn't already the backend's native one is more expensive than that backend's own gate — for example, a source-level `Cx` lowers to **two** native `Cx`s on `IbmQ` (via the `Rzz`-based identity above), not one, since the pipeline always canonicalizes through `Rzz` first rather than special-casing `Cx` as already-native.
 

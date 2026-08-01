@@ -87,7 +87,7 @@ flowchart TD
 | `qasm.rs`        | OPENQASM 2.0 importer                      |
 | `ir_optimize.rs` | Source-level optimization                  |
 | `native.rs`      | Trapped-ion-style native decomposition     |
-| `backend.rs`     | Backend-specific lowering and optimization |
+| `backend.rs`     | Backend-specific lowering and optimization (shared engine; see `backend/` below for the per-backend plugins) |
 | `coupling.rs`    | Physical connectivity models               |
 | `route.rs`       | Hardware-aware SWAP insertion              |
 | `optimize.rs`    | Native-level peephole optimization         |
@@ -97,6 +97,17 @@ flowchart TD
 | `pulse.rs`       | Pulse-level scheduling: lowers an already-lowered `BackendCircuit` into a hardware-channel `Schedule`, using a per-backend calibration table. Optional, downstream of everything above — nothing upstream needs to know it exists. |
 | `waveform_sim.rs`| Numerically integrates a single pulse instruction against a two-level qubit model, to check a `pulse.rs` calibration table's `rot` entries actually achieve the rotation angle they claim. Sits below `pulse.rs`, same "optional, nothing upstream depends on it" relationship. |
 | `ibm_export.rs`  | Real IBM-hardware-native export: expands a `BackendCircuit` lowered for `Backend::IbmQ` into IBM's actual physical basis gates (`rz`, `sx`, `x`, `cx`, `measure`) and emits OPENQASM 2.0 text a real Qiskit/IBM job-submission pipeline can consume (paired with `submit_ibm.py`, since there's no official Rust SDK for IBM Quantum Platform). Distinct from `emit::to_qasm`, which round-trips only through this crate's own `qasm::parse`. |
+
+`backend.rs` has its own companion directory, `backend/`, holding one file per backend implementation plus the trait each of them implements:
+
+| File | Role |
+| ---- | ---- |
+| `backend/spec.rs` | The `BackendSpec` trait and the `Backend` handle type — the open extension point every backend plugs into. See §4's `backend.rs` section for the full design rationale. |
+| `backend/trapped_ion.rs` | `BackendSpec` implementation for `Backend::TrappedIon` |
+| `backend/ibmq.rs` | `BackendSpec` implementation for `Backend::IbmQ` |
+| `backend/rigetti.rs` | `BackendSpec` implementation for `Backend::Rigetti` |
+
+Nothing outside `backend/` needs to import from these directly — `backend.rs` re-exports `Backend`, `BackendSpec`, and `RotAxis` at its own top level (`crate::backend::{Backend, BackendSpec, RotAxis}`), which is in turn what `lib.rs` re-exports at the crate root. A new backend is a new file in this directory, not a change to `backend.rs`'s own logic.
 
 ---
 
@@ -467,27 +478,43 @@ This allows `backend.rs` to reuse the **same validated ZYZ implementation** for 
 
 ---
 
-## `backend.rs` — Multi-backend lowering
+## `backend.rs` + `backend/` — Multi-backend lowering
 
-`backend.rs` maps circuits onto the actual native gate vocabulary of supported backend families.
+`backend.rs` maps circuits onto the actual native gate vocabulary of supported backend families. It is deliberately split into two layers:
+
+* **`backend.rs` itself** — the shared engine every backend runs through: the generic per-gate lowering loop, the `resynthesize`/`optimize` fixed-point pass, `BackendGate`/`BackendCircuit`, and a handful of gate-identity helpers (`push_ry`, `push_h`) that any backend built from `{Rz, one rotation axis, an Rzz-derived two-qubit gate}` can reuse.
+* **`backend/` (`spec.rs`, `trapped_ion.rs`, `ibmq.rs`, `rigetti.rs`)** — the part that's actually different per backend, expressed as one `BackendSpec` trait implementation per file.
+
+This split replaced an earlier version of this module where `Backend` was a closed three-variant enum and every piece of per-backend behavior — `lower`'s gate expansion, the two-qubit-gate identity, `resynthesize`'s axis shift, calibration, coupling map — was a `match backend { TrappedIon => .., IbmQ => .., Rigetti => .. }` repeated at each of those sites (plus two more outside `backend.rs` entirely, in `emit.rs` and `diagram.rs`). Adding a backend meant finding and correctly extending every one of those matches. The trait-based version below replaces "find every match" with "implement one trait, once."
+
+### The `BackendSpec` trait
+
+```text
+trait BackendSpec {
+    fn id(&self) -> &'static str;
+    fn calibration(&self) -> PublishedCalibration;
+    fn coupling_map(&self, num_qubits: usize) -> Option<CouplingMap>;
+    fn rot_axis(&self) -> RotAxis;                                  // Ry or Rx
+    fn push_two_qubit_zz(&self, bc, a, b, theta);                   // this backend's Rzz identity
+    fn is_native_decompose_target(&self) -> bool { false }          // true only for TrappedIon
+}
+```
+
+`Backend` is a small `Copy` handle wrapping `&'static dyn BackendSpec` — `Backend::TrappedIon`, `Backend::IbmQ`, and `Backend::Rigetti` are constants pointing at each backend's implementation. Everywhere that used to `match backend { .. }` now either calls a `Backend`/`BackendSpec` method directly, or — for the two truly binary physical choices this crate encodes, which axis a native rotation is about — matches on `RotAxis` (`Ry` or `Rx`) instead. `RotAxis` stays a closed two-variant enum on purpose: unlike `Backend`, it isn't meant to grow — see `backend/spec.rs`'s module doc for why a backend whose native single-qubit gate isn't expressible as one of these two doesn't fit this trait's shape at all.
 
 ### Backend matrix
 
-| Backend         | Native gate set   | Connectivity model | Routing      |
-| --------------- | ----------------- | ------------------ | ------------ |
-| **Trapped Ion** | `Rz`, `Ry`, `Rzz` | All-to-all         | Not required |
-| **IBM Quantum** | `Rz`, `Rx`, `Cx`  | Heavy-hex          | Required     |
-| **Rigetti**     | `Rz`, `Rx`, `Cz`  | Square grid        | Required     |
+| Backend         | Native gate set   | Connectivity model | Routing      | Rotation axis |
+| --------------- | ----------------- | ------------------ | ------------ | -------------- |
+| **Trapped Ion** | `Rz`, `Ry`, `Rzz` | All-to-all         | Not required | `Ry` |
+| **IBM Quantum** | `Rz`, `Rx`, `Cx`  | Heavy-hex          | Required     | `Rx` |
+| **Rigetti**     | `Rz`, `Rx`, `Cz`  | Square grid        | Required     | `Rx` |
 
-### Trapped Ion
+### Trapped Ion (`backend/trapped_ion.rs`)
 
-The trapped-ion backend delegates directly to:
+The trapped-ion backend's native gate set already *is* `native::decompose`'s own canonical `{Rz, Ry, Rzz}` output, so its `push_two_qubit_zz` just pushes `Rzz` straight through, and it's the one backend that overrides `is_native_decompose_target` to `true` — telling `backend.rs`'s `lower` to skip the general re-expansion/resynthesize path entirely and just relabel `native::decompose`'s gates.
 
-```text
-native::decompose
-```
-
-### IBM Quantum
+### IBM Quantum (`backend/ibmq.rs`)
 
 IBM Quantum uses:
 
@@ -495,7 +522,7 @@ IBM Quantum uses:
 { Rz, Rx, Cx }
 ```
 
-The backend relies on exact identities including:
+Its `rot_axis()` returns `Rx`, so `backend.rs`'s shared `push_ry` helper re-expresses every source `Ry` via the general identity:
 
 ```text
 Ry(θ) = Rx(-π/2)
@@ -503,7 +530,7 @@ Ry(θ) = Rx(-π/2)
        · Rx(π/2)
 ```
 
-and:
+and its `push_two_qubit_zz` builds:
 
 ```text
 Rzz(a,b,θ) =
@@ -512,7 +539,7 @@ Rzz(a,b,θ) =
     · Cx(a,b)
 ```
 
-### Rigetti
+### Rigetti (`backend/rigetti.rs`)
 
 Rigetti uses:
 
@@ -520,13 +547,19 @@ Rigetti uses:
 { Rz, Rx, Cz }
 ```
 
-Rather than naively replacing a CNOT with a CZ expansion containing four Hadamards, the implementation uses:
+Also an `Rx`-axis backend (so it reuses the exact same `push_ry` identity as `IbmQ`), but with no native `Cx`. Rather than naively substituting `Cx(a,b) == H(b).Cz(a,b).H(b)` into the `IbmQ` identity twice — which would cost four `H`'s — its `push_two_qubit_zz` uses:
 
 ```text
 H · Rz(θ) · H = Rx(θ)
 ```
 
-to collapse the middle of the expansion and reach a two-Hadamard representation.
+to collapse the middle of that expansion and build the shortened `H(b).Cz(a,b).Rx(b,θ).Cz(a,b).H(b)` form directly, at a cost of two `H`'s instead of four.
+
+### Extending: adding a fourth backend
+
+A new backend that fits the `{Rz, one rotation axis, Rzz-derived two-qubit gate}` shape is: one new file under `backend/` implementing `BackendSpec`, plus one new `Backend::` constant in `backend/spec.rs`. Nothing in `backend.rs`, `emit.rs`, or `diagram.rs` needs to change — see `backend/spec.rs`'s module doc for the full contract a new implementation must satisfy.
+
+A backend that *doesn't* fit that shape — see "Why Pasqal (and photonic) are not implemented" below — needs more than a new `BackendSpec` impl, because the mismatch isn't in which axis or which two-qubit identity it uses, it's in whether `BackendGate` can represent its physics at all.
 
 ---
 
@@ -589,7 +622,7 @@ creates new resynthesis opportunity
 
 ### Connectivity integration
 
-`Backend::coupling_map` connects backend lowering to `coupling.rs` and `route.rs`.
+`Backend::coupling_map` connects backend lowering to `coupling.rs` and `route.rs` — an inherent method on `Backend` that delegates to whichever `BackendSpec` implementation `Backend` is currently holding (see the trait section above).
 
 | Backend     | Coupling map      |
 | ----------- | ----------------- |
@@ -601,18 +634,22 @@ Trapped-ion routing is unnecessary because the modeled shared motional mode prov
 
 ---
 
-### Why Pasqal is not implemented
+### Why Pasqal (and photonic) are not implemented
 
-`Backend::Pasqal` is deliberately **not** represented as another fixed-connectivity digital backend.
+`Backend::Pasqal` is deliberately **not** represented as another fixed-connectivity digital backend, and there is no `Backend::Photonic` either — even though `Backend` is now an open trait rather than a closed enum (see above), meaning adding either one is no longer blocked by "finding every match site." The blocker was never that; it's that neither platform's physics fits what `BackendSpec` is actually a contract for.
 
-Neutral-atom platforms require:
+**Neutral atoms (Pasqal).** Neutral-atom platforms require:
 
 * atom placement
 * blockade-radius reasoning
 * movement / placement constraints
 * hardware-aware routing fundamentally different from fixed two-qubit gate connectivity
 
-Modeling Pasqal as a Rigetti-like backend would therefore create the appearance of support without actually representing the hardware model.
+`BackendSpec::coupling_map` returns a fixed `CouplingMap` because every backend implemented so far *has* a fixed topology; Pasqal's "connectivity" is a function of where the atoms currently are, which isn't a `BackendSpec` method at all, fixed or otherwise.
+
+**Photonic.** Linear-optical qubits (dual-rail, or continuous-variable encodings) don't have a `Rot`/`Rzz`-shaped native gate set at all — their primitives are beamsplitters and phase shifters acting on modes, not qubit-indexed rotations, and for the common dual-rail/KLM-style encoding, two-qubit gates are probabilistic/measurement-induced rather than deterministic unitaries. `BackendSpec::rot_axis` and `push_two_qubit_zz` assume every implementor is doing the same kind of thing `TrappedIon`/`IbmQ`/`Rigetti` do — expressing a unitary in terms of a fixed two-qubit gate — which is precisely the assumption photonic breaks.
+
+Modeling either as a `Rigetti`-like `BackendSpec` implementation would therefore create the appearance of support without actually representing the hardware model. A real implementation of either needs its own gate representation below `ir::Circuit` — likely a new `BackendGate`-shaped enum with its own execution/emit path, not an implementation of this trait — which is why this is tracked as separate follow-on work rather than "just write the `BackendSpec` impl."
 
 > **The project deliberately prefers an honest missing backend over a misleading abstraction.**
 
@@ -1191,6 +1228,7 @@ This fixes a real correctness issue that appeared once IBM's heavy-hex topology 
 | ------------------------ | :----------: | --------------------------------------------------- |
 | Rigetti topology         |     Open     | Still uses a conservative linear coupling map       |
 | Pasqal backend           |    Planned   | Requires atom placement and blockade-aware routing  |
+| Photonic backend         |    Planned   | Needs its own gate representation; doesn't fit `BackendSpec`'s `Rot`/`Rzz` shape (see §4's `backend.rs` section) |
 | SWAP minimization        |    Planned   | No global routing optimization yet                  |
 | Source-level commutation |    Planned   | Only disjoint-qubit commutation currently supported |
 | Optimal token swapping   | Not targeted | General problem is computationally difficult        |
@@ -1207,11 +1245,11 @@ However, the transpiler is not yet taking advantage of Rigetti's real connectivi
 
 ---
 
-## Pasqal / neutral atoms
+## Pasqal / neutral atoms, and photonic
 
-`Backend::Pasqal` remains unimplemented.
+`Backend::Pasqal` and `Backend::Photonic` both remain unimplemented.
 
-This is intentional.
+This is intentional, and — since backend lowering (§4, `backend.rs`) moved from a closed enum to an open `BackendSpec` trait — no longer a matter of "haven't gotten to it yet" in the way it would have been under the old design. Either could be wired in as a new `Backend::` constant in an afternoon; the reason neither is isn't friction, it's that neither platform's physics is expressible through `BackendSpec` as written.
 
 A proper neutral-atom backend requires reasoning about:
 
@@ -1222,9 +1260,11 @@ physical movement
 interaction geometry
 ```
 
-That is materially different from lowering a circuit onto a fixed two-qubit gate topology.
+That is materially different from lowering a circuit onto a fixed two-qubit gate topology — `BackendSpec::coupling_map` returns one fixed `CouplingMap`, which has nothing to say about atoms whose reachability changes as they move.
 
-A digital-mode Rigetti-style stand-in was explicitly rejected because it would make the architecture appear to support a hardware family that has not actually been modeled or tested.
+A photonic backend fails even earlier: `BackendSpec::rot_axis`/`push_two_qubit_zz` assume the native gate set is `{Rz, one other rotation axis, an Rzz-derived two-qubit gate}` acting on qubit-indexed wires. Linear-optical qubits don't have that shape — the primitives are beamsplitters/phase shifters on modes, and two-qubit interaction is typically probabilistic rather than a fixed unitary — so there's no `rot_axis`/`push_two_qubit_zz` pair that would honestly describe it.
+
+A digital-mode Rigetti-style stand-in for either was explicitly rejected because it would make the architecture appear to support a hardware family that has not actually been modeled or tested. A real implementation of either needs its own gate representation below `ir::Circuit`, not a `BackendSpec` impl — see §4's `backend.rs` section for the fuller version of this argument.
 
 ---
 

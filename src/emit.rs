@@ -142,7 +142,7 @@ pub fn to_qasm(circuit: &NativeCircuit, circuit_name: &str) -> String {
 // not just constructed.
 // ---------------------------------------------------------------------
 
-use crate::backend::{Backend, BackendCircuit, BackendGate};
+use crate::backend::{BackendCircuit, BackendGate, RotAxis};
 
 /// Runs a lowered [`BackendCircuit`] on a fresh `QuantumRegister`
 /// (starting in |00...0>) and returns the resulting register.
@@ -162,9 +162,9 @@ pub fn apply_backend_to(circuit: &BackendCircuit, reg: &mut QuantumRegister) -> 
     for gate in &circuit.gates {
         match *gate {
             BackendGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
-            BackendGate::Rot(q, angle) => match circuit.backend {
-                Backend::TrappedIon => reg.apply_ry(q, angle)?,
-                Backend::IbmQ | Backend::Rigetti => reg.apply_rx(q, angle)?,
+            BackendGate::Rot(q, angle) => match circuit.backend.rot_axis() {
+                RotAxis::Ry => reg.apply_ry(q, angle)?,
+                RotAxis::Rx => reg.apply_rx(q, angle)?,
             },
             BackendGate::Cx(a, b) => reg.apply_cnot(a, b)?,
             BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
@@ -203,9 +203,9 @@ pub fn apply_backend_to_with_measurement(
     for gate in &circuit.gates {
         match *gate {
             BackendGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
-            BackendGate::Rot(q, angle) => match circuit.backend {
-                Backend::TrappedIon => reg.apply_ry(q, angle)?,
-                Backend::IbmQ | Backend::Rigetti => reg.apply_rx(q, angle)?,
+            BackendGate::Rot(q, angle) => match circuit.backend.rot_axis() {
+                RotAxis::Ry => reg.apply_ry(q, angle)?,
+                RotAxis::Rx => reg.apply_rx(q, angle)?,
             },
             BackendGate::Cx(a, b) => reg.apply_cnot(a, b)?,
             BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
