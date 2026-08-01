@@ -49,4 +49,21 @@ impl BackendSpec for RigettiSpec {
         bc.push(BackendGate::Cz(a, b));
         push_h(bc, RotAxis::Rx, b);
     }
+
+    /// `Cx(control, target) == H(target) . Cz(control, target) . H(target)`
+    /// -- the standard CNOT-from-CZ identity, and the same one already
+    /// implicit in `native.rs`'s own `Cx` decomposition (`H` sandwiching
+    /// a `CP(pi)`, which is `Cz` up to the global phase this crate never
+    /// observes -- see `native.rs`'s `decompose_cp`). 1 native `Cz`,
+    /// not the 2 the generic `push_two_qubit_zz` round-trip above would
+    /// cost (see `BackendSpec::has_native_cx`'s doc comment).
+    fn has_native_cx(&self) -> bool {
+        true
+    }
+
+    fn push_native_cx(&self, bc: &mut BackendCircuit, control: usize, target: usize) {
+        push_h(bc, RotAxis::Rx, target);
+        bc.push(BackendGate::Cz(control, target));
+        push_h(bc, RotAxis::Rx, target);
+    }
 }

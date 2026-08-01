@@ -90,4 +90,17 @@ impl BackendSpec for GoogleSpec {
         bc.push(BackendGate::Cz(a, b));
         push_h(bc, RotAxis::Rx, b);
     }
+
+    /// Identical in form and rationale to `RigettiSpec`'s override --
+    /// see that module's doc comment on `has_native_cx`/`push_native_cx`
+    /// for the identity (`Cx == H . Cz . H`) and why it's worth having.
+    fn has_native_cx(&self) -> bool {
+        true
+    }
+
+    fn push_native_cx(&self, bc: &mut BackendCircuit, control: usize, target: usize) {
+        push_h(bc, RotAxis::Rx, target);
+        bc.push(BackendGate::Cz(control, target));
+        push_h(bc, RotAxis::Rx, target);
+    }
 }

@@ -169,11 +169,21 @@ pub(crate) const EPS: f64 = 1e-9;
 /// before routing existed: it only ever reads `circuit`, so it doesn't
 /// know or care whether `circuit` is the caller's original or an
 /// already-routed one.
+///
+/// Uses [`crate::route::route_lookahead`] rather than the naive
+/// identity-layout [`crate::route::route`]: both are exactly
+/// semantics-preserving (see `route.rs`'s own
+/// `assert_lookahead_routing_preserves_action` coverage), but
+/// `route_lookahead`'s smarter initial layout + lookahead never uses
+/// more SWAPs than `route` on every benchmark this crate has measured
+/// (`qiskit_benchmark.rs`), and every SWAP saved is 3 fewer native
+/// two-qubit gates once lowered below (Rzz/Cx/Cz) -- a real,
+/// already-tested win, not a research trade-off.
 pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
     let routed_storage;
     let circuit: &Circuit = match backend.coupling_map(circuit.num_qubits) {
         Some(coupling) => {
-            routed_storage = crate::route::route(circuit, &coupling);
+            routed_storage = crate::route::route_lookahead(circuit, &coupling);
             &routed_storage
         }
         None => circuit,
@@ -182,14 +192,14 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
     // Reuse the same Rz/Ry/Rzz canonical form for every backend
     // (native.rs), then hand each gate to `backend`'s own
     // `BackendSpec` to re-express in its native gate set.
-    let native = crate::native::decompose(circuit);
     let mut bc = BackendCircuit::new(backend, circuit.num_qubits);
-    bc.num_clbits = native.num_clbits;
+    bc.num_clbits = circuit.num_clbits;
 
     if backend.is_native_decompose_target() {
         // This backend's native gate set already *is*
         // native::decompose's canonical output (true only for
         // TrappedIon today) -- nothing to re-express, just relabel.
+        let native = crate::native::decompose(circuit);
         for g in &native.gates {
             bc.push(match *g {
                 crate::native::NativeGate::Rz(q, a) => BackendGate::Rz(q, a),
@@ -201,12 +211,49 @@ pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
         optimize(&mut bc);
     } else {
         let axis = backend.rot_axis();
-        for g in &native.gates {
-            match *g {
-                crate::native::NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
-                crate::native::NativeGate::Ry(q, a) => push_ry(&mut bc, axis, q, a),
-                crate::native::NativeGate::Rzz(a, b, t) => backend.push_two_qubit_zz(&mut bc, a, b, t),
-                crate::native::NativeGate::Measure(q, c) => bc.push(BackendGate::Measure(q, c)),
+        // Checked once per circuit, not per gate -- see
+        // `BackendSpec::has_native_cx`'s doc comment on why this must
+        // be a backend-wide constant.
+        let native_cx = backend.has_native_cx();
+        // Unlike the TrappedIon branch above, this walks `circuit`'s
+        // own source gates one at a time (via native.rs's per-gate
+        // `decompose_gate`, exposed for exactly this) instead of
+        // calling `native::decompose` once over the whole circuit
+        // up front. That lets a `Gate::Cx` (or a routing-inserted
+        // `Gate::Swap`, which is `Cx(a,b).Cx(b,a).Cx(a,b)` at the IR
+        // level -- see `route.rs`) take `push_native_cx`'s cheaper
+        // path *before* `decompose_gate`'s own generic `H . Rzz . H`
+        // expansion of `Cx` ever runs, for any backend that opted in.
+        // Every other gate kind still goes through exactly the same
+        // decompose-then-re-express pipeline as before; this is a
+        // strictly additive fast path, not a rewrite of the general
+        // one.
+        for gate in &circuit.gates {
+            match *gate {
+                Gate::Cx(control, target) if native_cx => {
+                    backend.push_native_cx(&mut bc, control, target);
+                }
+                Gate::Swap(a, b) if native_cx => {
+                    backend.push_native_cx(&mut bc, a, b);
+                    backend.push_native_cx(&mut bc, b, a);
+                    backend.push_native_cx(&mut bc, a, b);
+                }
+                _ => {
+                    let mut nc = crate::native::NativeCircuit::new(circuit.num_qubits);
+                    crate::native::decompose_gate(&mut nc, gate);
+                    for g in &nc.gates {
+                        match *g {
+                            crate::native::NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
+                            crate::native::NativeGate::Ry(q, a) => push_ry(&mut bc, axis, q, a),
+                            crate::native::NativeGate::Rzz(a, b, t) => {
+                                backend.push_two_qubit_zz(&mut bc, a, b, t)
+                            }
+                            crate::native::NativeGate::Measure(q, c) => {
+                                bc.push(BackendGate::Measure(q, c))
+                            }
+                        }
+                    }
+                }
             }
         }
         // The per-gate ZYZ re-expansion above (especially `H` inside a

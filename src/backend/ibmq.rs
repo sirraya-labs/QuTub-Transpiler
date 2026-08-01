@@ -39,4 +39,18 @@ impl BackendSpec for IbmQSpec {
         bc.push(BackendGate::Rz(b, theta));
         bc.push(BackendGate::Cx(a, b));
     }
+
+    /// `Cx` is already IBM's native two-qubit gate -- nothing to
+    /// re-express. Without this, a source `Cx` would round-trip
+    /// through `native::decompose`'s generic `H . Rzz . H` form and
+    /// then back out through `push_two_qubit_zz` above, costing 2
+    /// native `Cx` for something that's really 1 (see
+    /// `BackendSpec::has_native_cx`'s doc comment).
+    fn has_native_cx(&self) -> bool {
+        true
+    }
+
+    fn push_native_cx(&self, bc: &mut BackendCircuit, control: usize, target: usize) {
+        bc.push(BackendGate::Cx(control, target));
+    }
 }
