@@ -2,7 +2,7 @@
 //! of only the trapped-ion-style `{Rz, Ry, Rzz}` target in [`crate::native`].
 //!
 //! # Backends implemented
-//! Each backend is an implementation of [`crate::backend_spec::BackendSpec`]
+//! Each backend is an implementation of [`BackendSpec`]
 //! in its own file, referenced by one [`Backend`] constant -- see
 //! `backend/spec.rs`'s module doc for why this is a trait rather than a
 //! closed `match`-per-variant enum, and for what a new backend needs to
@@ -17,6 +17,15 @@
 //! - [`Backend::Rigetti`] (`backend/rigetti.rs`) -- `{Rz, Rx, Cz}`,
 //!   modeling Rigetti's superconducting basis (`CZ`-native rather than
 //!   `CNOT`-native).
+//! - [`Backend::Google`] (`backend/google.rs`) -- `{Rz, Rx, Cz}`,
+//!   modeling Google's Willow processor in its CZ-tuned configuration.
+//!   Added after the three above, as the actual test of this module's
+//!   extension story: it needed a new file and one new `Backend::`
+//!   constant, nothing else here changed, and it turned out to need
+//!   *zero* new gate-identity derivations -- see `backend/google.rs`'s
+//!   own doc comment for why a fourth, independently-sourced backend
+//!   landing on the exact same `push_two_qubit_zz` identity `Rigetti`
+//!   already uses isn't a coincidence worth suppressing.
 //!
 //! Two circuit identities, generic across every non-`TrappedIon`
 //! backend, do the actual re-expansion work in *this* file (each
@@ -31,27 +40,34 @@
 //! 2. `Rzz(a, b, theta) == Cx(a, b) . Rz(b, theta) . Cx(a, b)` -- the
 //!    reason `Cx` is exactly as cheap on `IbmQ` as `Rzz` is on
 //!    `TrappedIon` (one native two-qubit gate). `IbmQ` uses this
-//!    directly; `Rigetti` (`Cz`-native, no native `Cx`) uses a
-//!    shortened variant of it -- see `backend/rigetti.rs`'s own doc
-//!    comment for the third identity that gets it there in 2 `H`'s
-//!    instead of 4.
+//!    directly; `Rigetti` and `Google` (both `Cz`-native, no native
+//!    `Cx`) each use a shortened variant of it -- see
+//!    `backend/rigetti.rs`'s own doc comment for the third identity
+//!    that gets it there in 2 `H`'s instead of 4.
 //!
 //! # What's not here: Pasqal (neutral atoms) or a real photonic backend
 //! Neutral-atom platforms (Pasqal, and analog/digital Rydberg-blockade
-//! devices generally) aren't a fourth [`BackendSpec`] on purpose. Their
-//! native "two-qubit gate" is a blockade interaction between whichever
-//! atoms are currently within blockade radius of each other in a
-//! *movable, laser-tweezer-defined* 2D/3D layout -- so "compiling to
-//! Pasqal's native gates" is inseparable from *placing* the atoms and
+//! devices generally) and photonic platforms aren't a [`BackendSpec`]
+//! on purpose -- unlike `Google` above, adding either isn't blocked by
+//! "write one file and register one constant," because neither one's
+//! physics fits what this trait is a contract for in the first place.
+//! Pasqal's native "two-qubit gate" is a blockade interaction between
+//! whichever atoms are currently within blockade radius of each other
+//! in a *movable, laser-tweezer-defined* 2D/3D layout -- so "compiling
+//! to Pasqal's native gates" is inseparable from *placing* the atoms and
 //! routing which pairs are ever simultaneously in blockade range, which
 //! is a materially different problem from "express this unitary in
 //! terms of a fixed two-qubit gate" (the problem this module and
 //! `native.rs` solve, and what `BackendSpec::push_two_qubit_zz` assumes
 //! every implementor is doing -- see `backend/spec.rs`'s module doc).
 //! Pasqal does also expose a "digital" mode with a fixed local
-//! `CZ`-like gate (making it superficially similar to `Rigetti` here),
-//! but modeling it correctly still needs blockade-radius/layout
-//! constraints this crate doesn't have.
+//! `CZ`-like gate (making it superficially similar to `Rigetti`/`Google`
+//! here), but modeling it correctly still needs blockade-radius/layout
+//! constraints this crate doesn't have. A photonic backend's native
+//! gates (beamsplitters/phase shifters on modes, typically
+//! probabilistic two-qubit interaction) don't have a `Rot`/`Rzz` shape
+//! at all -- see `backend/spec.rs`'s module doc for the fuller version
+//! of this argument.
 //!
 //! A photonic backend runs into the same wall from a different
 //! direction: linear-optical qubits (dual-rail, or continuous-variable
@@ -72,6 +88,7 @@
 use crate::ir::{Circuit, Gate};
 use std::f64::consts::FRAC_PI_2;
 
+mod google;
 mod ibmq;
 mod rigetti;
 mod spec;

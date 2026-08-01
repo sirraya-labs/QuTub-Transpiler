@@ -15,7 +15,8 @@
 //!
 //! This module replaces that with [`BackendSpec`], an object-safe
 //! trait each backend implements once, in its own file
-//! (`backend/trapped_ion.rs`, `backend/ibmq.rs`, `backend/rigetti.rs`),
+//! (`backend/trapped_ion.rs`, `backend/ibmq.rs`, `backend/rigetti.rs`,
+//! `backend/google.rs`),
 //! plus [`Backend`] -- a small `Copy` handle wrapping a
 //! `&'static dyn BackendSpec` that stands in for the old enum
 //! everywhere it was used *by value* (equality checks, `match
@@ -134,6 +135,10 @@ impl Backend {
     /// Rigetti-superconducting-style target: `{Rz, Rx, Cz}`.
     #[allow(non_upper_case_globals)]
     pub const Rigetti: Backend = Backend(&crate::backend::rigetti::RigettiSpec);
+    /// Google-superconducting-style target: `{Rz, Rx, Cz}` (Willow,
+    /// CZ-tuned configuration).
+    #[allow(non_upper_case_globals)]
+    pub const Google: Backend = Backend(&crate::backend::google::GoogleSpec);
 
     /// Wraps an arbitrary [`BackendSpec`] implementation as a
     /// [`Backend`] handle, for a backend that -- unlike the three
@@ -188,6 +193,7 @@ mod tests {
             Backend::TrappedIon.id(),
             Backend::IbmQ.id(),
             Backend::Rigetti.id(),
+            Backend::Google.id(),
         ];
         for i in 0..ids.len() {
             for j in 0..ids.len() {
@@ -204,5 +210,16 @@ mod tests {
         assert_eq!(Backend::IbmQ.rot_axis(), Backend::Rigetti.rot_axis());
         assert_ne!(Backend::IbmQ, Backend::Rigetti);
         assert_eq!(Backend::IbmQ, Backend::IbmQ);
+    }
+
+    #[test]
+    fn google_and_rigetti_are_distinct_despite_sharing_axis_and_gate_shape() {
+        // Google (Willow, CZ-tuned) and Rigetti both use RotAxis::Rx
+        // and structurally the same push_two_qubit_zz identity (see
+        // backend/google.rs's doc comment) -- confirms that sharing an
+        // identity doesn't collapse two backends into "the same" one.
+        assert_eq!(Backend::Google.rot_axis(), Backend::Rigetti.rot_axis());
+        assert_ne!(Backend::Google, Backend::Rigetti);
+        assert_ne!(Backend::Google.id(), Backend::Rigetti.id());
     }
 }
