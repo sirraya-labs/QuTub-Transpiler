@@ -260,7 +260,17 @@ pub fn decompose(circuit: &Circuit) -> NativeCircuit {
     nc
 }
 
-fn decompose_gate(nc: &mut NativeCircuit, gate: &Gate) {
+/// `pub(crate)` (rather than private) so `crate::backend::lower` can
+/// decompose one source [`Gate`] at a time instead of only the whole
+/// [`Circuit`] [`decompose`] handles -- needed so it can intercept a
+/// `Gate::Cx`/`Gate::Swap` *before* this function's own generic
+/// `H . Rzz . H` expansion of it, for a backend whose native two-qubit
+/// gate can implement `Cx` more cheaply than that generic canonical
+/// form round-trips to (see `backend::spec::BackendSpec::push_native_cx`'s
+/// doc comment). Every other gate kind, and every call from
+/// [`decompose`] itself, behaves exactly as before -- this is a
+/// visibility change only, not a behavior change.
+pub(crate) fn decompose_gate(nc: &mut NativeCircuit, gate: &Gate) {
     match *gate {
         Gate::Measure(q, c) => nc.push(NativeGate::Measure(q, c)),
         Gate::H(q) => push_single(nc, q, m_h()),

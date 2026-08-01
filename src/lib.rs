@@ -6,8 +6,11 @@
 //! Pipeline: [`qasm::parse`] (text -> [`ir::Circuit`]) ->
 //! [`ir_optimize::optimize`] (source-level cancellation/reordering) ->
 //! [`backend::lower`] ([`ir::Circuit`] -> a target [`backend::Backend`]'s
-//! native gate set, routing through [`route::route`] first against a
-//! [`coupling::CouplingMap`] for any backend that isn't all-to-all) ->
+//! native gate set, routing through [`route::route_lookahead`] first
+//! against a [`coupling::CouplingMap`] for any backend that isn't
+//! all-to-all -- see `backend.rs`'s `lower` for why the lookahead
+//! router, not the naive [`route::route`], is the one actually wired
+//! in) ->
 //! [`optimize::optimize`] (native-level peephole cleanup) ->
 //! [`fidelity::estimate_circuit_fidelity`] (quick sanity-check number)
 //! -> [`emit::run`] / [`emit::run_backend`] (actually execute it on
@@ -80,7 +83,7 @@ pub use pulse::{
     TwoQubitPulseCalibration,
 };
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
-pub use route::route;
+pub use route::{route, route_lookahead};
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, IbmInstr};
 pub use waveform_sim::{
     integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,

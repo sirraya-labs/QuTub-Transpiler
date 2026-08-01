@@ -301,19 +301,19 @@ mod tests {
     /// between `backend::lower` and this module's export doesn't drop
     /// or duplicate anything.
     ///
-    /// `backend::lower` never lowers a source `Gate::Cx` directly for
-    /// `IbmQ`/`Rigetti`: every two-qubit gate first goes through
-    /// `native::decompose`'s canonical `{Rz, Ry, Rzz}` form (a `Cx`
-    /// becomes `H . Rzz . H` via `decompose_cp`), and `push_rzz` then
-    /// re-expresses that `Rzz(a,b,theta)` as `Cx(a,b).Rz(b,theta).Cx(a,b)`
-    /// -- see `backend.rs`'s own module doc and its
+    /// A source-level `Gate::Cx` on `IbmQ` costs exactly 1 native `Cx`,
+    /// via `BackendSpec::push_native_cx`'s fast path (`Cx` is already
+    /// IbmQ's native two-qubit gate -- see `backend/ibmq.rs`). Only a
+    /// gate that genuinely needs the general `Rzz` canonical form (a
+    /// non-trivial-angle `Rzz`, or any two-qubit gate reached via a
+    /// path `push_native_cx` doesn't shortcut) pays the 2-native-`Cx`
+    /// cost `push_two_qubit_zz`'s `Rzz(a,b,theta) ==
+    /// Cx(a,b).Rz(b,theta).Cx(a,b)` identity describes -- see
+    /// `backend.rs`'s own module doc and its
     /// `ibmq_rzz_costs_one_cx_pair`/`rigetti_and_ibmq_use_the_same_two_qubit_gate_count_for_rzz`
-    /// tests. So a single source-level `Cx` costs 2 native `Cx`s once
-    /// it round-trips through this pipeline, not 1 -- that's the
-    /// existing, intentional (if not maximally CNOT-efficient) design,
-    /// not a bug this module introduced.
+    /// tests for that case.
     #[test]
-    fn bell_pair_exports_with_two_cx_and_two_measures() {
+    fn bell_pair_exports_with_one_cx_and_two_measures() {
         use crate::ir::{Circuit, Gate};
 
         let mut circuit = Circuit::new(2);
@@ -329,9 +329,9 @@ mod tests {
         let cx_count = instrs.iter().filter(|i| matches!(i, IbmInstr::Cx(..))).count();
         let measure_count = instrs.iter().filter(|i| matches!(i, IbmInstr::Measure(..))).count();
         assert_eq!(
-            cx_count, 2,
-            "a source Cx lowers via the Rzz(a,b,theta)==Cx.Rz.Cx identity, \
-             costing 2 native Cx on IbmQ (see backend.rs's push_rzz): {:?}",
+            cx_count, 1,
+            "a source Cx is already IbmQ's native two-qubit gate; push_native_cx should \
+             lower it directly to 1 native Cx, not round-trip through Rzz: {:?}",
             instrs
         );
         assert_eq!(measure_count, 2, "both qubits should be measured: {:?}", instrs);

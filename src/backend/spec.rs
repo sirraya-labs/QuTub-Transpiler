@@ -101,6 +101,45 @@ pub trait BackendSpec: Send + Sync {
     /// inline).
     fn push_two_qubit_zz(&self, bc: &mut BackendCircuit, a: usize, b: usize, theta: f64);
 
+    /// True if this backend's native two-qubit gate set can implement a
+    /// source-level `Gate::Cx` directly, without going through the
+    /// generic `Rzz` canonical form (`native::decompose`'s own
+    /// `H . Rzz . H` expansion of `Cx`, then this backend's own
+    /// `push_two_qubit_zz`'s re-expression of *that* `Rzz`). That
+    /// round-trip is always exact but not always minimal: on a backend
+    /// whose native two-qubit gate already is `Cx` (`IbmQ`) or one
+    /// `H`-sandwich away from it (`Rigetti`/`Google`'s `Cz`), it costs
+    /// 2 native two-qubit gates to implement something that's really 1
+    /// -- and since a routing-inserted `Gate::Swap` is
+    /// `Cx(a,b).Cx(b,a).Cx(a,b)` at the IR level (see `route.rs`), the
+    /// same 2x tax applies to every SWAP a routed circuit needed, which
+    /// is usually the larger share of it. Defaults to `false`, the
+    /// always-correct choice for a new backend that hasn't opted in --
+    /// see [`push_native_cx`](Self::push_native_cx) for the
+    /// corresponding gate-pushing method, only ever called when this is
+    /// `true`. Must return the same answer regardless of which qubits
+    /// are involved; `backend::lower` checks it once per circuit
+    /// lowering, not per gate.
+    fn has_native_cx(&self) -> bool {
+        false
+    }
+
+    /// Pushes this backend's native-gate implementation of
+    /// `Gate::Cx(control, target)` onto `bc` -- see
+    /// [`has_native_cx`](Self::has_native_cx)'s doc comment for why
+    /// this exists and when it's worth implementing. Only ever called
+    /// by `backend::lower` when `has_native_cx()` returns `true`; the
+    /// default implementation is unreachable for any backend that
+    /// hasn't overridden that method, since nothing else in this crate
+    /// calls this directly.
+    fn push_native_cx(&self, bc: &mut BackendCircuit, control: usize, target: usize) {
+        let _ = (bc, control, target);
+        unreachable!(
+            "push_native_cx called on a BackendSpec whose has_native_cx() is false -- \
+             backend::lower should never do this"
+        )
+    }
+
     /// True only for a backend whose native gate set already *is*
     /// `native::decompose`'s canonical `{Rz, Ry-as-Rot, Rzz}` form, so
     /// [`crate::backend::lower`] can skip the generic per-gate
@@ -164,6 +203,12 @@ impl Backend {
     }
     pub(crate) fn push_two_qubit_zz(self, bc: &mut BackendCircuit, a: usize, b: usize, theta: f64) {
         self.0.push_two_qubit_zz(bc, a, b, theta)
+    }
+    pub(crate) fn has_native_cx(self) -> bool {
+        self.0.has_native_cx()
+    }
+    pub(crate) fn push_native_cx(self, bc: &mut BackendCircuit, control: usize, target: usize) {
+        self.0.push_native_cx(bc, control, target)
     }
     pub(crate) fn is_native_decompose_target(self) -> bool {
         self.0.is_native_decompose_target()
