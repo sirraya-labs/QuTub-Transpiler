@@ -168,6 +168,34 @@ impl PublishedCalibration {
             two_qubit_fidelity: 0.995,
         }
     }
+
+    /// Google Willow (105-qubit superconducting, tunable couplers),
+    /// announced December 2024. Willow's own spec sheet reports two
+    /// separate device configurations with different native two-qubit
+    /// gates -- "Chip 1: Quantum Error Correction" (CZ-tuned) and
+    /// "Chip 2: Random Circuit Sampling" (iSWAP-like-tuned), since a
+    /// tunable coupler lets the same hardware be calibrated either way.
+    /// This uses **Chip 1's** figures specifically, because CZ is the
+    /// two-qubit gate `backend::google::GoogleSpec` actually lowers to
+    /// (see that module's doc comment) -- using Chip 2's iSWAP-tuned
+    /// numbers against a CZ-lowered circuit would be citing the right
+    /// chip family but the wrong calibrated mode.
+    ///
+    /// Both figures are Google's own published numbers, not a
+    /// third-party benchmark: mean simultaneous single-qubit gate error
+    /// 0.035% (fidelity 0.99965) and mean simultaneous CZ gate error
+    /// 0.33% (fidelity 0.9967), from Google's Willow spec sheet
+    /// (quantumai.google/static/site-assets/downloads/willow-spec-sheet.pdf,
+    /// published Dec 9, 2024).
+    pub fn google_willow_2024() -> Self {
+        Self {
+            name: "Google Willow Chip 1: QEC configuration (105-qubit superconducting, CZ-tuned; \
+                   1Q error 0.035%, 2Q CZ error 0.33%, both mean simultaneous, per Google's own \
+                   Willow spec sheet, published Dec 9 2024)",
+            single_qubit_fidelity: 0.99965,
+            two_qubit_fidelity: 0.9967,
+        }
+    }
 }
 
 #[cfg(test)]
