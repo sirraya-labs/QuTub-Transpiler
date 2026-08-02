@@ -8,13 +8,13 @@
 
 ## 1. What this crate is
 
-`sirraya-qutub-transpiler` is a **QASM 2.0 importer and multi-backend native-gate compiler** for circuits that ultimately execute on `sirraya_qutub::core::QuantumRegister` — Sirraya Labs' statevector simulator.
+`sirraya-qutub-transpiler` is a **QASM 2.0/3.0 importer and multi-backend native-gate compiler** for circuits that ultimately execute on `sirraya_qutub::core::QuantumRegister` — Sirraya Labs' statevector simulator.
 
-You can provide **OPENQASM 2.0** text or construct a `Circuit` directly. The transpiler then takes the circuit through a hardware-aware compilation pipeline:
+You can provide **OPENQASM 2.0 or 3.0** text or construct a `Circuit` directly — `qasm::parse` recognizes both dialects' spellings of the same handful of constructs unconditionally (no version flag; see `qasm.rs`'s own module doc for the full spelling comparison). The transpiler then takes the circuit through a hardware-aware compilation pipeline:
 
 ```mermaid
 flowchart LR
-    A["OPENQASM 2.0"] --> B["Parse"]
+    A["OPENQASM 2.0 / 3.0"] --> B["Parse"]
     B --> C["Source IR"]
     C --> D["Source Optimization"]
     D --> E["Physical Routing"]
@@ -29,7 +29,7 @@ flowchart LR
 
 | Stage                    | Responsibility                                                           |
 | ------------------------ | ------------------------------------------------------------------------ |
-| **Parse**                | Convert OPENQASM 2.0 into the transpiler IR                              |
+| **Parse**                | Convert OPENQASM 2.0 or 3.0 into the transpiler IR                       |
 | **Source optimization**  | Cancel, reorder, and simplify gates before hardware lowering             |
 | **Routing**              | Insert `Swap` gates to satisfy physical connectivity                     |
 | **Native decomposition** | Convert gates into a target-native gate vocabulary                       |
@@ -52,7 +52,7 @@ The crate deliberately separates **source-level semantics**, **hardware topology
 
 ```mermaid
 flowchart TD
-    QASM["OPENQASM 2.0"]
+    QASM["OPENQASM 2.0 / 3.0"]
 
     QASM --> PARSE["qasm.rs<br/>Parser"]
     PARSE --> IR["ir.rs<br/>Source IR"]
@@ -84,7 +84,7 @@ flowchart TD
 | Module           | Role                                       |
 | ---------------- | ------------------------------------------ |
 | `ir.rs`          | Source-level circuit representation        |
-| `qasm.rs`        | OPENQASM 2.0 importer                      |
+| `qasm.rs`        | OPENQASM 2.0 and 3.0 importer               |
 | `ir_optimize.rs` | Source-level optimization                  |
 | `native.rs`      | Trapped-ion-style native decomposition     |
 | `backend.rs`     | Backend-specific lowering and optimization (shared engine; see `backend/` below for the per-backend plugins) |
@@ -96,7 +96,7 @@ flowchart TD
 | `diagram.rs`     | ASCII/SVG circuit diagram rendering, at any of the three IR levels (debug/inspection) |
 | `pulse.rs`       | Pulse-level scheduling: lowers an already-lowered `BackendCircuit` into a hardware-channel `Schedule`, using a per-backend calibration table. Optional, downstream of everything above — nothing upstream needs to know it exists. |
 | `waveform_sim.rs`| Numerically integrates a single pulse instruction against a two-level qubit model, to check a `pulse.rs` calibration table's `rot` entries actually achieve the rotation angle they claim. Sits below `pulse.rs`, same "optional, nothing upstream depends on it" relationship. |
-| `ibm_export.rs`  | Real IBM-hardware-native export: expands a `BackendCircuit` lowered for `Backend::IbmQ` into IBM's actual physical basis gates (`rz`, `sx`, `x`, `cx`, `measure`) and emits OPENQASM 2.0 text a real Qiskit/IBM job-submission pipeline can consume (paired with `submit_ibm.py`, since there's no official Rust SDK for IBM Quantum Platform). Distinct from `emit::to_qasm`, which round-trips only through this crate's own `qasm::parse`. |
+| `ibm_export.rs`  | Real IBM-hardware-native export: expands a `BackendCircuit` lowered for `Backend::IbmQ` into IBM's actual physical basis gates (`rz`, `sx`, `x`, `cx`, `measure`) and emits OPENQASM 2.0 text a real Qiskit/IBM job-submission pipeline can consume (paired with `submit_ibm.py`, since there's no official Rust SDK for IBM Quantum Platform). Deliberately stays OPENQASM 2.0-only, since `submit_ibm.py`'s Qiskit loader (`QuantumCircuit.from_qasm_str`) only accepts 2.0. Distinct from `emit::to_qasm`/`emit::to_qasm3`, which round-trip only through this crate's own `qasm::parse`. |
 
 `backend.rs` has its own companion directory, `backend/`, holding one file per backend implementation plus the trait each of them implements:
 
@@ -117,7 +117,7 @@ The pipeline is intentionally divided into distinct transformations rather than 
 
 ```mermaid
 flowchart TD
-    A["OPENQASM 2.0"] --> B["qasm::parse<br/>text → ir::Circuit"]
+    A["OPENQASM 2.0 / 3.0"] --> B["qasm::parse<br/>text → ir::Circuit"]
 
     B --> C["ir_optimize::optimize<br/>Source-level cancellation<br/>and conservative reordering"]
 
@@ -144,7 +144,7 @@ flowchart TD
     F --> EXEC["emit::run / run_backend"]
     EXEC --> SIM["sirraya_qutub::QuantumRegister"]
 
-    EXEC --> QOUT["emit::to_qasm"]
+    EXEC --> QOUT["emit::to_qasm (2.0)<br/>emit::to_qasm3 (3.0)"]
 
     IBMO --> IBMEXP["ibm_export::to_ibm_qasm<br/>(IbmQ only — real rz/sx/x/cx/measure basis)"]
     IBMEXP --> QISKIT["Qiskit / IBM job submission<br/>(via submit_ibm.py)"]
@@ -326,23 +326,39 @@ Any of the three circuit levels — `ir::Circuit`, `native::NativeCircuit`, `bac
 
 ## `qasm.rs` — OPENQASM importer
 
-The parser implements a deliberately constrained subset of **OPENQASM 2.0**.
+The parser implements a deliberately constrained subset of **OPENQASM**, spanning both the 2.0 and 3.0 dialects.
+
+There is no version flag and no separate entry point per dialect: `qasm::parse` recognizes both dialects' spellings of the same handful of constructs unconditionally, so a 2.0 program is parsed exactly the way it always was, and a 3.0 program's differently-spelled equivalents are additionally recognized alongside it.
+
+| construct           | QASM 2.0                 | QASM 3.0                           |
+| -------------------- | ------------------------- | ------------------------------------ |
+| version header        | `OPENQASM 2.0;`            | `OPENQASM 3.0;` (or `3;`)             |
+| include                | `include "qelib1.inc";`    | `include "stdgates.inc";`             |
+| qubit register          | `qreg q[5];`                 | `qubit[5] q;` (or bare `qubit q;`)     |
+| classical register       | `creg c[2];`                 | `bit[2] c;` (or bare `bit c;`)         |
+| measure                 | `measure q[0] -> c[0];`     | `c[0] = measure q[0];`                |
+
+The version header and the include statement were already skipped unconditionally (their contents were never inspected), so neither needed a code change. Gate-call syntax (`h q[0];`, `rz(0.5) q[1];`, ...) is identical between the two dialects and already worked either way. Only the register declarations and the measure statement actually differ in spelling, so those are the only two constructs with a second recognized spelling.
+
+A source file can even freely mix both spellings — `parse` doesn't enforce internal consistency of dialect, only that each individual statement is one of the recognized forms.
 
 It accepts:
 
 * the dialect emitted by `sirraya_qutub::QuantumCircuit::to_qasm`
 * the dialect emitted by `QuantumRegister::to_qasm`
-* common `qelib1.inc` mnemonics used by tools such as Qiskit for the same gate set
+* common `qelib1.inc`/`stdgates.inc` mnemonics used by tools such as Qiskit for the same gate set
 
 It intentionally does **not** implement:
 
 * gate definitions
 * classical control
 * arbitrary includes
-* multiple `qreg` / `creg` declarations
+* multiple qubit-register / classical-register declarations
 * barriers
 
 Anything outside the supported subset produces a **parse error identifying the offending line**, rather than being silently ignored.
+
+This crate's own QASM *emitters* (`emit::to_qasm` for 2.0, `emit::to_qasm3` for 3.0; see §8) each commit to one dialect per function rather than mixing spellings — the parser's acceptance of either spelling is about being a liberal *importer* of QASM written or exported by other tools, not license for this crate's own writers to be inconsistent.
 
 ### Measurement safety
 
@@ -352,7 +368,13 @@ A statement such as:
 measure q[i] -> c[j];
 ```
 
-is range-checked against the declared `qreg` and `creg` sizes at parse time.
+or its 3.0 equivalent:
+
+```text
+c[j] = measure q[i];
+```
+
+is range-checked against the declared qubit-register and classical-register sizes at parse time.
 
 This prevents invalid classical destinations from surviving into later compilation stages.
 
@@ -933,9 +955,9 @@ This is not a symbolic measurement approximation.
 
 ## QASM round-tripping
 
-`to_qasm` emits a native circuit back into the `sirraya_qutub` QASM dialect.
+`to_qasm` emits a native circuit back into the `sirraya_qutub` OPENQASM **2.0** dialect; `to_qasm3` emits the identical gate order and mnemonics as OPENQASM **3.0** text instead (`qubit[n] q;`/`bit[n] c;` declarations, assignment-style `c[i] = measure q[j];`). Both round-trip back through `qasm::parse` to the same `Circuit` — they differ only in which of `parse`'s two recognized spellings they happen to emit (see §4's `qasm.rs` section for the full dialect comparison).
 
-The emitted QASM includes a `creg` sized according to:
+The emitted QASM includes a `creg`/`bit` register sized according to:
 
 ```text
 num_clbits
@@ -949,7 +971,9 @@ num_qubits
 
 This distinction matters because a circuit's classical-bit count does not necessarily equal its qubit count.
 
-Hardcoding `creg` to `num_qubits` would silently break round-tripping for such circuits.
+Hardcoding the classical register to `num_qubits` would silently break round-tripping for such circuits.
+
+`ibm_export::to_ibm_qasm` deliberately stays OPENQASM 2.0-only rather than growing its own 3.0 variant: it feeds `submit_ibm.py`, whose Qiskit loader (`QuantumCircuit.from_qasm_str`) only accepts 2.0.
 
 ---
 
@@ -999,13 +1023,14 @@ The following models currently stand on their own:
 ```text
 ibm_heron_r2()
 rigetti_ankaa3()
+google_willow_2024()
 ```
 
 They do not have corresponding entries in `sirraya_qutub::xeb`.
 
 Their documented sources and limitations therefore remain important when interpreting those figures.
 
-In particular, the single-qubit figure for `rigetti_ankaa3` comes from the previous device generation and is explicitly identified as such.
+In particular, the single-qubit figure for `rigetti_ankaa3` comes from the previous device generation and is explicitly identified as such. `google_willow_2024` specifically uses Willow's "Chip 1: Quantum Error Correction" (CZ-tuned) configuration numbers, since CZ is the two-qubit gate `backend::google::GoogleSpec` actually lowers to — not the alternate "Chip 2" iSWAP-tuned figures from the same spec sheet.
 
 ---
 
@@ -1400,7 +1425,7 @@ At a high level, the crate is a layered compiler:
 
 ```mermaid
 flowchart TD
-    SOURCE["Source Layer<br/><br/>OPENQASM 2.0<br/>Rich Quantum IR"]
+    SOURCE["Source Layer<br/><br/>OPENQASM 2.0 / 3.0<br/>Rich Quantum IR"]
 
     OPT["Optimization Layer<br/><br/>Cancellation<br/>Conservative Reordering"]
 

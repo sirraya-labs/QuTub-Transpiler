@@ -132,6 +132,43 @@ pub fn to_qasm(circuit: &NativeCircuit, circuit_name: &str) -> String {
     out
 }
 
+/// `sirraya_qutub`-dialect OPENQASM **3.0** text for the native
+/// circuit -- same `rz`/`ry`/`rzz` mnemonics and gate order as
+/// [`to_qasm`], just spelled with QASM 3.0's register-declaration
+/// (`qubit[n] q;` / `bit[n] c;`) and assignment-style measure
+/// (`c[i] = measure q[j];`) syntax instead of 2.0's `qreg`/`creg`/
+/// arrow-measure -- see [`crate::qasm`]'s module doc for the full
+/// dialect comparison. Round-trips back through [`crate::qasm::parse`]
+/// exactly as [`to_qasm`] does; the two differ only in which of
+/// `parse`'s two recognized spellings they happen to emit; the
+/// resulting `Circuit` a caller gets back is identical either way.
+pub fn to_qasm3(circuit: &NativeCircuit, circuit_name: &str) -> String {
+    let mut out = String::new();
+    out.push_str("OPENQASM 3.0;\n");
+    out.push_str("include \"stdgates.inc\";\n");
+    out.push_str(&format!("qubit[{}] q;\n", circuit.num_qubits));
+    // See to_qasm's note above on why this is circuit.num_clbits, not
+    // circuit.num_qubits -- same reasoning applies here.
+    out.push_str(&format!("bit[{}] c;\n", circuit.num_clbits));
+    out.push_str(&format!(
+        "// Circuit: {} (native gate set: rz, ry, rzz, measure)\n",
+        circuit_name
+    ));
+    for gate in &circuit.gates {
+        match *gate {
+            NativeGate::Rz(q, angle) => out.push_str(&format!("rz({}) q[{}];\n", angle, q)),
+            NativeGate::Ry(q, angle) => out.push_str(&format!("ry({}) q[{}];\n", angle, q)),
+            NativeGate::Rzz(a, b, angle) => {
+                out.push_str(&format!("rzz({}) q[{}], q[{}];\n", angle, a, b))
+            }
+            NativeGate::Measure(q, c) => {
+                out.push_str(&format!("c[{}] = measure q[{}];\n", c, q))
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------
 // Backend-aware execution, additive to the NativeCircuit-only run/
 // apply_to above. This re-expresses each BackendGate back in terms of
@@ -224,4 +261,60 @@ pub fn apply_backend_to_with_measurement(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod qasm3_emit_tests {
+    use super::*;
+
+    fn sample_circuit() -> NativeCircuit {
+        let mut nc = NativeCircuit::new(2);
+        nc.num_clbits = 2;
+        nc.push(NativeGate::Ry(0, std::f64::consts::FRAC_PI_4));
+        nc.push(NativeGate::Rzz(0, 1, 1.2));
+        nc.push(NativeGate::Measure(0, 0));
+        nc.push(NativeGate::Measure(1, 1));
+        nc
+    }
+
+    #[test]
+    fn to_qasm3_round_trips_through_qasm_parse() {
+        let nc = sample_circuit();
+        let text = to_qasm3(&nc, "bell_like");
+        let circuit = crate::qasm::parse(&text).expect("emitted QASM3 should re-parse");
+        assert_eq!(circuit.num_qubits, 2);
+        assert_eq!(circuit.num_clbits, 2);
+        assert_eq!(
+            circuit.gates,
+            vec![
+                crate::ir::Gate::Ry(0, std::f64::consts::FRAC_PI_4),
+                crate::ir::Gate::Rzz(0, 1, 1.2),
+                crate::ir::Gate::Measure(0, 0),
+                crate::ir::Gate::Measure(1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_qasm_and_to_qasm3_parse_back_to_the_same_circuit() {
+        let nc = sample_circuit();
+        let c2 = crate::qasm::parse(&to_qasm(&nc, "x")).unwrap();
+        let c3 = crate::qasm::parse(&to_qasm3(&nc, "x")).unwrap();
+        assert_eq!(c2.gates, c3.gates);
+        assert_eq!(c2.num_qubits, c3.num_qubits);
+        assert_eq!(c2.num_clbits, c3.num_clbits);
+    }
+
+    #[test]
+    fn to_qasm3_uses_qasm3_syntax_markers() {
+        let nc = sample_circuit();
+        let text = to_qasm3(&nc, "x");
+        assert!(text.starts_with("OPENQASM 3.0;\n"));
+        assert!(text.contains("include \"stdgates.inc\";"));
+        assert!(text.contains("qubit[2] q;"));
+        assert!(text.contains("bit[2] c;"));
+        assert!(text.contains("c[0] = measure q[0];"));
+        assert!(!text.contains("qreg"));
+        assert!(!text.contains("->"));
+    }
 }
