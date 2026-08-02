@@ -93,6 +93,14 @@ pub struct CouplingMap {
 
 impl CouplingMap {
     /// A nearest-neighbor chain: qubit `q` is adjacent to `q + 1` only.
+    ///
+    /// # Examples
+    /// ```
+    /// let map = CouplingMap::\?linear(4);
+    /// assert!(map.is_adjacent(0, 1));   // consecutive qubits are neighbors
+    /// assert!(!map.is_adjacent(0, 2));  // non-consecutive qubits are not neighbors
+    /// assert_eq!(map.neighbors(0), \?[1]);
+    /// ```
     pub fn linear(num_qubits: usize) -> Self {
         let mut edges = HashSet::new();
         for q in 0..num_qubits.saturating_sub(1) {
@@ -121,6 +129,15 @@ impl CouplingMap {
     /// If `rows == 0` or `cols == 0` -- there is no such thing as a
     /// 0-row or 0-column grid of hexagons; use [`CouplingMap::linear`]
     /// (or an empty map) for a topology-free 0/1-qubit case instead.
+    ///
+    /// # Examples
+    /// ```
+    /// // A 1x1 hexagon grid has 12 qubits (6 data + 6 flag/edge qubits)
+    /// let map = CouplingMap::heavy_hex_grid(1, 1);
+    /// assert_eq!(map.num_qubits(), 12);
+    /// // Node 0 (a data qubit) has degree 3 in the heavy-hex lattice
+    /// assert_eq!(map.neighbors(0).len(), 3);
+    /// ```
     pub fn heavy_hex_grid(rows: usize, cols: usize) -> Self {
         assert!(
             rows >= 1 && cols >= 1,
@@ -147,6 +164,15 @@ impl CouplingMap {
     /// `num_qubits <= 1` returns a topology-free map (no edges needed
     /// to route a 0- or 1-qubit circuit), matching
     /// [`CouplingMap::linear`]'s behavior at the same sizes.
+    ///
+    /// # Examples
+    /// ```
+    /// // Find the smallest heavy-hex lattice with at least 16 qubits
+    /// let map = CouplingMap::heavy_hex_for(16);
+    /// assert!(map.num_qubits() >= 16);
+    /// // Qubit 0 and qubit 1 are always adjacent in DFS-ordered heavy-hex
+    /// assert!(map.is_adjacent(0, 1));
+    /// ```
     pub fn heavy_hex_for(num_qubits: usize) -> Self {
         if num_qubits <= 1 {
             return Self {
