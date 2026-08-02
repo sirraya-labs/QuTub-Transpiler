@@ -1,197 +1,868 @@
-# `sirraya-qutub-transpiler`
+# sirraya-qutub-transpiler
 
 [![Crates.io](https://img.shields.io/crates/v/sirraya-qutub-transpiler.svg)](https://crates.io/crates/sirraya-qutub-transpiler)
 [![Documentation](https://docs.rs/sirraya-qutub-transpiler/badge.svg)](https://docs.rs/sirraya-qutub-transpiler)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
 
-A **QASM 2.0/3.0 importer** and **multi-backend native-gate compiler** for quantum circuits destined to run on the Sirraya QuTub ecosystem. Write circuits in convenient, hardware-independent gates (`H`, `CX`, `T`, `RXX`, measurement, ...); this crate compiles them down to a trapped-ion simulator's native operations, or routes and lowers them to real superconducting hardware, including IBM Quantum devices.
+A modern **OpenQASM compiler and transpiler** for the **Sirraya QuTub** ecosystem.
 
-```mermaid
-flowchart LR
-    A["QASM 2.0/3.0 or Circuit IR"] --> B["sirraya-qutub-transpiler"]
-    B --> C["Native / backend-lowered circuit"]
-    C --> D["sirraya-qutub QuantumRegister<br/>(execute)"]
-    C --> E["QASM / diagram<br/>(export)"]
-```
-
-**New here?** This page gets you running in a few minutes. For the full pipeline breakdown, module-by-module design rationale, and the mathematics behind each decomposition, see **[`ARCHITECTURE.md`](ARCHITECTURE.md)**. To contribute, see **[`CONTRIBUTING.md`](CONTRIBUTING.md)**.
+Write quantum circuits using familiar, hardware-independent gates and compile them into optimized native instructions for different quantum hardware architectures—all from a single Rust API.
 
 ---
 
-## Install
+## Why this project exists
+
+One of the biggest challenges in quantum software engineering is the growing diversity of quantum hardware.
+
+Different vendors expose different:
+
+- native gate sets
+- qubit connectivity
+- calibration characteristics
+- execution models
+
+A circuit written for one device often cannot execute directly on another.
+
+`sirraya-qutub-transpiler` bridges that gap.
+
+Instead of writing circuits specifically for trapped-ion, superconducting, or future hardware, developers write circuits once using a common representation. The transpiler performs parsing, optimization, routing, native-gate decomposition, fidelity estimation, visualization, and hardware export, allowing the same logical circuit to target multiple physical architectures.
+
+The project is designed with three goals:
+
+- **Correctness** through mathematically verified decompositions.
+- **Extensibility** through an open backend architecture.
+- **Transparency** by keeping every compilation stage inspectable.
+
+Rather than acting as a black box, every stage of the compilation pipeline can be visualized, tested, exported, or inspected independently.
+
+---
+
+## What is Sirraya QuTub?
+
+Sirraya QuTub is an open-source quantum computing ecosystem written in Rust.
+
+The ecosystem is composed of multiple libraries, each responsible for a different layer of the quantum software stack.
+
+```text
+Algorithms
+      │
+      ▼
+OpenQASM
+      │
+      ▼
+sirraya-qutub-transpiler
+      │
+      ▼
+Native Circuits
+      │
+      ▼
+QuantumRegister
+      │
+      ▼
+Simulation / Hardware
+```
+
+This crate occupies the compiler layer.
+
+It transforms high-level quantum circuits into representations suitable for execution, simulation, visualization, fidelity estimation, or export to external quantum platforms.
+
+---
+
+# Features
+
+✔ OpenQASM 2.0 and 3.0 parser
+
+✔ Source-level circuit optimization
+
+✔ Hardware-aware routing
+
+✔ Native gate decomposition
+
+✔ Multi-backend compilation
+
+✔ IBM Quantum OpenQASM export
+
+✔ Circuit fidelity estimation
+
+✔ Pulse scheduling
+
+✔ Waveform validation
+
+✔ ASCII & SVG circuit diagrams
+
+✔ Extensible backend architecture
+
+✔ Pure Rust implementation
+
+---
+
+# Compiler Pipeline
+
+The transpiler follows a layered compiler architecture.
+
+```mermaid
+flowchart LR
+
+A["OpenQASM 2.0 / 3.0"] --> B["Parser"]
+
+B --> C["Intermediate Representation"]
+
+C --> D["IR Optimizer"]
+
+D --> E["Routing"]
+
+E --> F["Backend Lowering"]
+
+F --> G["Native Optimization"]
+
+G --> H["Execution"]
+
+G --> I["IBM QASM Export"]
+
+G --> J["Diagram Generation"]
+
+G --> K["Fidelity Estimation"]
+
+G --> L["Pulse Scheduling"]
+
+L --> M["Waveform Simulation"]
+```
+
+Each stage performs one well-defined responsibility.
+
+Unlike monolithic transpilers, every intermediate representation remains accessible to applications, making debugging and experimentation significantly easier.
+
+---
+
+# Core Concepts
+
+## Intermediate Representation (IR)
+
+The parser converts OpenQASM into a hardware-independent intermediate representation.
+
+The IR intentionally contains only logical quantum operations.
+
+At this stage the compiler has **no knowledge** of:
+
+- IBM hardware
+- Rigetti hardware
+- trapped-ion hardware
+- routing
+- calibration
+- pulse schedules
+
+This separation keeps parsing independent from hardware compilation.
+
+---
+
+## Source-Level Optimization
+
+Once parsed, the circuit undergoes source-level optimization.
+
+Typical transformations include:
+
+- adjacent gate cancellation
+- commutation-based reordering
+- redundant rotation elimination
+- identity removal
+
+These optimizations reduce circuit complexity before any hardware-specific transformations begin.
+
+---
+
+## Routing
+
+Not every quantum processor allows arbitrary two-qubit interactions.
+
+For example, IBM Quantum processors expose a heavy-hex connectivity graph, meaning many qubits cannot directly interact.
+
+When necessary, the routing stage inserts SWAP operations and rewrites the circuit so every two-qubit operation respects the hardware connectivity graph.
+
+Backends with all-to-all connectivity, such as trapped-ion systems, bypass this stage entirely.
+
+---
+
+## Backend Lowering
+
+Logical quantum gates rarely correspond directly to physical hardware operations.
+
+For example:
+
+```
+CX
+```
+
+may become
+
+```
+Rz
+Rx
+Cx
+```
+
+on one backend,
+
+while another backend may implement it using
+
+```
+Ry
+Rzz
+```
+
+instead.
+
+Backend lowering performs these mathematically equivalent transformations while preserving circuit semantics.
+
+---
+
+## Native Optimization
+
+After lowering, additional optimizations become possible because the compiler now knows the backend's native instruction set.
+
+Examples include:
+
+- rotation merging
+- redundant native gate cancellation
+- backend-specific peephole optimization
+- exact gate resynthesis
+
+This produces a smaller and more efficient native circuit.
+
+---
+
+## Fidelity Estimation
+
+Executing quantum circuits on real hardware is affected by noise.
+
+Using published calibration data, the transpiler can estimate the expected fidelity of a compiled circuit before execution.
+
+This enables rapid comparison between optimization strategies without requiring immediate access to physical hardware.
+
+---
+
+## Pulse Scheduling
+
+Circuit compilation stops at logical instructions.
+
+Pulse scheduling takes one step further.
+
+Instead of describing *what* operation should be performed, it generates schedules describing *how* hardware control channels should drive those operations.
+
+This stage is optional and completely independent from the compiler itself.
+
+---
+
+## Waveform Simulation
+
+Waveform simulation operates below pulse scheduling.
+
+Rather than executing complete circuits, it numerically integrates individual pulse waveforms against a two-level qubit model.
+
+This allows pulse calibrations to be validated independently from the rest of the compilation pipeline.
+
+---
+
+# Supported Backends
+
+The crate currently provides three backend implementations.
+
+| Backend | Native Gate Set | Connectivity |
+|----------|-----------------|--------------|
+| `Backend::TrappedIon` | `{Rz, Ry, Rzz}` | All-to-all |
+| `Backend::IbmQ` | `{Rz, Rx, Cx}` | Heavy Hex |
+| `Backend::Rigetti` | `{Rz, Rx, Cz}` | Square Grid |
+
+The backend architecture is intentionally open, allowing additional hardware targets to be introduced without modifying existing compiler logic.
+
+---
+
+# Architecture Overview
+
+```mermaid
+flowchart TD
+
+QASM["OpenQASM"]
+
+PARSE["Parser"]
+
+IR["Intermediate Representation"]
+
+IROPT["IR Optimizer"]
+
+LOWER["Backend Lowering"]
+
+OPT["Native Optimizer"]
+
+EXEC["Execution"]
+
+IBM["IBM Export"]
+
+DIAGRAM["Diagram"]
+
+FID["Fidelity"]
+
+PULSE["Pulse Scheduler"]
+
+WAVE["Waveform Simulation"]
+
+QASM --> PARSE
+
+PARSE --> IR
+
+IR --> IROPT
+
+IROPT --> LOWER
+
+LOWER --> OPT
+
+OPT --> EXEC
+
+OPT --> IBM
+
+OPT --> DIAGRAM
+
+OPT --> FID
+
+OPT --> PULSE
+
+PULSE --> WAVE
+```
+
+---
+
+# Installation
+
+Add the crate to your project.
 
 ```toml
 [dependencies]
 sirraya-qutub-transpiler = "0.1"
 ```
 
-This crate depends on [`sirraya-qutub`](https://crates.io/crates/sirraya-qutub) directly from crates.io — no prerequisite changes to that repository.
+The transpiler depends on the `sirraya-qutub` crate published on crates.io.
+
+No additional repositories are required.
 
 ---
 
-## Quick start
+# Quick Start
+
+The following example parses an OpenQASM program, optimizes it, compiles it into native operations, and estimates its expected fidelity.
 
 ```rust
-use sirraya_qutub_transpiler::{qasm, optimize_ir, decompose, optimize, estimate_circuit_fidelity, PublishedCalibration};
+use sirraya_qutub_transpiler::{
+    qasm,
+    optimize_ir,
+    decompose,
+    optimize,
+    estimate_circuit_fidelity,
+    PublishedCalibration,
+};
 
-// Either OPENQASM 2.0 or 3.0 source works here — qasm::parse accepts
-// both dialects, no version flag needed.
-let qasm_src = r#"
-    OPENQASM 2.0;
-    include "qelib1.inc";
-    qreg q[2];
-    creg c[2];
-    h q[0];
-    cx q[0], q[1];
-    measure q[0] -> c[0];
-    measure q[1] -> c[1];
+let source = r#"
+OPENQASM 2.0;
+include "qelib1.inc";
+
+qreg q[2];
+creg c[2];
+
+h q[0];
+cx q[0], q[1];
+
+measure q[0] -> c[0];
+measure q[1] -> c[1];
 "#;
 
-let circuit = qasm::parse(qasm_src)?;
+let circuit = qasm::parse(source)?;
 let circuit = optimize_ir(&circuit);
 
 let native = decompose(&circuit);
 let native = optimize(&native);
 
-let cal = PublishedCalibration::quantinuum_helios_2026();
-let fidelity = estimate_circuit_fidelity(&native, &cal);
-println!("Estimated fidelity: {:.2}%", fidelity * 100.0);
+let calibration = PublishedCalibration::quantinuum_helios_2026();
+
+let fidelity =
+    estimate_circuit_fidelity(&native, &calibration);
+
+println!("{:.2}%", fidelity * 100.0);
 ```
 
-Lowering to real IBM hardware and exporting QASM for submission:
+The same logical circuit can also be lowered to a specific hardware backend.
 
 ```rust
-use sirraya_qutub_transpiler::{qasm, optimize_ir, lower, to_ibm_qasm, Backend};
+use sirraya_qutub_transpiler::{
+    Backend,
+    lower,
+    qasm,
+    optimize_ir,
+    to_ibm_qasm,
+};
 
-let circuit = qasm::parse(qasm_src)?;
+let circuit = qasm::parse(source)?;
 let circuit = optimize_ir(&circuit);
 
-let backend_circuit = lower(&circuit, Backend::IbmQ); // routes + lowers to {Rz, Rx, Cx}
-let ibm_qasm = to_ibm_qasm(&backend_circuit, "bell_state")?; // real basis: rz, sx, x, cx, measure
+let backend = lower(&circuit, Backend::IbmQ);
 
-std::fs::write("bell.qasm", ibm_qasm)?;
+let qasm =
+    to_ibm_qasm(&backend, "bell_state")?;
+
+std::fs::write("bell.qasm", qasm)?;
 ```
 
-`bell.qasm` is then ready for [`submit_ibm.py`](#submitting-to-real-ibm-hardware) or for direct use with Qiskit.
+The exported file is compatible with IBM Quantum's native OpenQASM workflow and can be submitted directly using the provided helper script or integrated into a Qiskit workflow.
 
-Or run the full end-to-end demo:
+---
+
+# What the Compiler Does
+
+At a high level, every compilation follows the same sequence.
+
+```
+OpenQASM
+
+↓
+
+Parser
+
+↓
+
+IR Optimization
+
+↓
+
+Routing
+
+↓
+
+Backend Lowering
+
+↓
+
+Native Optimization
+
+↓
+
+Execution / Export / Visualization
+```
+
+Each stage has a single responsibility, making the compiler easier to understand, extend, test, and validate.
+
+---
+
+---
+
+# Architecture
+
+The transpiler follows a traditional compiler pipeline, where every stage has a single responsibility.
+
+```text
+              OpenQASM 2.0 / 3.0
+                      │
+                      ▼
+              Parse → Circuit IR
+                      │
+                      ▼
+            IR Optimization Passes
+                      │
+                      ▼
+             Backend Lowering
+          (routing + decomposition)
+                      │
+        ┌─────────────┴──────────────┐
+        ▼                            ▼
+ BackendCircuit              NativeCircuit
+        │                            │
+        ├──────────────┬─────────────┤
+        ▼              ▼             ▼
+   Diagram        Fidelity      Execution
+        │
+        ▼
+ IBM QASM Export
+        │
+        ▼
+ IBM Quantum / Qiskit
+```
+
+Every stage is intentionally separated.
+
+The parser never knows about hardware.
+
+The optimizer never knows about routing.
+
+The router never knows about pulse scheduling.
+
+The pulse scheduler never knows about QASM parsing.
+
+This separation keeps each component independently testable while making the entire pipeline significantly easier to extend.
+
+---
+
+# Pipeline
+
+## 1. Parsing
+
+The compiler begins by parsing OpenQASM source.
+
+Both OpenQASM 2.0 and OpenQASM 3.0 are supported through the same parser.
+
+```rust
+let circuit = qasm::parse(source)?;
+```
+
+The output is a hardware-independent intermediate representation.
+
+---
+
+## 2. IR Optimization
+
+Before targeting any hardware, simple algebraic optimizations are performed.
+
+Examples include
+
+- gate cancellation
+
+```
+X X → I
+```
+
+- inverse elimination
+
+```
+S S† → I
+```
+
+- commuting independent operations
+
+- removing redundant identities
+
+These optimizations reduce circuit depth before hardware-specific transformations begin.
+
+---
+
+## 3. Backend Lowering
+
+Different quantum hardware exposes different native gate sets.
+
+Algorithms usually describe circuits using abstract gates like
+
+```
+H
+CX
+T
+RX
+RY
+RZ
+```
+
+Real devices cannot execute many of these directly.
+
+The lowering stage rewrites every operation into the native instruction set of the selected backend.
+
+Currently supported:
+
+| Backend | Native Gates |
+|-----------|-----------------------------|
+| Trapped Ion | Rz, Ry, Rzz |
+| IBM Quantum | Rz, Rx, CX |
+| Rigetti | Rz, Rx, CZ |
+
+Routing is automatically applied when the hardware does not provide all-to-all connectivity.
+
+---
+
+## 4. Native Optimization
+
+Once lowering is complete, another optimization pass performs backend-specific cleanup.
+
+Examples include
+
+- removing redundant rotations
+
+- combining consecutive rotations
+
+- simplifying gate identities
+
+- reducing overall gate count
+
+Because these optimizations operate on native gates, they often remove operations introduced during decomposition.
+
+---
+
+## 5. Fidelity Estimation
+
+The crate includes a lightweight fidelity estimator.
+
+Rather than simulating noisy quantum evolution, it estimates execution fidelity using published calibration data.
+
+```rust
+let calibration =
+    PublishedCalibration::quantinuum_helios_2026();
+
+let fidelity =
+    estimate_circuit_fidelity(&native, &calibration);
+```
+
+This provides a fast sanity check before executing on real hardware.
+
+---
+
+## 6. Execution
+
+Lowered circuits can be executed directly on the Sirraya QuTub simulator.
+
+```rust
+run_backend(...)
+```
+
+Measurement operations are fully supported.
+
+---
+
+## 7. Visualization
+
+Every stage of compilation can be visualized.
+
+```text
+q0 ──H────■────M
+          │
+q1 ───────X────M
+```
+
+ASCII diagrams are useful during debugging.
+
+SVG rendering is also supported for documentation and publications.
+
+---
+
+## 8. IBM Export
+
+IBM hardware accepts a very specific native instruction set.
+
+The transpiler exports circuits directly into IBM-compatible OpenQASM.
+
+Supported basis gates include
+
+```
+rz
+sx
+x
+cx
+measure
+```
+
+This output can be executed directly using Qiskit Runtime without another transpilation step.
+
+---
+
+# Supported Hardware
+
+The architecture currently includes three production backends.
+
+## Trapped Ion
+
+Native gates
+
+```
+Rz
+Ry
+Rzz
+```
+
+Characteristics
+
+- all-to-all connectivity
+- no routing required
+- ideal for exact native decompositions
+
+---
+
+## IBM Quantum
+
+Native gates
+
+```
+Rz
+Rx
+CX
+```
+
+Characteristics
+
+- heavy-hex connectivity
+- automatic routing
+- IBM-compatible OpenQASM export
+
+---
+
+## Rigetti
+
+Native gates
+
+```
+Rz
+Rx
+CZ
+```
+
+Characteristics
+
+- square-grid connectivity
+- automatic routing
+- CZ-native decomposition
+
+---
+
+# Extensible Backend Architecture
+
+Earlier versions of the transpiler stored backend behavior inside large `match` statements.
+
+Every new backend required modifications across multiple files.
+
+The current architecture replaces this with an open `BackendSpec` abstraction.
+
+Each backend implements its own specification independently.
+
+This means adding another backend no longer requires modifying existing backend implementations.
+
+Instead, a new backend supplies
+
+- calibration
+- coupling map
+- native rotation axis
+- two-qubit lowering rules
+- decomposition strategy
+
+and registers itself with the compiler.
+
+This significantly reduces maintenance cost while keeping backend-specific logic isolated.
+
+---
+
+# Examples
+
+The repository includes complete working examples.
 
 ```bash
 cargo run --example bell_state_end_to_end
 ```
 
-Parses a Bell-state QASM source, runs it through the real pipeline (`parse` → `optimize_ir` → `lower(IbmQ)` → `to_ibm_qasm`), writes `bell.qasm`, and produces a local-simulator shot histogram (`bell_reference_counts.json`) to compare against a real hardware run.
+Examples demonstrate
+
+- OpenQASM parsing
+- optimization
+- lowering
+- IBM export
+- execution
+- fidelity estimation
 
 ---
 
-## What it does
+# Testing Philosophy
 
-- **Parse** OpenQASM 2.0 *or* 3.0 source into an intermediate representation (`qasm::parse` — no version flag; see [`ARCHITECTURE.md`](ARCHITECTURE.md#qasmrs--openqasm-importer) for the exact dialect spellings accepted)
-- **Optimize** at the source level — gate cancellation and commutation-based reordering
-- **Route** two-qubit gates against a backend's physical qubit connectivity, where the backend doesn't offer all-to-all coupling
-- **Lower** to a target backend's native gate set — trapped-ion, or a routed superconducting target (IBM- or Rigetti-style)
-- **Optimize** again at the native/backend level — peephole cleanup specific to the lowered gate set
-- **Estimate** fidelity against a published hardware calibration, or **execute** directly against `QuantumRegister`
-- **Export** back to QASM — `emit::to_qasm`/`to_qasm3` for either dialect (round-trips through this crate's own parser), or `ibm_export::to_ibm_qasm` for real IBM-hardware-native OpenQASM 2.0 (basis gates `rz`, `sx`, `x`, `cx`, `measure`) suitable for direct submission to Qiskit or the IBM Quantum Platform
-- **Visualize** any stage of the pipeline as an ASCII or SVG circuit diagram
+Correctness is verified against the real `sirraya-qutub` execution engine.
 
-Three backends ship today, each an implementation of an open `BackendSpec` trait (adding a new one doesn't require touching existing code — see [`ARCHITECTURE.md`](ARCHITECTURE.md#backendrs--backend--multi-backend-lowering)):
+Tests cover
 
-| Backend | Native gate set | Two-qubit topology |
-|---|---|---|
-| `Backend::TrappedIon` | `{Rz, Ry, Rzz}` | All-to-all (no routing needed) |
-| `Backend::IbmQ` | `{Rz, Rx, Cx}` | Heavy-hex lattice (IBM's published Eagle/Heron-family topology) |
-| `Backend::Rigetti` | `{Rz, Rx, Cz}` | Square grid (Rigetti's Ankaa-class topology) |
+- parser correctness
+- optimizer correctness
+- routing
+- decomposition identities
+- backend lowering
+- IBM export
+- diagram generation
+- pulse scheduling
+- waveform simulation
 
----
+Rather than simply asserting mathematical identities, decompositions are validated through actual execution against the simulator.
 
-## Architecture at a glance
-
-```mermaid
-flowchart TD
-    QASM["QASM 2.0/3.0 Text"] --> PARSE["qasm::parse"]
-    PARSE --> IR["IR Circuit"]
-    IR --> OPT["ir_optimize::optimize"]
-    OPT --> LOWER["backend::lower<br/>(routes, then decomposes)"]
-    LOWER --> BC["BackendCircuit"]
-
-    BC --> FID["fidelity::estimate_*_fidelity"]
-    BC --> EXEC["emit::run_backend / run_backend_with_measurement"]
-    BC --> DIAG["diagram::Diagram"]
-    BC --> IBM["ibm_export::to_ibm_qasm"]
-
-    IBM --> SUBMIT["submit_ibm.py"]
-    SUBMIT --> QISKIT["Qiskit Aer / Real Hardware"]
-```
-
-This is deliberately the *short* version. The full pipeline (including the trapped-ion-only `native::decompose` path, native-level optimization/resynthesis, and the pulse/waveform-simulation stages downstream of everything else) — plus the rationale behind each design decision — lives in **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
-
-Every non-trivial gate identity and decomposition in this crate is validated against `sirraya_qutub::core::QuantumRegister` directly, not just asserted algebraically — see [`ARCHITECTURE.md`'s testing philosophy](ARCHITECTURE.md#10-testing-philosophy) for how.
+This ensures compiler transformations preserve circuit semantics.
 
 ---
 
-## Submitting to real IBM hardware
+# Roadmap
 
-There is no official Rust SDK for IBM Quantum Platform / Qiskit Runtime, so QASM exported by `to_ibm_qasm` is handed off to a small Python bridge script, `submit_ibm.py`.
+Current development focuses on
 
-**Local sanity check (no IBM account needed):**
+- additional OpenQASM 3 language features
+- improved routing algorithms
+- hardware-aware optimization
+- richer calibration models
+- expanded pulse scheduling
+- additional backend implementations
+- benchmarking infrastructure
+- educational examples and tutorials
 
-```bash
-pip install qiskit qiskit-aer --break-system-packages
-python3 submit_ibm.py --qasm bell.qasm --shots 4096 --compare bell_reference_counts.json
-```
-
-This confirms the exported QASM is well-formed and loadable by Qiskit, and reports the total variation distance against the Rust simulator's own reference distribution — both are noiseless, so this distance should be small.
-
-**Real hardware:**
-
-```bash
-pip install qiskit-ibm-runtime --break-system-packages
-export IBM_QUANTUM_TOKEN=...      # from your IBM Quantum account settings
-export IBM_QUANTUM_INSTANCE=...   # CRN of your instance/plan
-
-python3 submit_ibm.py --qasm bell.qasm --shots 4096 --real \
-    --backend <a real backend name from your account> \
-    --compare bell_reference_counts.json
-```
-
-The circuit is submitted with `optimization_level=0`: routing and native-gate lowering already happened on the Rust side (`backend::lower` + `ibm_export`), so no further Qiskit transpilation is applied — the reported total variation distance reflects this crate's output running against real hardware, not Qiskit's own transpiler.
-
-> **Known simplification:** `backend::lower` currently routes `IbmQ` circuits against the generic heavy-hex topology generator in `coupling.rs`, not a specific device's *actual* coupling map or basis gate pulled live from the IBM Quantum API. For small circuits this is unlikely to matter. See [`ARCHITECTURE.md`](ARCHITECTURE.md#14-open-work-and-known-gaps) for this and other known gaps.
+Longer term goals include supporting more quantum hardware families while maintaining a clean separation between compiler infrastructure and hardware-specific implementations.
 
 ---
 
-## Testing
+# Contributing
 
-```bash
-cargo test                                 # full suite: parser, optimizer, routing, lowering, export
-cargo test -- --nocapture                  # show detailed output
-cargo run --example bell_state_end_to_end  # end-to-end demo, real pipeline to IBM QASM
-```
+Contributions are welcome from both Rust developers and quantum computing enthusiasts.
 
-All tests run against the real `sirraya-qutub` crate pulled from crates.io — not a mock or local copy — before each release. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full development workflow, coding conventions, and pull-request checklist.
+Ways to contribute include
 
----
+- implementing optimization passes
+- improving routing algorithms
+- adding backend support
+- writing documentation
+- improving examples
+- fixing bugs
+- expanding test coverage
 
-## Documentation
+If you're new to the project, look for issues labeled **good first issue**.
 
-| Resource                                                         | Purpose                                                          |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)                             | Compiler architecture, mathematical identities, design decisions |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md)                             | Development workflow and contribution guidelines                 |
-| [`docs.rs`](https://docs.rs/sirraya-qutub-transpiler)            | Rust API documentation                                           |
-| [`crates.io`](https://crates.io/crates/sirraya-qutub-transpiler) | Published package and release information                        |
+Please read **CONTRIBUTING.md** before submitting a pull request.
 
 ---
 
-## License
+# Community
 
-Dual-licensed, at your option, under either:
+We're building Sirraya QuTub as an open-source quantum computing ecosystem.
 
-* [MIT License](LICENSE-MIT)
-* [Apache License, Version 2.0](LICENSE-APACHE)
+Whether your interests are
+
+- compiler engineering
+- quantum algorithms
+- quantum hardware
+- Rust
+- formal verification
+- performance engineering
+- education
+
+there are opportunities to contribute.
+
+Contributors are recognized in the project, and outstanding contributions may be featured in the project's Hall of Fame.
 
 ---
 
-**Sirraya Labs** — [amir@sirraya.org](mailto:amir@sirraya.org)
+# Documentation
+
+| Resource | Description |
+|-----------|-------------|
+| `ARCHITECTURE.md` | Complete compiler architecture and design rationale |
+| `CONTRIBUTING.md` | Development workflow and contribution guide |
+| docs.rs | API documentation |
+| crates.io | Published crate |
+
+---
+
+# License
+
+Licensed under either
+
+- MIT License
+- Apache License 2.0
+
+at your option.
+
+See `LICENSE-MIT` and `LICENSE-APACHE` for details.
+
+---
+
+## Acknowledgements
+
+This project is part of the **Sirraya QuTub** ecosystem, an open-source initiative focused on advancing accessible quantum computing infrastructure in Rust.
+
+If this project helps your research, education, or development work, consider giving the repository a ⭐ and joining the community.
