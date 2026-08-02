@@ -6,6 +6,52 @@
 
 ---
 
+## How to read this document
+
+This document is long because the crate makes a lot of deliberate, non-obvious choices, and the goal is that a new contributor can understand *why* a module looks the way it does without archaeology through git blame. You don't need to read it top to bottom.
+
+| If you're here to... | Start at |
+| --- | --- |
+| Get the 60-second mental model | §1–§2 (this section and the next) |
+| Understand a specific pipeline stage | §4's module-by-module breakdown — jump straight to the module you care about |
+| Add a new gate or identity | §12, "Adding a new gate identity" |
+| Add a new hardware backend | §4's `backend.rs` section, "Extending: adding a fourth backend" |
+| Understand why routing/coupling work the way they do | §5–§6 (`coupling.rs`, `route.rs`) |
+| Know what's finished vs. still open | §13–§14 |
+| Understand the verification/testing convention | §10–§11 |
+
+### Glossary
+
+A handful of terms recur throughout and are worth pinning down once:
+
+| Term | Meaning |
+| --- | --- |
+| **Logical qubit** | A qubit index exactly as declared in the source program (`q[0]`, `q[1]`, ...). Identity never changes across compilation. |
+| **Physical qubit** | A row in a `CouplingMap` — an actual hardware wire position. Which logical qubit lives on which physical qubit changes as `route.rs` inserts `Swap`s. |
+| **Native gate set** | The small fixed vocabulary a backend's real hardware can execute directly (e.g. `{Rz, Ry, Rzz}` for trapped ions). Everything else is decomposed into it. |
+| **Coupling map / topology** | The graph of which physical qubit *pairs* can directly participate in a two-qubit gate. |
+| **Routing** | Inserting `Swap` gates so every two-qubit gate in the circuit ends up acting on a topology-adjacent physical pair. |
+| **Lowering** | Rewriting a circuit from one gate vocabulary into a more restricted, hardware-native one (`native::decompose`, `backend::lower`). |
+| **Resynthesis** | Collapsing an entire run of single-qubit gates back into at most three gates via ZYZ Euler decomposition, rather than only canceling adjacent pairs. |
+| **Fidelity** | A numeric measure (0–1) of how close two quantum states are. Used throughout the test suite as the ground truth for "did this transformation preserve meaning," instead of trusting algebra alone. |
+
+### System context: where this crate sits
+
+```mermaid
+flowchart LR
+    USER["Caller code<br/>(your application)"] -->|"OPENQASM text<br/>or Circuit::new()"| TRANSPILER["sirraya-qutub-transpiler<br/>(this crate)"]
+    TRANSPILER -->|"run / run_backend"| SIM["sirraya_qutub::core::QuantumRegister<br/>(statevector simulator)"]
+    TRANSPILER -->|"to_qasm / to_qasm3"| QASMOUT["OPENQASM 2.0 / 3.0 text"]
+    TRANSPILER -->|"ibm_export::to_ibm_qasm"| SUBMIT["submit_ibm.py"]
+    SUBMIT -->|"QuantumCircuit.from_qasm_str"| QISKIT["Qiskit / real IBM hardware"]
+
+    style TRANSPILER fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+```
+
+The transpiler never talks to real hardware directly except via the IBM QASM 2.0 export path — everything else either executes against the local simulator or emits text for some other system to consume.
+
+---
+
 ## 1. What this crate is
 
 `sirraya-qutub-transpiler` is a **QASM 2.0/3.0 importer and multi-backend native-gate compiler** for circuits that ultimately execute on `sirraya_qutub::core::QuantumRegister` — Sirraya Labs' statevector simulator.
@@ -281,6 +327,23 @@ It represents a **classical side effect**, so several parts of the compiler trea
 
 The one asymmetry worth calling out: routing produces a *new* `ir::Circuit` (same type as its input), not a distinct "RoutedCircuit" type — see "Logical vs. physical qubits" above for why that's a real, scoped limitation rather than an oversight.
 
+```mermaid
+flowchart LR
+    A["ir::Circuit<br/><i>(source)</i><br/>logical qubits<br/>rich gate set"] -->|"ir_optimize::optimize"| B["ir::Circuit<br/><i>(optimized)</i><br/>same shape as source"]
+    B -->|"route::route"| C["ir::Circuit<br/><i>(routed)</i><br/>physical qubits baked into<br/>gate addressing; mapping discarded"]
+    C -->|"native::decompose"| D["native::NativeCircuit<br/>{Rz, Ry, Rzz}"]
+    C -->|"backend::lower"| E["backend::BackendCircuit<br/>target-native set<br/>+ Backend tag"]
+    D -->|"optimize::optimize"| D
+    E -->|"resynthesize ↔ optimize"| E
+
+    style A fill:#f5f5f5,stroke:#999
+    style C fill:#e8f0fe,stroke:#4285f4
+    style D fill:#e6f4ea,stroke:#34a853
+    style E fill:#e6f4ea,stroke:#34a853
+```
+
+Note that both `A` and `B` and `C` are literally the same Rust type (`ir::Circuit`) — the diagram separates them by *meaning*, not by type, which is precisely the "current scope of this distinction" limitation called out above: the type system can't yet tell a caller which of the three they're holding.
+
 ### Ownership and mutation rules
 
 Every pass in this crate follows the same convention: **take a shared reference, return an owned new value.**
@@ -524,6 +587,50 @@ trait BackendSpec {
 
 `Backend` is a small `Copy` handle wrapping `&'static dyn BackendSpec` — `Backend::TrappedIon`, `Backend::IbmQ`, and `Backend::Rigetti` are constants pointing at each backend's implementation. Everywhere that used to `match backend { .. }` now either calls a `Backend`/`BackendSpec` method directly, or — for the two truly binary physical choices this crate encodes, which axis a native rotation is about — matches on `RotAxis` (`Ry` or `Rx`) instead. `RotAxis` stays a closed two-variant enum on purpose: unlike `Backend`, it isn't meant to grow — see `backend/spec.rs`'s module doc for why a backend whose native single-qubit gate isn't expressible as one of these two doesn't fit this trait's shape at all.
 
+```mermaid
+classDiagram
+    class BackendSpec {
+        <<trait>>
+        +id() &str
+        +calibration() PublishedCalibration
+        +coupling_map(num_qubits) Option~CouplingMap~
+        +rot_axis() RotAxis
+        +push_two_qubit_zz(bc, a, b, theta)
+        +is_native_decompose_target() bool
+    }
+
+    class Backend {
+        <<Copy handle>>
+        -inner: &'static dyn BackendSpec
+        +TrappedIon: Backend
+        +IbmQ: Backend
+        +Rigetti: Backend
+    }
+
+    class TrappedIonSpec {
+        backend/trapped_ion.rs
+        rot_axis() = Ry
+        is_native_decompose_target() = true
+    }
+    class IbmqSpec {
+        backend/ibmq.rs
+        rot_axis() = Rx
+        push_two_qubit_zz → Cx-based
+    }
+    class RigettiSpec {
+        backend/rigetti.rs
+        rot_axis() = Rx
+        push_two_qubit_zz → Cz-based, H-collapsed
+    }
+
+    BackendSpec <|.. TrappedIonSpec
+    BackendSpec <|.. IbmqSpec
+    BackendSpec <|.. RigettiSpec
+    Backend --> BackendSpec : wraps
+```
+
+Adding a fourth backend that fits this trait's shape means adding one more `..Spec` box to the diagram above — nothing in `Backend`, `backend.rs`'s shared engine, `emit.rs`, or `diagram.rs` changes.
+
 ### Backend matrix
 
 | Backend         | Native gate set   | Connectivity model | Routing      | Rotation axis |
@@ -640,6 +747,15 @@ optimization B
 creates new resynthesis opportunity
 ```
 
+```mermaid
+flowchart LR
+    IN["Lowered BackendCircuit"] --> RESYN["resynthesize<br/><i>collect single-qubit runs,<br/>rebuild via ZYZ</i>"]
+    RESYN --> OPT["optimize<br/><i>peephole: fuse, commute, cancel</i>"]
+    OPT --> CHANGED{"Did this round<br/>change anything?"}
+    CHANGED -->|"Yes"| RESYN
+    CHANGED -->|"No — fixed point"| OUT["Final BackendCircuit"]
+```
+
 ---
 
 ### Connectivity integration
@@ -679,7 +795,89 @@ Modeling either as a `Rigetti`-like `BackendSpec` implementation would therefore
 
 # 5. `coupling.rs` — Physical qubit connectivity
 
-`CouplingMap` describes which physical qubit pairs can directly participate in a native two-qubit operation.
+`CouplingMap` describes which physical qubit pairs can directly participate in a native two-qubit operation. This is the piece of state that turns "some backend's native gate set" into "what a specific chip's wiring actually allows" — `native.rs`/`backend.rs` answer *which gates* a circuit may contain, `coupling.rs` answers *which pairs of qubits* a two-qubit gate may act on.
+
+Every topology below is exposed the same way: a `CouplingMap` is just a graph, and every backend that needs one gets it from a `<topology>_for(n)` constructor that takes only the qubit count and returns a connected subgraph of exactly that size. Nothing downstream needs to know *which* topology it received — `route.rs` only ever calls the three graph-operation methods described at the end of this section.
+
+## Topology models at a glance
+
+Each topology is shown separately below, since cramming all three into one diagram made them hard to tell apart at a glance. Node **shape** and **color** track the connectivity role: circles for the topology-free linear case, hexagons/small ovals for heavy-hex's two-tier data/flag structure, and squares for the uniform square grid.
+
+**`linear(n)`** — every qubit has at most two neighbors, one on each side:
+
+```mermaid
+flowchart LR
+    L0((q0)) --- L1((q1)) --- L2((q2)) --- L3((q3)) --- L4((q4))
+    style L0 fill:#f1f3f4,stroke:#5f6368,stroke-width:1px
+    style L1 fill:#f1f3f4,stroke:#5f6368,stroke-width:1px
+    style L2 fill:#f1f3f4,stroke:#5f6368,stroke-width:1px
+    style L3 fill:#f1f3f4,stroke:#5f6368,stroke-width:1px
+    style L4 fill:#f1f3f4,stroke:#5f6368,stroke-width:1px
+```
+
+**`heavy_hex_grid`** — one hexagonal cell: hexagon-shaped **data qubits** (degree ≤ 3 in the full lattice) alternate with oval **flag qubits** (degree 2) around each ring, rather than data qubits connecting directly to each other:
+
+```mermaid
+flowchart LR
+    D0{{"D0"}} --- F0(("F0")) --- D1{{"D1"}} --- F1(("F1")) --- D2{{"D2"}}
+    D2 --- F2(("F2")) --- D3{{"D3"}} --- F3(("F3")) --- D4{{"D4"}}
+    D4 --- F4(("F4")) --- D5{{"D5"}} --- F5(("F5")) --- D0
+
+    style D0 fill:#4285f4,color:#fff,stroke:#1a56cc
+    style D1 fill:#4285f4,color:#fff,stroke:#1a56cc
+    style D2 fill:#4285f4,color:#fff,stroke:#1a56cc
+    style D3 fill:#4285f4,color:#fff,stroke:#1a56cc
+    style D4 fill:#4285f4,color:#fff,stroke:#1a56cc
+    style D5 fill:#4285f4,color:#fff,stroke:#1a56cc
+    style F0 fill:#fbbc04,stroke:#a67c00
+    style F1 fill:#fbbc04,stroke:#a67c00
+    style F2 fill:#fbbc04,stroke:#a67c00
+    style F3 fill:#fbbc04,stroke:#a67c00
+    style F4 fill:#fbbc04,stroke:#a67c00
+    style F5 fill:#fbbc04,stroke:#a67c00
+```
+
+*One ring shown for clarity — the real lattice tiles many of these hexagons together, which is what pushes boundary data qubits from degree 2 (as drawn here) up to degree 3.*
+
+**`square_grid`** — every interior qubit connects to its four neighbors (up/down/left/right); this 3×3 slice shows the pattern:
+
+```mermaid
+flowchart TB
+    subgraph ROW1[" "]
+        direction LR
+        S0["q0"] --- S1["q1"] --- S2["q2"]
+    end
+    subgraph ROW2[" "]
+        direction LR
+        S3["q3"] --- S4["q4"] --- S5["q5"]
+    end
+    subgraph ROW3[" "]
+        direction LR
+        S6["q6"] --- S7["q7"] --- S8["q8"]
+    end
+    S0 --- S3 --- S6
+    S1 --- S4 --- S7
+    S2 --- S5 --- S8
+
+    style S0 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S1 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S2 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S3 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S4 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S5 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S6 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S7 fill:#34a853,color:#fff,stroke:#0f7a35
+    style S8 fill:#34a853,color:#fff,stroke:#0f7a35
+    style ROW1 fill:transparent,stroke:transparent
+    style ROW2 fill:transparent,stroke:transparent
+    style ROW3 fill:transparent,stroke:transparent
+```
+
+| Topology | Used by | Typical degree | Notes |
+| --- | --- | --- | --- |
+| `linear(n)` | Nothing (fallback only) | ≤ 2 | Kept as a topology-free stand-in for the 0- and 1-qubit edge cases |
+| `heavy_hex_grid` | IBM Quantum | ≤ 3 (data), 2 (flag) | BFS prefix of the smallest grid containing ≥ n qubits |
+| `square_grid` | Rigetti (Ankaa-class) | ≤ 4 | BFS prefix of the smallest rectangular grid containing ≥ n qubits |
 
 ## Supported topology models
 
@@ -755,6 +953,20 @@ shortest_path(a, b)
 
 `is_adjacent` only answers a local yes/no question, while `shortest_path` is point-to-point. Neither is sufficient for general graph traversal.
 
+```mermaid
+flowchart LR
+    CM["CouplingMap"]
+    CM --> ADJ["is_adjacent(a, b)<br/><i>Can this gate execute as-is?</i>"]
+    CM --> SP["shortest_path(a, b)<br/><i>Which physical path do I SWAP along?</i>"]
+    CM --> NB["neighbors(q)<br/><i>Build the BFS spanning tree</i>"]
+
+    ADJ --> ROUTE["route::route<br/>per-gate adjacency check"]
+    SP --> ROUTE
+    NB --> RESTORE["route::restore_identity_mapping<br/>spanning-tree token swapping"]
+```
+
+Each of `route.rs`'s two jobs — routing a gate that isn't yet adjacent, and restoring the identity mapping afterward — leans on a different subset of these three primitives, which is why `CouplingMap` exposes exactly these three and no general-purpose traversal API of its own.
+
 ---
 
 # 6. `route.rs` — Hardware-aware SWAP insertion
@@ -770,6 +982,52 @@ The router:
 3. Detects non-adjacent two-qubit operations.
 4. Inserts `Swap` gates along a shortest physical path.
 5. Preserves the original argument order.
+
+### Routing algorithm, per gate
+
+```mermaid
+flowchart TD
+    START(["Next gate in program order"]) --> KIND{"Single- or<br/>two-qubit gate?"}
+
+    KIND -->|"Single-qubit<br/>(incl. Measure)"| REMAP["Re-address using current<br/>logical→physical mapping"]
+    REMAP --> NEXT(["Continue to next gate"])
+
+    KIND -->|"Two-qubit<br/>(Cx / Cz / Swap / Rxx / Ryy / Rzz / Cp)"| MAP["Look up physical positions<br/>of both logical qubits"]
+    MAP --> ADJ{"CouplingMap::is_adjacent?"}
+
+    ADJ -->|"Yes"| EMIT["Emit gate at physical<br/>positions, unchanged"]
+    EMIT --> NEXT
+
+    ADJ -->|"No"| PATH["CouplingMap::shortest_path<br/>from first argument to second"]
+    PATH --> SWAPS["Insert Swap gates along the path,<br/>moving the FIRST argument<br/>toward the second"]
+    SWAPS --> UPDATE["Update logical↔physical mapping<br/>to reflect each Swap"]
+    UPDATE --> EMIT2["Emit the now-adjacent gate"]
+    EMIT2 --> NEXT
+
+    NEXT --> START
+```
+
+### Worked example: routing a non-adjacent `Cx`
+
+Suppose `Cx(q0, q2)` needs to run on a linear-adjacency topology `q0 ↔ q1 ↔ q2`, where `q0` and `q2` are two hops apart:
+
+```mermaid
+flowchart LR
+    subgraph BEFORE["Before routing — q0 and q2 not adjacent"]
+        direction LR
+        B0["Physical 0<br/>(holds logical q0)"] --- B1["Physical 1<br/>(holds logical q1)"] --- B2["Physical 2<br/>(holds logical q2)"]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph AFTER["After Swap(phys 0, phys 1) — now adjacent"]
+        direction LR
+        A0["Physical 0<br/>(holds logical q1)"] --- A1["Physical 1<br/>(holds logical q0)"] --- A2["Physical 2<br/>(holds logical q2)"]
+    end
+```
+
+The router emits `Swap(phys0, phys1)` — moving logical `q0` (the **first** argument of `Cx(q0, q2)`) one hop closer — then emits `Cx` at physical positions `(1, 2)`, which are now adjacent. Logical `q1`, which never appears in this `Cx`, has been silently displaced to physical position `0` as a side effect; this is exactly why identity restoration (below) has to happen, not just "route the gates that need it."
 
 ### Why argument order matters
 
@@ -836,6 +1094,25 @@ The current implementation instead:
 
 This produces a connectivity-correct restoration pass on general graphs.
 
+```mermaid
+flowchart TD
+    START(["Start: mapping is scrambled<br/>from routing Swaps"]) --> TREE["Build BFS spanning tree of<br/>CouplingMap via neighbors(q)"]
+    TREE --> HASLEAVES{"Any non-retired<br/>leaves remain?"}
+
+    HASLEAVES -->|"No"| DONE(["Mapping fully restored<br/>to identity"])
+
+    HASLEAVES -->|"Yes"| PICK["Select a leaf L of the<br/>remaining tree"]
+    PICK --> CHECK{"Does L already hold<br/>its own logical token?"}
+
+    CHECK -->|"Yes"| RETIRE["Retire L —<br/>remove it from the tree"]
+    RETIRE --> HASLEAVES
+
+    CHECK -->|"No"| WALK["Emit a tree-adjacent Swap that<br/>moves L's home token one step<br/>closer along the tree"]
+    WALK --> CHECK
+```
+
+Each retired leaf shrinks the remaining tree by one node, so the process always terminates — but, as the correctness-vs-optimality note below states, it is not tuned to minimize the number of `Swap`s it emits along the way.
+
 ### Optimization boundary
 
 This algorithm is intentionally **not SWAP-count optimal**.
@@ -855,6 +1132,41 @@ The module's current goal is:
 It is remapped **at the point where it is encountered**, using the qubit's current physical location.
 
 It does not wait until the final identity restoration pass.
+
+## The full mapping lifecycle
+
+Putting the pieces above together, a `logical → physical` mapping is born, mutated, and fully consumed within a single call to `route::route` — no other module ever sees it:
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant route as route::route
+    participant Map as logical↔physical mapping
+    participant CM as CouplingMap
+
+    Caller->>route: route(circuit, coupling_map)
+    route->>Map: initialize as identity
+    loop for each gate, in program order
+        alt single-qubit / Measure
+            route->>Map: look up current physical position
+            route->>route: emit gate at that position
+        else two-qubit gate
+            route->>CM: is_adjacent(phys_a, phys_b)?
+            alt already adjacent
+                route->>route: emit gate unchanged
+            else not adjacent
+                route->>CM: shortest_path(phys_a, phys_b)
+                route->>route: emit Swap gates along path
+                route->>Map: update positions after each Swap
+                route->>route: emit gate at new adjacent positions
+            end
+        end
+    end
+    route->>CM: neighbors(q) for every q — build spanning tree
+    route->>route: retire leaves / walk tokens home (see above)
+    route->>Map: mapping restored to identity
+    route-->>Caller: routed ir::Circuit (mapping itself discarded)
+```
 
 ---
 
@@ -921,6 +1233,25 @@ apply_backend_to
 ```
 
 These execute against a real `QuantumRegister`.
+
+```mermaid
+flowchart TD
+    CIRC{"What are you executing?"}
+
+    CIRC -->|"NativeCircuit,<br/>no Measure"| RUN["run / apply_to"]
+    CIRC -->|"NativeCircuit,<br/>contains Measure"| RUNM["run_with_measurement /<br/>apply_to_with_measurement"]
+    CIRC -->|"BackendCircuit,<br/>no Measure"| RUNB["run_backend /<br/>apply_backend_to"]
+    CIRC -->|"BackendCircuit,<br/>contains Measure"| RUNBM["run_backend_with_measurement /<br/>apply_backend_to_with_measurement"]
+
+    RUN --> REJECT1["Rejects circuits<br/>containing Measure"]
+    RUNB --> REJECT2["Rejects circuits<br/>containing Measure"]
+
+    RUNM --> BORN["QuantumRegister::measure_single_qubit<br/>sample → collapse → renormalize"]
+    RUNBM --> BORN
+
+    style REJECT1 fill:#fce8e6,stroke:#ea4335
+    style REJECT2 fill:#fce8e6,stroke:#ea4335
+```
 
 ---
 
