@@ -140,9 +140,71 @@ fn layered_random(num_qubits: usize, rounds: usize) -> Circuit {
     c
 }
 
-/// Serializes a source-level [`Circuit`] to portable OPENQASM 2.0 text
+/// The Quantum Fourier Transform: for each qubit `i` (0-indexed, in the
+/// usual "top qubit first" convention), `H(i)` followed by a controlled
+/// phase `Cp(j, i, pi / 2^(j-i))` from every later qubit `j`, then a
+/// final reversal via `n/2` `Swap`s. Unlike every circuit above, QFT's
+/// interaction graph is genuinely **all-to-all** -- qubit 0 interacts
+/// with all of qubits `1..n`, qubit 1 with all of `2..n`, and so on --
+/// not a chain, not a nearest-neighbor ladder, and not detectable by
+/// `route.rs`'s chain fast path (see `detect_interaction_chain`'s own
+/// star-rejection test). A real, standard algorithm's circuit, not a
+/// synthetic stress case invented to make routing look hard.
+fn qft(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits);
+    for i in 0..num_qubits {
+        c.push(Gate::H(i));
+        for j in (i + 1)..num_qubits {
+            let lambda = std::f64::consts::PI / (1u64 << (j - i)) as f64;
+            c.push(Gate::Cp(j, i, lambda));
+        }
+    }
+    for q in 0..num_qubits / 2 {
+        c.push(Gate::Swap(q, num_qubits - 1 - q));
+    }
+    c
+}
+
+/// `num_gates` two-qubit gates, each between a genuinely far-apart
+/// pair of qubits chosen by a small deterministic LCG (not just
+/// adjacent or near-adjacent pairs the way every ladder/brick-wall
+/// circuit above stays close to) -- every other benchmark in this file
+/// only ever needs nearest-neighbor interactions, which is exactly the
+/// case `heavy_hex_for`'s DFS-numbered identity mapping now handles
+/// for free (see `coupling.rs`'s module doc); this is the case that
+/// actually forces real routing distance regardless of numbering, and
+/// so is the honest test of `route_lookahead`'s general (non-chain)
+/// heuristic rather than the identity-biased fast path.
+fn long_range_random(num_qubits: usize, num_gates: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits);
+    for q in 0..num_qubits {
+        c.push(Gate::H(q));
+    }
+    // A simple linear congruential generator, deterministic and with
+    // no external `rand` dependency -- this example only needs
+    // "spread out and not visibly patterned", not real randomness.
+    let mut state: u64 = 0x2545F4914F6CDD1D;
+    let mut next_u64 = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for i in 0..num_gates {
+        let a = (next_u64() as usize) % num_qubits;
+        let mut b = (next_u64() as usize) % num_qubits;
+        while b == a {
+            b = (next_u64() as usize) % num_qubits;
+        }
+        c.push(Gate::Cx(a, b));
+        if i % 3 == 0 {
+            c.push(Gate::Rz((next_u64() as usize) % num_qubits, 0.4 + (i as f64) * 0.017));
+        }
+    }
+    c
+}
 /// using only broadly-supported `qelib1.inc` mnemonics (`h`, `x`, `y`,
-/// `z`, `rx`, `ry`, `rz`, `cx`, `cz`, `swap`) -- a circuit built this
+/// `z`, `rx`, `ry`, `rz`, `cx`, `cz`, `swap`, `cp`) -- a circuit built this
 /// way round-trips through both this crate's own [`qasm::parse`] *and*
 /// Qiskit's `QuantumCircuit.from_qasm_str`, which is the whole point:
 /// the Rust and Python sides need to start from the exact same
@@ -169,9 +231,11 @@ fn circuit_to_portable_qasm(c: &Circuit, name: &str) -> String {
             Gate::Cx(a, b) => out.push_str(&format!("cx q[{}], q[{}];\n", a, b)),
             Gate::Cz(a, b) => out.push_str(&format!("cz q[{}], q[{}];\n", a, b)),
             Gate::Swap(a, b) => out.push_str(&format!("swap q[{}], q[{}];\n", a, b)),
+            Gate::Cp(a, b, lambda) => out.push_str(&format!("cp({}) q[{}], q[{}];\n", lambda, a, b)),
             other => panic!(
                 "circuit_to_portable_qasm: {:?} isn't in this example's portable subset \
-                 -- benchmark circuits here are deliberately built from h/x/y/z/rx/ry/rz/cx/cz/swap only",
+                 -- benchmark circuits here are deliberately built from \
+                 h/x/y/z/rx/ry/rz/cx/cz/swap/cp only",
                 other
             ),
         }
@@ -269,6 +333,9 @@ fn main() {
         ("ghz_16", ghz(16)),
         ("ansatz_6q_3layer", hardware_efficient_ansatz(6, 3)),
         ("layered_random_8q_4round", layered_random(8, 4)),
+        ("qft_10", qft(10)),
+        ("qft_16", qft(16)),
+        ("long_range_random_20q_60gate", long_range_random(20, 60)),
     ];
 
     fs::create_dir_all("qiskit_benchmark_qasm").expect("failed to create output dir");
