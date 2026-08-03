@@ -170,20 +170,23 @@ pub(crate) const EPS: f64 = 1e-9;
 /// know or care whether `circuit` is the caller's original or an
 /// already-routed one.
 ///
-/// Uses [`crate::route::route_lookahead`] rather than the naive
-/// identity-layout [`crate::route::route`]: both are exactly
-/// semantics-preserving (see `route.rs`'s own
-/// `assert_lookahead_routing_preserves_action` coverage), but
-/// `route_lookahead`'s smarter initial layout + lookahead never uses
-/// more SWAPs than `route` on every benchmark this crate has measured
-/// (`qiskit_benchmark.rs`), and every SWAP saved is 3 fewer native
-/// two-qubit gates once lowered below (Rzz/Cx/Cz) -- a real,
-/// already-tested win, not a research trade-off.
+/// Uses [`crate::route::route_best`] rather than calling
+/// [`crate::route::route_lookahead`] directly: `route_best` runs
+/// [`crate::route::route`], `route_lookahead`, and
+/// [`crate::route::route_sabre`] and keeps whichever used fewest SWAPs
+/// (see that function's own doc comment for why no single one of the
+/// three is a strict improvement on the other two in every case). All
+/// three are exactly semantics-preserving (see `route.rs`'s own
+/// `assert_lookahead_routing_preserves_action`/
+/// `assert_sabre_routing_preserves_action` coverage), so picking
+/// between them by SWAP count alone never risks correctness, only
+/// performance -- and every SWAP saved is 3 fewer native two-qubit
+/// gates once lowered below (Rzz/Cx/Cz).
 pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
     let routed_storage;
     let circuit: &Circuit = match backend.coupling_map(circuit.num_qubits) {
         Some(coupling) => {
-            routed_storage = crate::route::route_lookahead(circuit, &coupling);
+            routed_storage = crate::route::route_best(circuit, &coupling);
             &routed_storage
         }
         None => circuit,

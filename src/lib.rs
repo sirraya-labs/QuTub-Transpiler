@@ -1,27 +1,22 @@
 //! sirraya-qutub-transpiler
 //!
-//! A QASM 2.0 *and* 3.0 importer (see [`qasm`]'s module doc for the
-//! two dialects' recognized spellings) and multi-backend native-gate
-//! compiler for circuits destined to run on
-//! `sirraya_qutub::core::QuantumRegister`.
+//! A QASM 2.0 importer and multi-backend native-gate compiler for
+//! circuits destined to run on `sirraya_qutub::core::QuantumRegister`.
 //!
-//! Pipeline: [`qasm::parse`] (either dialect's text -> [`ir::Circuit`]) ->
+//! Pipeline: [`qasm::parse`] (text -> [`ir::Circuit`]) ->
 //! [`ir_optimize::optimize`] (source-level cancellation/reordering) ->
 //! [`backend::lower`] ([`ir::Circuit`] -> a target [`backend::Backend`]'s
-//! native gate set, routing through [`route::route_lookahead`] first
-//! against a [`coupling::CouplingMap`] for any backend that isn't
-//! all-to-all -- see `backend.rs`'s `lower` for why the lookahead
-//! router, not the naive [`route::route`], is the one actually wired
-//! in) ->
+//! native gate set, routing through [`route::route_best`] first against
+//! a [`coupling::CouplingMap`] for any backend that isn't all-to-all --
+//! `route_best` itself runs [`route::route`], [`route::route_lookahead`],
+//! and [`route::route_sabre`] and keeps whichever used fewest SWAPs, so
+//! `backend::lower` never has to choose between them itself; see
+//! `route_best`'s own doc comment for why no single one of the three is
+//! a strict improvement on the other two in every case) ->
 //! [`optimize::optimize`] (native-level peephole cleanup) ->
 //! [`fidelity::estimate_circuit_fidelity`] (quick sanity-check number)
 //! -> [`emit::run`] / [`emit::run_backend`] (actually execute it on
-//! `sirraya_qutub`). [`emit::to_qasm`] / [`emit::to_qasm3`] export a
-//! `NativeCircuit` back out as QASM 2.0 or 3.0 text, respectively (in
-//! `sirraya_qutub`'s own dialect -- round-trips through [`qasm::parse`]
-//! but not necessarily through another tool's parser; see
-//! [`ibm_export::to_ibm_qasm`] for real IBM-hardware-native QASM 2.0
-//! text instead). [`diagram::Diagram`] can render any of the three
+//! `sirraya_qutub`). [`diagram::Diagram`] can render any of the three
 //! circuit levels in this pipeline (source, native, or backend-lowered)
 //! as an ASCII or SVG circuit diagram, independent of the rest of the
 //! pipeline.
@@ -90,7 +85,7 @@ pub use pulse::{
     TwoQubitPulseCalibration,
 };
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
-pub use route::{route, route_lookahead};
+pub use route::{route, route_lookahead, route_sabre, route_best};
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, IbmInstr};
 pub use waveform_sim::{
     integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,

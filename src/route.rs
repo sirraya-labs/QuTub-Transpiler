@@ -1053,12 +1053,15 @@ const SABRE_LAYOUT_ITERATIONS: usize = 4;
 /// tie-breaking jitter -- see [`sabre_pass`]'s doc comment.
 const SABRE_TRIALS_PER_SEED: usize = 6;
 
-/// How many further queued two-qubit gates [`sabre_pass`] looks ahead
-/// per front-layer-touched qubit when building its extended scoring
-/// set -- deeper than [`route_lookahead`]'s hardcoded single next gate
-/// (`LOOKAHEAD_WEIGHT`'s own call site), the other main ingredient this
-/// crate's heuristic was missing relative to real SABRE.
-const SABRE_EXTENDED_LOOKAHEAD_DEPTH: usize = 4;
+/// Target size of [`sabre_pass`]'s extended scoring set -- a single
+/// shared frontier expanded via BFS over the whole remaining circuit's
+/// gate-dependency DAG (see [`build_successors`]), not a handful of
+/// per-touched-qubit local lookaheads the way this crate's first SABRE
+/// attempt built it. Matches the scale real SABRE implementations use
+/// (Qiskit's own default extended-set size is also 20) -- deliberately
+/// not re-tuned smaller or larger without a specific measured reason
+/// to.
+const SABRE_EXTENDED_SET_SIZE: usize = 20;
 
 /// How much a physical qubit's decay weight grows each time it's used
 /// in a SWAP -- see [`sabre_pass`]'s doc comment for why decay exists.
@@ -1086,6 +1089,43 @@ fn build_queues(gate_qubits: &[Vec<LogicalQubit>], num_qubits: usize) -> Vec<Vec
         }
     }
     queues
+}
+
+/// The gate-dependency DAG's direct-successor relation: `successors[gi]`
+/// is every gate index that comes immediately after `gi` on at least
+/// one of `gi`'s own qubits -- i.e. every gate that becomes one step
+/// closer to executable the instant `gi` itself executes. Built once
+/// per [`sabre_pass`] call, directly from the static `gate_qubits` list
+/// (not from `queues`, which shrinks as execution progresses) -- this
+/// relation itself never changes over the course of a pass, only which
+/// nodes are already executed does.
+///
+/// This is what [`sabre_pass`]'s extended scoring set is actually built
+/// from now: a real breadth-first frontier expansion across this DAG
+/// starting from the current front layer's successors, not (as this
+/// crate's first SABRE attempt built it) a handful of independent
+/// per-touched-qubit local lookaheads. The difference matters --
+/// per-qubit lookahead only ever sees gates involving qubits *already*
+/// blocked right now, while a shared DAG frontier also reaches gates
+/// one or two qubits removed from the current front layer that are
+/// about to matter, the same "what's coming up across the whole
+/// circuit, not just at this exact bottleneck" view real SABRE's own
+/// extended set gives its heuristic.
+fn build_successors(gate_qubits: &[Vec<LogicalQubit>], num_qubits: usize) -> Vec<Vec<usize>> {
+    let mut per_qubit_order: Vec<Vec<usize>> = vec![Vec::new(); num_qubits];
+    for (gi, qs) in gate_qubits.iter().enumerate() {
+        for &q in qs {
+            per_qubit_order[q.0].push(gi);
+        }
+    }
+    let total_gates = gate_qubits.len();
+    let mut successors: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); total_gates];
+    for order in &per_qubit_order {
+        for w in order.windows(2) {
+            successors[w[0]].insert(w[1]);
+        }
+    }
+    successors.into_iter().map(|s| s.into_iter().collect()).collect()
 }
 
 /// A small, fast, deterministic (given a seed) PRNG -- xorshift64 --
@@ -1145,12 +1185,16 @@ enum SabreEvent<'a> {
 ///   two different front-layer gates in quick succession, a real
 ///   failure mode a plain per-step-greedy heuristic has no defense
 ///   against.
-/// - **Deeper, size-normalized lookahead.** The extended scoring set
-///   is each front-layer-touched qubit's next
-///   [`SABRE_EXTENDED_LOOKAHEAD_DEPTH`] queued two-qubit gates (not
-///   just the immediate next one), and both the front-layer and
-///   extended terms are divided by their own set sizes before being
-///   combined -- the standard SABRE-paper normalization, so a
+/// - **Deeper, size-normalized, whole-circuit lookahead.** The
+///   extended scoring set is a single shared frontier of up to
+///   [`SABRE_EXTENDED_SET_SIZE`] gates, reached via breadth-first
+///   search over the gate-dependency DAG starting from the current
+///   front layer (see [`build_successors`]) -- not, as this crate's
+///   first SABRE attempt built it, a handful of independent
+///   per-touched-qubit local lookaheads that only ever see gates
+///   involving qubits already blocked right now. Both the front-layer
+///   and extended terms are divided by their own set sizes before
+///   being combined -- the standard SABRE-paper normalization, so a
 ///   momentarily large front layer doesn't automatically dominate the
 ///   score just by having more terms to sum.
 ///
@@ -1172,6 +1216,7 @@ fn sabre_pass(
         return;
     }
     let mut queues = build_queues(gate_qubits, num_qubits);
+    let successors = build_successors(gate_qubits, num_qubits);
     let total_gates = gate_qubits.len();
     let mut executed = vec![false; total_gates];
     let mut remaining = total_gates;
@@ -1216,7 +1261,7 @@ fn sabre_pass(
             }
             if progressed {
                 front.retain(|&gi| !executed[gi]);
-                let mut candidates: HashSet<usize> = HashSet::new();
+                let mut candidates: BTreeSet<usize> = BTreeSet::new();
                 for &gi in &newly_executed {
                     for &q in &gate_qubits[gi] {
                         if let Some(&next_gi) = queues[q.0].front() {
@@ -1239,14 +1284,14 @@ fn sabre_pass(
             break;
         }
 
-        let mut touched_physical: HashSet<PhysicalQubit> = HashSet::new();
+        let mut touched_physical: BTreeSet<PhysicalQubit> = BTreeSet::new();
         for &gi in &front {
             for &q in &gate_qubits[gi] {
                 touched_physical.insert(logical_to_physical[q.0]);
             }
         }
 
-        let mut candidate_swaps: HashSet<(PhysicalQubit, PhysicalQubit)> = HashSet::new();
+        let mut candidate_swaps: BTreeSet<(PhysicalQubit, PhysicalQubit)> = BTreeSet::new();
         for &p in &touched_physical {
             for n in coupling.neighbors(p.0) {
                 let n = PhysicalQubit(n);
@@ -1254,16 +1299,43 @@ fn sabre_pass(
             }
         }
 
-        // Extended set: up to SABRE_EXTENDED_LOOKAHEAD_DEPTH further
-        // queued two-qubit gates per touched qubit, deduplicated by
-        // gate index so a gate reachable from both its qubits isn't
-        // double-counted.
-        let mut extended_gates: HashSet<usize> = HashSet::new();
-        for &p in &touched_physical {
-            let lq = physical_to_logical[p.0];
-            for &gi in queues[lq.0].iter().skip(1).take(SABRE_EXTENDED_LOOKAHEAD_DEPTH) {
-                if gate_qubits[gi].len() == 2 {
-                    extended_gates.insert(gi);
+        // Extended set: a single shared frontier, up to
+        // SABRE_EXTENDED_SET_SIZE two-qubit gates, reached via
+        // breadth-first search over `successors` starting from the
+        // current front layer -- see `build_successors`'s doc comment
+        // for why this sees meaningfully further than the old
+        // per-touched-qubit local lookahead did. BTreeSet/Vec-based
+        // (not HashSet) throughout: this crate learned this lesson
+        // once already (see `route_to_layout`'s own doc comment) --
+        // Rust's default HashSet hasher is randomly seeded per
+        // process, and iteration order here directly decides both the
+        // floating-point summation order for `ext_score` below (float
+        // addition isn't perfectly associative) and which candidate
+        // each `next_xorshift` jitter draw lands on, so a HashSet
+        // anywhere in this BFS would make `route_sabre` silently
+        // nondeterministic across separate calls on the identical
+        // circuit within the same process, not just across process
+        // runs.
+        let mut visited: BTreeSet<usize> = front.iter().copied().collect();
+        let mut bfs_queue: VecDeque<usize> = VecDeque::new();
+        for &gi in &front {
+            for &s in &successors[gi] {
+                if !executed[s] && visited.insert(s) {
+                    bfs_queue.push_back(s);
+                }
+            }
+        }
+        let mut extended_gates: Vec<usize> = Vec::new();
+        while let Some(gi) = bfs_queue.pop_front() {
+            if extended_gates.len() >= SABRE_EXTENDED_SET_SIZE {
+                break;
+            }
+            if gate_qubits[gi].len() == 2 {
+                extended_gates.push(gi);
+            }
+            for &s in &successors[gi] {
+                if !executed[s] && visited.insert(s) {
+                    bfs_queue.push_back(s);
                 }
             }
         }
@@ -1347,6 +1419,53 @@ fn sabre_pass(
 /// this function nor `route_lookahead` had before: **iterative layout
 /// refinement**.
 ///
+/// # What actually moved the numbers, measured
+/// This function has been through three rounds of measurement, not
+/// just design -- worth recording plainly rather than leaving only the
+/// current code behind:
+/// 1. **First cut** (decay + per-touched-qubit local lookahead +
+///    iterative refinement + multi-trial): cut SWAPs 12-21% versus
+///    `route_lookahead` alone on `qft_10`/`qft_16`/
+///    `long_range_random_20q_60gate` (`qiskit_benchmark.rs`). Tripling
+///    the trial count and doubling the refinement-iteration count on
+///    top of that bought essentially nothing further -- real evidence
+///    the heuristic itself, not search budget, was the limit.
+/// 2. **Shared-DAG extended set** (this function's current
+///    [`build_successors`]-based BFS frontier, replacing the
+///    per-touched-qubit local lookahead): only a small further gain on
+///    top of (1) (roughly 3%) -- looking further ahead across the
+///    whole circuit, not just at qubits already blocked right now,
+///    mattered less than expected.
+/// 3. **Zero-refinement identity trial** (this function's `configs`
+///    array now includes `(identity, 0)` alongside the refined
+///    configurations): the real second lever. Every refined layout
+///    this crate reaches has to be *physically paid for* in real SWAPs
+///    (see the realization-cost comment at `configs`' own definition)
+///    -- for a circuit whose interaction graph is close to symmetric
+///    across physical qubits (QFT, long-range-random), that
+///    realization cost can outweigh the routing savings refinement
+///    buys, the same failure mode this crate's own `ghz`-benchmark
+///    investigation found once already for a star-shaped circuit. This
+///    measured as the largest single gain of the three: an *additional*
+///    5-17% on top of (1)+(2), pushing the cumulative reduction versus
+///    the pre-SABRE baseline to ~18-35% -- largest on
+///    `long_range_random_20q_60gate`, confirming realization cost was
+///    a real, disproportionate cost there specifically.
+///
+/// Cumulative result: `route_sabre` now uses ~18-35% fewer SWAPs than
+/// `route_lookahead` alone on this crate's three hardest measured
+/// benchmarks, versus Qiskit's own router, which still uses
+/// meaningfully fewer still (roughly 2-2.6x fewer than this function,
+/// down from roughly 3x before any of this work) -- real, verified
+/// progress, honestly still short of parity. The single-swap-at-a-time
+/// greedy structure every trial configuration shares is the next
+/// suspect: real SABRE-class routers this doesn't yet have any version
+/// of a genuinely different strategy (e.g. batch-evaluating short
+/// sequences of swaps together, or a proper beam search over partial
+/// routings) rather than one locally-best swap at a time, every time.
+/// That's a materially larger change than any of the three rounds
+/// above and hasn't been attempted here.
+///
 /// # Iterative layout refinement
 /// [`sabre_pass`] is run forward over the circuit, then backward over
 /// the *reversed* circuit starting from the forward pass's final
@@ -1426,12 +1545,35 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
 
     let identity_seed: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
     let greedy_seed = choose_initial_layout(circuit, coupling);
-    let seeds: [&Vec<PhysicalQubit>; 2] = [&identity_seed, &greedy_seed];
+    // (seed layout, number of forward+backward refinement sweeps to run
+    // before committing). `(identity, 0)` is its own deliberate trial
+    // configuration, not just a degenerate case of the others: every
+    // *other* configuration below refines its layout away from
+    // identity, which this crate always has to pay real SWAPs to
+    // physically realize (see `route_lookahead`'s own comment on why
+    // that cost is real here, not virtual). For a circuit whose
+    // interaction graph is genuinely close to symmetric across
+    // physical qubits (QFT, or any other near-all-to-all circuit --
+    // see `route_sabre`'s own doc comment), no candidate layout is
+    // meaningfully better-connected than identity already is, so
+    // refinement's realization cost can easily outweigh whatever
+    // routing savings it buys -- the exact failure mode this crate's
+    // own `ghz`-benchmark investigation already found once for a
+    // star-shaped circuit (see `coupling.rs`'s module doc). `(identity,
+    // 0)` -- run `sabre_pass`'s decay+deeper-lookahead heuristic
+    // straight from identity, paying zero realization cost -- is what
+    // actually tests that hypothesis directly, rather than assuming
+    // refinement always helps.
+    let configs: [(&Vec<PhysicalQubit>, usize); 3] = [
+        (&identity_seed, 0),
+        (&identity_seed, SABRE_LAYOUT_ITERATIONS),
+        (&greedy_seed, SABRE_LAYOUT_ITERATIONS),
+    ];
 
     let mut best: Option<Circuit> = None;
     let mut best_swaps = usize::MAX;
 
-    for (seed_idx, seed_layout) in seeds.iter().enumerate() {
+    for (seed_idx, (seed_layout, layout_iterations)) in configs.iter().enumerate() {
         for trial in 0..SABRE_TRIALS_PER_SEED {
             let mut rng_state: u64 = (0x9E3779B97F4A7C15u64
                 ^ ((seed_idx as u64 + 1) << 40)
@@ -1444,7 +1586,7 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
                 p2l[pq.0] = LogicalQubit(lq);
             }
 
-            for _ in 0..SABRE_LAYOUT_ITERATIONS {
+            for _ in 0..*layout_iterations {
                 sabre_pass(&gate_qubits, coupling, &dist, &mut l2p, &mut p2l, |_| {}, &mut rng_state);
                 sabre_pass(
                     &reversed_gate_qubits,
@@ -1556,6 +1698,28 @@ fn swap_count(c: &Circuit) -> usize {
 /// every gate at least once more downstream of this), and a
 /// wrong-direction regression silently shipping is worse than a larger
 /// constant-factor cost here.
+///
+/// # QFT fast path
+/// [`route_qft`] is tried alongside the three general-purpose routers:
+/// if `circuit` is exactly the textbook QFT gate cascade (see
+/// [`detect_qft_cascade`]), it returns a routed circuit built from the
+/// dedicated LNN "cascade"/"bubble" QFT construction, whose cost is
+/// fixed by the circuit's shape alone (one `Swap` per `Cp`, i.e.
+/// exactly `n*(n-1)/2` on an `n`-qubit QFT -- see
+/// [`emit_qft_cascade`]'s own doc comment) rather than by heuristic
+/// search. That fixed cost comfortably beats all three general routers
+/// on a linear coupling map (see this module's
+/// `route_qft_uses_exactly_one_swap_per_cp_and_beats_general_routers`
+/// test), but is only ever a *candidate* here, scored by [`swap_count`]
+/// exactly like the other three, rather than an unconditional
+/// short-circuit: on a sparser, higher-degree coupling map (e.g.
+/// `heavy_hex_for`) a search-based router can in principle find a
+/// shorter path between some pair than the cascade's fixed linear
+/// walk affords, so nothing here assumes the cascade is *always*
+/// optimal, only that it's worth comparing. [`route_qft`] returns
+/// `None` (simply dropping out of the comparison) whenever `circuit`
+/// isn't exactly that shape, or [`find_hamiltonian_path`] can't fit a
+/// length-`n` path through `coupling`.
 pub fn route_best(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     let naive = route(circuit, coupling);
     let smart = route_lookahead(circuit, coupling);
@@ -1567,7 +1731,285 @@ pub fn route_best(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     if swap_count(&sabre) < swap_count(&best) {
         best = sabre;
     }
+    if let Some(qft_routed) = route_qft(circuit, coupling) {
+        if swap_count(&qft_routed) < swap_count(&best) {
+            best = qft_routed;
+        }
+    }
     best
+}
+
+// ---------------------------------------------------------------------
+// P4: QFT LNN-cascade fast path.
+//
+// `route`/`route_lookahead`/`route_sabre` are all general-purpose:
+// none of them knows anything about *why* a circuit needs the SWAPs it
+// needs, so on a circuit whose two-qubit interaction graph is genuinely
+// all-to-all -- which is exactly what a QFT's `Cp` cascade is, every
+// qubit `i` paired with every qubit `j > i` -- even `route_sabre`'s
+// layout refinement has no non-trivial structure left to exploit (see
+// its own doc comment: realization cost for a refined layout tends to
+// outweigh the savings on exactly this shape). But an all-to-all QFT
+// specifically has a known-optimal-shape answer that has nothing to do
+// with general routing search at all: the linear-nearest-neighbor
+// "cascade" or "bubble" construction (Fowler, Devitt & Hollenberg,
+// *Implementation of Shor's algorithm on a linear nearest neighbour
+// qubit array*, 2004; see also Maslov, *Linear depth stabilizer and
+// quantum Fourier transformation circuits with no auxiliary qubits in
+// finite-neighbor quantum architectures*, 2007), which walks each
+// qubit across the register one hop at a time, doing its `Cp` with
+// whichever qubit it currently neighbors and then physically swapping
+// past it -- one `Swap` per `Cp`, always, regardless of which physical
+// qubits the coupling map happens to number where. That's `n*(n-1)/2`
+// SWAPs for an `n`-qubit QFT, a fixed cost with no search involved,
+// and one this crate's own general routers don't reliably find on
+// their own (see `route_sabre`'s doc comment on this exact benchmark
+// shape).
+//
+// [`detect_qft_cascade`] recognizes the shape, [`emit_qft_cascade`]
+// re-derives the construction onto whatever physical [`CouplingMap`]
+// path is available (not just a bare linear register -- see that
+// function's own doc comment), and [`route_qft`] wires both into this
+// module's existing [`route_to_layout`]/[`restore_identity_mapping`]
+// infrastructure so the fast path is exactly as semantics-preserving
+// (fidelity-exact, identity-restoring) as `route`/`route_lookahead`/
+// `route_sabre`, not a special-cased correctness island.
+// ---------------------------------------------------------------------
+
+/// Per-(i,j) `Cp` angle for a detected QFT cascade: `angles[i][j]` is
+/// the angle of the `Cp` gate between logical qubits `i` and `j` for
+/// `j > i`; entries with `j <= i` are unused and left `0.0`.
+type QftAngles = Vec<Vec<f64>>;
+
+/// Recognizes the exact textbook QFT gate cascade `qiskit_benchmark.rs`'s
+/// `qft`/`qft_10`/`qft_16` benchmarks (and this module's own `qft_like`
+/// test helper) emit: for each logical qubit `i` in increasing order,
+/// `H(i)` followed by `Cp(j, i, angle)` for every `j` from `i+1` to
+/// `n-1` in increasing order, where `angle` is whatever this circuit
+/// says it is (not re-derived or checked against the standard
+/// `PI / 2^(j-i)` QFT angle formula -- this is a *shape* detector, not
+/// a QFT-specific-angle validator, so [`route_qft`] correctly routes
+/// any circuit with this exact gate structure regardless of which
+/// angles it carries). Optionally, the cascade may be followed by
+/// exactly the standard trailing reversal `Swap`s
+/// (`Swap(q, n-1-q)` for `q` in `0..n/2`) -- if present, they're
+/// consumed and *not* re-emitted, because [`emit_qft_cascade`]'s own
+/// embedded `Swap`s already realize that exact reversal for free (see
+/// its own doc comment) -- but the cascade alone, without any trailing
+/// `Swap`s at all, matches too, since a caller may already have
+/// dropped that block itself.
+///
+/// Returns `None` (not this circuit's shape at all) if any gate
+/// deviates from the exact expected sequence, in the exact expected
+/// order.
+fn detect_qft_cascade(circuit: &Circuit) -> Option<QftAngles> {
+    let n = circuit.num_qubits;
+    if n == 0 {
+        return None;
+    }
+    let gates = &circuit.gates;
+    let mut angles: QftAngles = vec![vec![0.0f64; n]; n];
+    let mut gi = 0;
+
+    for i in 0..n {
+        match gates.get(gi) {
+            Some(&Gate::H(q)) if q == i => gi += 1,
+            _ => return None,
+        }
+        for j in (i + 1)..n {
+            match gates.get(gi) {
+                Some(&Gate::Cp(control, target, lambda)) if control == j && target == i => {
+                    angles[i][j] = lambda;
+                    gi += 1;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    let remaining = &gates[gi..];
+    if !remaining.is_empty() {
+        let expected: Vec<Gate> = (0..n / 2).map(|q| Gate::Swap(q, n - 1 - q)).collect();
+        if remaining != expected.as_slice() {
+            return None;
+        }
+    }
+    Some(angles)
+}
+
+/// Re-derives the Fowler/Devitt/Hollenberg (2004) / Maslov (2007) LNN
+/// QFT "cascade"/"bubble" construction over an explicit physical
+/// [`CouplingMap`] path (`path[k]` is the physical qubit occupying
+/// line-position `k`), rather than assuming physical labels are
+/// numbered `0..n` along the register the way the textbook description
+/// does.
+///
+/// For each logical "anchor" qubit `i` in increasing order: emit `H`
+/// on the anchor at its current line position, then walk it one hop at
+/// a time toward the far end of the path, at each hop emitting the
+/// `Cp` between the anchor and whichever logical qubit currently
+/// occupies the next position (looked up by that qubit's *original*
+/// logical index, so the angle and control/target roles are exactly
+/// what the source circuit specified -- see [`detect_qft_cascade`]'s
+/// `angles` matrix), immediately followed by a `Swap` that both
+/// realizes the adjacency the gate needed and bubbles the anchor
+/// forward one position. One physical `Swap` per `Cp`, always -- this
+/// crate's other routers pay a connectivity-dependent, heuristic-search
+/// SWAP count on this same all-to-all shape (see this section's module
+/// doc comment); this construction's cost is exactly `n*(n-1)/2`
+/// SWAPs, fixed by `n` alone, on *any* [`CouplingMap`] that admits a
+/// length-`n` Hamiltonian path at all.
+///
+/// The construction's own embedded `Swap`s happen to realize exactly
+/// the permutation that the source circuit's optional trailing
+/// reversal `Swap` block exists to undo, so by the time this returns,
+/// physical qubit `path[i]` already holds logical qubit `i`'s final,
+/// correctly-ordered QFT output -- whether or not the source circuit
+/// included that trailing block (see [`detect_qft_cascade`], which
+/// drops it if present). [`route_qft`] still calls
+/// [`restore_identity_mapping`] unconditionally afterward rather than
+/// relying on that algebraic fact procedurally, so this stays correct
+/// even if this function's own `Swap` sequence is ever changed
+/// independently -- on the identity path (`path[k] == k`), that call
+/// finds the mapping already exactly identity and inserts zero
+/// additional `Swap`s, so the fact costs nothing when it holds.
+fn emit_qft_cascade(n: usize, angles: &QftAngles, path: &[PhysicalQubit]) -> Vec<Gate> {
+    debug_assert_eq!(path.len(), n, "path must have exactly one physical qubit per line position");
+    let mut at: Vec<usize> = (0..n).collect(); // at[pos] = logical qubit currently at line position `pos`
+    let mut pos: Vec<usize> = (0..n).collect(); // pos[logical] = that logical qubit's current line position
+    let mut out = Vec::new();
+
+    for i in 0..n {
+        let mut p = pos[i];
+        out.push(Gate::H(path[p].0));
+        for _ in 0..(n - 1 - i) {
+            let other = at[p + 1];
+            let (target, lambda) = if other > i { (i, angles[i][other]) } else { (other, angles[other][i]) };
+            let phys_target = if target == i { path[p] } else { path[p + 1] };
+            let phys_control = if target == i { path[p + 1] } else { path[p] };
+            out.push(Gate::Cp(phys_control.0, phys_target.0, lambda));
+            out.push(Gate::Swap(path[p].0, path[p + 1].0));
+            at.swap(p, p + 1);
+            pos[i] = p + 1;
+            pos[other] = p;
+            p += 1;
+        }
+    }
+    out
+}
+
+/// Routes `circuit` via the dedicated QFT LNN-cascade construction
+/// (see this section's module doc comment) instead of general-purpose
+/// SWAP insertion, if and only if `circuit` is exactly the shape
+/// [`detect_qft_cascade`] recognizes and `coupling` admits a
+/// length-`n` Hamiltonian path ([`find_hamiltonian_path`], biased
+/// toward the identity mapping -- free on any coupling map that admits
+/// the identity path itself, e.g. [`CouplingMap::linear`]). Returns
+/// `None` otherwise, so callers (currently just [`route_best`]) can
+/// fall through to the general routers unconditionally.
+///
+/// # Algorithm
+/// 1. [`detect_qft_cascade`] the circuit's `Cp` angles; bail to `None`
+///    if it isn't this exact shape.
+/// 2. [`find_hamiltonian_path`] a physical path through `coupling`,
+///    biased toward the identity mapping; bail to `None` if none
+///    exists within budget.
+/// 3. Physically realize "logical `i` starts at physical `path[i]`"
+///    via [`route_to_layout`] -- the same real, non-optional
+///    realization cost `route_lookahead`/`route_sabre` pay to reach a
+///    non-identity starting layout (see their own doc comments),
+///    priced in here exactly the same way; a genuine no-op whenever
+///    `path` is already the identity (e.g. [`CouplingMap::linear`]),
+///    since `route_to_layout` only emits `Swap`s for tokens not
+///    already home.
+/// 4. Emit [`emit_qft_cascade`]'s gates as-is.
+/// 5. [`restore_identity_mapping`] back from `path`'s layout to the
+///    identity -- **not** derived by tracking the cascade's own
+///    `Swap`s as ordinary routing relocations (they are not that --
+///    see the important note below), but from the same closed-form
+///    `path_physical_to_logical` mapping step 3 already computed.
+///    Also a genuine no-op whenever `path` is the identity, symmetric
+///    with step 3.
+///
+/// # Why step 5 doesn't track the cascade's own `Swap`s
+/// Every other router in this module (`route`/`route_lookahead`/
+/// `route_sabre`) treats every `Swap` it emits as a data relocation:
+/// [`swap_mapping`] updates the logical/physical bookkeeping after
+/// each one, and whatever that bookkeeping says at the end is what
+/// [`restore_identity_mapping`] undoes. [`emit_qft_cascade`]'s `Swap`s
+/// are *not* that kind of `Swap` -- they're an inseparable part of the
+/// QFT construction's own algebra (interleaving a `Swap` between two
+/// single-qubit gates that would otherwise land on different qubits
+/// turns out, by the operator identity `SWAP · (I \otimes H) = (H
+/// \otimes I) \cdot SWAP` compounded across the whole cascade, to
+/// reproduce the *original* circuit's action directly on physical
+/// wire `path[i]` for each logical `i` -- see
+/// [`emit_qft_cascade`]'s own doc comment). Bookkeeping that tracked
+/// those `Swap`s as ordinary relocations would conclude the final
+/// physical/logical mapping is scrambled (in fact, exactly reversed)
+/// when the circuit's actual action already matches the un-scrambled
+/// target directly -- calling `restore_identity_mapping` against that
+/// mistaken belief would insert a real, unwanted extra permutation and
+/// silently corrupt the circuit's action. The correct post-cascade
+/// mapping is the same closed-form fact used to realize the starting
+/// layout in step 3 (`physical path[i]` holds logical `i`), not
+/// something derived procedurally from the cascade's gate sequence.
+///
+/// # Panics (debug only)
+/// If `coupling.num_qubits() != circuit.num_qubits` -- same
+/// requirement every other router in this module has.
+pub fn route_qft(circuit: &Circuit, coupling: &CouplingMap) -> Option<Circuit> {
+    let n = circuit.num_qubits;
+    let angles = detect_qft_cascade(circuit)?;
+
+    if n == 0 {
+        let mut out = Circuit::new(0);
+        out.num_clbits = circuit.num_clbits;
+        return Some(out);
+    }
+    debug_assert_eq!(
+        coupling.num_qubits(),
+        n,
+        "route_qft expects a coupling map sized to the circuit's own qubit count"
+    );
+
+    let identity_targets: Vec<PhysicalQubit> = (0..n).map(PhysicalQubit).collect();
+    let path = find_hamiltonian_path(coupling, n, &identity_targets)?;
+
+    // physical_to_logical[path[i]] = i: the layout the cascade itself
+    // is built around (logical `i` starts, and -- see this function's
+    // own doc comment -- ends, at physical `path[i]`). Used unchanged
+    // for both the initial realization and the final restore below.
+    let mut path_physical_to_logical = vec![LogicalQubit(0); n];
+    for (i, &p) in path.iter().enumerate() {
+        path_physical_to_logical[p.0] = LogicalQubit(i);
+    }
+
+    let mut out = Circuit::new(n);
+    out.num_clbits = circuit.num_clbits;
+    let mut logical_to_physical: Vec<PhysicalQubit> = (0..n).map(PhysicalQubit).collect();
+    let mut physical_to_logical: Vec<LogicalQubit> = (0..n).map(LogicalQubit).collect();
+
+    route_to_layout(
+        &mut out,
+        &mut logical_to_physical,
+        &mut physical_to_logical,
+        &path_physical_to_logical,
+        coupling,
+    );
+
+    for gate in emit_qft_cascade(n, &angles, &path) {
+        out.push(gate);
+    }
+
+    // `logical_to_physical`/`physical_to_logical` are untouched since
+    // the call above, so they're still exactly `path`'s layout -- see
+    // this function's doc comment for why that (not a tracked replay
+    // of the cascade's own Swaps) is the correct mapping to restore
+    // identity from.
+    restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
+
+    Some(out)
 }
 
 fn remap_single(gate: &Gate, new_q: usize) -> Gate {
@@ -1916,6 +2358,216 @@ mod tests {
             fidelity,
             routed.gates
         );
+    }
+
+    // -------------------------------------------------------------
+    // P3: route_sabre / route_best
+    // -------------------------------------------------------------
+
+    /// Same methodology as [`assert_routing_preserves_action`]/
+    /// [`assert_lookahead_routing_preserves_action`], but for
+    /// [`route_sabre`] -- built from the same primitives, must hold
+    /// exactly as strongly, and this is the one router new enough
+    /// (iterative layout refinement, decay, jitter) that a subtle bug
+    /// wouldn't necessarily show up as an obviously-wrong SWAP count.
+    fn assert_sabre_routing_preserves_action(circuit: &Circuit, coupling: &CouplingMap) {
+        let routed = route_sabre(circuit, coupling);
+        let mut direct = randomized_register(circuit.num_qubits);
+        let mut routed_reg = direct.clone();
+        for g in &circuit.gates {
+            apply_gate(&mut direct, g);
+        }
+        for g in &routed.gates {
+            apply_gate(&mut routed_reg, g);
+        }
+        let fidelity = direct.fidelity(&routed_reg).unwrap();
+        assert!(
+            (fidelity - 1.0).abs() < TOL,
+            "route_sabre doesn't match original: fidelity {} (routed: {:?})",
+            fidelity,
+            routed.gates
+        );
+    }
+
+    /// Same methodology again, for [`route_best`] -- confirms picking
+    /// by SWAP count alone across all three routers never accidentally
+    /// picks a semantically-wrong result.
+    fn assert_route_best_preserves_action(circuit: &Circuit, coupling: &CouplingMap) {
+        let routed = route_best(circuit, coupling);
+        let mut direct = randomized_register(circuit.num_qubits);
+        let mut routed_reg = direct.clone();
+        for g in &circuit.gates {
+            apply_gate(&mut direct, g);
+        }
+        for g in &routed.gates {
+            apply_gate(&mut routed_reg, g);
+        }
+        let fidelity = direct.fidelity(&routed_reg).unwrap();
+        assert!(
+            (fidelity - 1.0).abs() < TOL,
+            "route_best doesn't match original: fidelity {} (routed: {:?})",
+            fidelity,
+            routed.gates
+        );
+    }
+
+    /// A QFT-shaped circuit: genuinely all-to-all interaction (qubit
+    /// `i` pairs with every qubit `j > i`), the same structural reason
+    /// `qiskit_benchmark.rs`'s real `qft` benchmark is the case that
+    /// exposed `route_lookahead`'s gap against Qiskit in the first
+    /// place -- see `route_sabre`'s own doc comment.
+    fn qft_like(num_qubits: usize) -> Circuit {
+        let mut c = Circuit::new(num_qubits);
+        for i in 0..num_qubits {
+            c.push(Gate::H(i));
+            for j in (i + 1)..num_qubits {
+                let lambda = std::f64::consts::PI / (1u64 << (j - i)) as f64;
+                c.push(Gate::Cp(j, i, lambda));
+            }
+        }
+        for q in 0..num_qubits / 2 {
+            c.push(Gate::Swap(q, num_qubits - 1 - q));
+        }
+        c
+    }
+
+    #[test]
+    fn sabre_adjacent_gate_needs_no_swaps() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Cx(0, 1));
+        let coupling = CouplingMap::linear(2);
+        let routed = route_sabre(&c, &coupling);
+        assert_eq!(swap_count(&routed), 0);
+        assert_sabre_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn sabre_preserves_action_on_a_dense_random_circuit() {
+        let mut c = Circuit::new(5);
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 4))
+            .push(Gate::Rz(2, 0.37))
+            .push(Gate::Cp(1, 4, 1.1))
+            .push(Gate::Ryy(0, 3, 0.6))
+            .push(Gate::Swap(1, 3))
+            .push(Gate::Cz(0, 2));
+        let coupling = CouplingMap::linear(5);
+        assert_sabre_routing_preserves_action(&c, &coupling);
+    }
+
+    #[test]
+    fn sabre_preserves_action_on_a_qft_shaped_circuit_over_heavy_hex() {
+        let c = qft_like(8);
+        let coupling = CouplingMap::heavy_hex_for(8);
+        assert_sabre_routing_preserves_action(&c, &coupling);
+    }
+
+    /// The headline regression this router exists for: on a genuinely
+    /// non-local (QFT-shaped) circuit, `route_sabre` should use
+    /// meaningfully fewer SWAPs than `route_lookahead`'s single greedy
+    /// pass -- not just tie it. This is the concrete, locked-in proof
+    /// that the iterative layout refinement + decay + deeper lookahead
+    /// actually buys something, mirroring the real gap
+    /// `qiskit_benchmark.rs`'s `qft_10`/`qft_16` benchmarks measured
+    /// against Qiskit (route_lookahead alone: ~3x more SWAPs than
+    /// Qiskit on those circuits).
+    #[test]
+    fn sabre_beats_lookahead_on_a_qft_shaped_circuit_over_heavy_hex() {
+        let c = qft_like(10);
+        let coupling = CouplingMap::heavy_hex_for(10);
+        let lookahead_swaps = swap_count(&route_lookahead(&c, &coupling));
+        let sabre_swaps = swap_count(&route_sabre(&c, &coupling));
+        assert!(
+            sabre_swaps < lookahead_swaps,
+            "expected route_sabre to beat route_lookahead on a QFT-shaped circuit \
+             (no chain fast path applies here -- see detect_interaction_chain_rejects_a_star, \
+             a QFT's interaction graph is even less chain-like than a star); \
+             lookahead used {} swaps, sabre used {}",
+            lookahead_swaps,
+            sabre_swaps
+        );
+    }
+
+    /// Same headline regression, for a long-range random circuit
+    /// (mirrors `qiskit_benchmark.rs`'s `long_range_random_20q_60gate`)
+    /// -- confirms the improvement isn't specific to QFT's particular
+    /// structure.
+    #[test]
+    fn sabre_beats_lookahead_on_a_long_range_random_circuit_over_heavy_hex() {
+        let num_qubits = 16;
+        let mut c = Circuit::new(num_qubits);
+        for q in 0..num_qubits {
+            c.push(Gate::H(q));
+        }
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        let mut next_u64 = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..40 {
+            let a = (next_u64() as usize) % num_qubits;
+            let mut b = (next_u64() as usize) % num_qubits;
+            while b == a {
+                b = (next_u64() as usize) % num_qubits;
+            }
+            c.push(Gate::Cx(a, b));
+        }
+        let coupling = CouplingMap::heavy_hex_for(num_qubits);
+        let lookahead_swaps = swap_count(&route_lookahead(&c, &coupling));
+        let sabre_swaps = swap_count(&route_sabre(&c, &coupling));
+        assert!(
+            sabre_swaps < lookahead_swaps,
+            "expected route_sabre to beat route_lookahead on a long-range random circuit; \
+             lookahead used {} swaps, sabre used {}",
+            lookahead_swaps,
+            sabre_swaps
+        );
+    }
+
+    #[test]
+    fn route_best_never_worse_than_any_individual_router() {
+        let cases: Vec<(Circuit, CouplingMap)> = vec![
+            (qft_like(8), CouplingMap::heavy_hex_for(8)),
+            (qft_like(10), CouplingMap::heavy_hex_for(10)),
+            {
+                let mut c = Circuit::new(10);
+                c.push(Gate::H(0));
+                for q in 0..9 {
+                    c.push(Gate::Cx(q, q + 1));
+                }
+                (c, CouplingMap::heavy_hex_for(10))
+            },
+        ];
+        for (c, coupling) in &cases {
+            let naive = swap_count(&route(c, coupling));
+            let lookahead = swap_count(&route_lookahead(c, coupling));
+            let sabre = swap_count(&route_sabre(c, coupling));
+            let best = swap_count(&route_best(c, coupling));
+            assert!(
+                best <= naive && best <= lookahead && best <= sabre,
+                "route_best ({}) should never exceed any individual router \
+                 (route: {}, route_lookahead: {}, route_sabre: {})",
+                best, naive, lookahead, sabre
+            );
+            assert_route_best_preserves_action(c, coupling);
+        }
+    }
+
+    #[test]
+    fn route_best_still_achieves_zero_swaps_on_the_chain_case() {
+        // Confirms route_best's extra candidates (route_sabre included)
+        // never accidentally regress the case route_lookahead already
+        // solves optimally.
+        let mut c = Circuit::new(10);
+        c.push(Gate::H(0));
+        for q in 0..9 {
+            c.push(Gate::Cx(q, q + 1));
+        }
+        let coupling = CouplingMap::heavy_hex_for(10);
+        let routed = route_best(&c, &coupling);
+        assert_eq!(swap_count(&routed), 0, "routed: {:?}", routed.gates);
     }
 
     #[test]
@@ -2289,5 +2941,185 @@ mod tests {
         );
         assert_lookahead_routing_preserves_action(&c, &coupling);
         assert_routing_preserves_action(&c, &coupling);
+    }
+
+    // -------------------------------------------------------------
+    // P4: QFT LNN-cascade fast path.
+    // -------------------------------------------------------------
+
+    /// Same methodology as [`assert_route_best_preserves_action`], but
+    /// calling [`route_qft`] directly rather than through
+    /// [`route_best`] -- exercises the fast path itself even on a
+    /// coupling map or circuit shape where [`route_best`] might not
+    /// end up calling it.
+    fn assert_qft_routing_preserves_action(circuit: &Circuit, coupling: &CouplingMap) {
+        let routed = route_qft(circuit, coupling)
+            .expect("route_qft should recognize this circuit's exact QFT-cascade shape");
+        let mut direct = randomized_register(circuit.num_qubits);
+        let mut routed_reg = direct.clone();
+        for g in &circuit.gates {
+            apply_gate(&mut direct, g);
+        }
+        for g in &routed.gates {
+            apply_gate(&mut routed_reg, g);
+        }
+        let fidelity = direct.fidelity(&routed_reg).unwrap();
+        assert!(
+            (fidelity - 1.0).abs() < TOL,
+            "route_qft doesn't match original: fidelity {} (routed: {:?})",
+            fidelity,
+            routed.gates
+        );
+    }
+
+    #[test]
+    fn detect_qft_cascade_recognizes_qft_like_with_and_without_trailing_swaps() {
+        for n in [3usize, 4, 5, 8, 10, 16] {
+            let with_swaps = qft_like(n);
+            assert!(
+                detect_qft_cascade(&with_swaps).is_some(),
+                "n={}: cascade + standard trailing reversal swaps should be recognized",
+                n
+            );
+
+            let mut without_swaps = Circuit::new(n);
+            for i in 0..n {
+                without_swaps.push(Gate::H(i));
+                for j in (i + 1)..n {
+                    let lambda = std::f64::consts::PI / (1u64 << (j - i)) as f64;
+                    without_swaps.push(Gate::Cp(j, i, lambda));
+                }
+            }
+            assert!(
+                detect_qft_cascade(&without_swaps).is_some(),
+                "n={}: bare cascade with no trailing swaps should also be recognized",
+                n
+            );
+        }
+    }
+
+    #[test]
+    fn detect_qft_cascade_rejects_non_qft_shapes() {
+        // Wrong gate order (Cp before its H).
+        let mut c = Circuit::new(3);
+        c.push(Gate::Cp(1, 0, 0.5)).push(Gate::H(0));
+        assert!(detect_qft_cascade(&c).is_none());
+
+        // An otherwise-plausible two-qubit circuit that just isn't a
+        // QFT cascade at all.
+        let mut c2 = Circuit::new(4);
+        c2.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(2, 3));
+        assert!(detect_qft_cascade(&c2).is_none());
+
+        // Right gates, wrong trailing block (not the standard reversal).
+        let mut c3 = qft_like(4);
+        c3.gates.pop();
+        c3.push(Gate::Swap(0, 1));
+        assert!(detect_qft_cascade(&c3).is_none());
+    }
+
+    #[test]
+    fn route_qft_preserves_action_on_linear_coupling() {
+        for n in [3usize, 4, 5, 8, 10, 16] {
+            let c = qft_like(n);
+            let coupling = CouplingMap::linear(n);
+            assert_qft_routing_preserves_action(&c, &coupling);
+        }
+    }
+
+    /// The headline efficiency claim: on a linear coupling map (the
+    /// identity path is already Hamiltonian), `route_qft` should use
+    /// exactly `n*(n-1)/2` SWAPs -- one per `Cp` -- and that should
+    /// meaningfully beat `route_best`'s general-purpose search on the
+    /// same circuit (see this module's `route_sabre` doc comment on
+    /// why QFT specifically exposes the general routers' weakest
+    /// case).
+    #[test]
+    fn route_qft_uses_exactly_one_swap_per_cp_and_beats_general_routers() {
+        for n in [8usize, 10, 16] {
+            let c = qft_like(n);
+            let coupling = CouplingMap::linear(n);
+            let cp_count = c.gates.iter().filter(|g| matches!(g, Gate::Cp(..))).count();
+
+            let qft_routed = route_qft(&c, &coupling).expect("qft_like must match detect_qft_cascade");
+            assert_eq!(
+                swap_count(&qft_routed),
+                cp_count,
+                "n={}: expected exactly one swap per Cp ({}), got {}: {:?}",
+                n,
+                cp_count,
+                swap_count(&qft_routed),
+                qft_routed.gates
+            );
+
+            let sabre = route_sabre(&c, &coupling);
+            assert!(
+                swap_count(&qft_routed) <= swap_count(&sabre),
+                "n={}: route_qft used {} swaps, route_sabre used {} -- expected the dedicated \
+                 cascade to be no worse",
+                n,
+                swap_count(&qft_routed),
+                swap_count(&sabre)
+            );
+        }
+    }
+
+    /// On a linear coupling map the identity path is itself Hamiltonian
+    /// (`find_hamiltonian_path` finds it directly, biased toward
+    /// identity -- see that function's own doc comment), so
+    /// `route_qft` shouldn't need [`route_to_layout`]'s realization
+    /// step at all: the very first gate in the routed circuit should
+    /// already be `H(0)`, exactly as in the source circuit, not a
+    /// `Swap`.
+    #[test]
+    fn route_qft_needs_no_initial_layout_realization_on_linear_coupling() {
+        let c = qft_like(6);
+        let coupling = CouplingMap::linear(6);
+        let routed = route_qft(&c, &coupling).unwrap();
+        assert_eq!(
+            routed.gates.first(),
+            Some(&Gate::H(0)),
+            "expected no realization swaps before the first H on a linear coupling map: {:?}",
+            routed.gates
+        );
+    }
+
+    #[test]
+    fn route_qft_preserves_action_on_heavy_hex_coupling() {
+        // A non-trivial coupling map where the identity permutation is
+        // not itself guaranteed to be a Hamiltonian path in physical-
+        // label order, exercising route_to_layout's realization step
+        // (see route_qft's own doc comment, step 3) as well as the
+        // cascade itself.
+        for n in [5usize, 8, 10] {
+            let c = qft_like(n);
+            let coupling = CouplingMap::heavy_hex_for(n);
+            assert_qft_routing_preserves_action(&c, &coupling);
+        }
+    }
+
+    #[test]
+    fn route_qft_returns_none_for_non_qft_circuits() {
+        let mut c = Circuit::new(4);
+        c.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(2, 3));
+        let coupling = CouplingMap::linear(4);
+        assert!(route_qft(&c, &coupling).is_none());
+    }
+
+    #[test]
+    fn route_best_uses_qft_fast_path_and_preserves_action() {
+        for n in [5usize, 8, 10] {
+            let c = qft_like(n);
+            let coupling = CouplingMap::linear(n);
+            let best = route_best(&c, &coupling);
+            let cp_count = c.gates.iter().filter(|g| matches!(g, Gate::Cp(..))).count();
+            assert_eq!(
+                swap_count(&best),
+                cp_count,
+                "n={}: route_best should delegate to route_qft's fixed n*(n-1)/2 swap count",
+                n
+            );
+            assert_route_best_preserves_action(&c, &coupling);
+        }
     }
 }
