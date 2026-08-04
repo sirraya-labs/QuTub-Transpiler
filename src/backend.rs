@@ -183,10 +183,46 @@ pub(crate) const EPS: f64 = 1e-9;
 /// performance -- and every SWAP saved is 3 fewer native two-qubit
 /// gates once lowered below (Rzz/Cx/Cz).
 pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
+    lower_with_coupling(circuit, backend, backend.coupling_map(circuit.num_qubits).as_ref())
+}
+
+/// As [`lower`], but routes against `coupling` (if given) instead of
+/// `backend`'s own default topology (`Backend::coupling_map` --
+/// currently always one of `coupling.rs`'s *synthetic* generators,
+/// `heavy_hex_for`/`square_grid_for`, not any specific real chip's
+/// actual wiring). `lower` itself is now just this function called
+/// with `backend.coupling_map(circuit.num_qubits)`.
+///
+/// This exists because the synthetic default is a real correctness
+/// risk once a circuit is headed for a real device rather than a
+/// simulator: `ibm_export.rs`'s own module doc already flags that this
+/// crate does no live device coupling-map query, so a circuit routed
+/// against the synthetic map has no guarantee its two-qubit gates land
+/// on pairs that are actually coupled on the specific chip a job gets
+/// submitted to (disabled qubits, chip-specific layout -- see
+/// [`crate::coupling::CouplingMap::from_edges`]'s own doc comment).
+/// `submit_ibm.py --dump-coupling-map` queries a real backend's edge
+/// list via Qiskit; build a [`CouplingMap`] from that with `from_edges`
+/// and pass it here instead of relying on `lower`'s synthetic default.
+///
+/// `coupling == None` means route against no topology at all (every
+/// pair adjacent) -- the same behavior `lower` already has for
+/// `TrappedIon`, for which `Backend::coupling_map` always returns
+/// `None`. Passing `None` for `IbmQ`/`Rigetti` is a real (if unusual)
+/// choice too, e.g. an all-to-all simulator target; it is never
+/// implied by "I don't have a real coupling map yet" -- an absent map
+/// silently skips routing rather than erroring, so a caller with no
+/// real topology to hand should keep using `lower`'s synthetic default
+/// rather than pass `None` here by omission.
+pub fn lower_with_coupling(
+    circuit: &Circuit,
+    backend: Backend,
+    coupling: Option<&crate::coupling::CouplingMap>,
+) -> BackendCircuit {
     let routed_storage;
-    let circuit: &Circuit = match backend.coupling_map(circuit.num_qubits) {
+    let circuit: &Circuit = match coupling {
         Some(coupling) => {
-            routed_storage = crate::route::route_best(circuit, &coupling);
+            routed_storage = crate::route::route_best(circuit, coupling);
             &routed_storage
         }
         None => circuit,
