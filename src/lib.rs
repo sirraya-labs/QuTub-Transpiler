@@ -71,7 +71,7 @@ pub mod qasm;
 pub mod route;
 pub mod waveform_sim;
 
-pub use backend::{lower, Backend, BackendCircuit, BackendGate, BackendSpec, RotAxis};
+pub use backend::{lower, lower_with_coupling, Backend, BackendCircuit, BackendGate, BackendSpec, RotAxis};
 pub use coupling::CouplingMap;
 pub use diagram::{Diagram, DiagramInstr};
 pub use ir::{Circuit, Gate};
@@ -86,7 +86,7 @@ pub use pulse::{
 };
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
 pub use route::{route, route_lookahead, route_sabre, route_best};
-pub use ibm_export::{to_ibm_qasm, lower_ibm_native, IbmInstr};
+pub use ibm_export::{to_ibm_qasm, lower_ibm_native, validate_cx_native_basis, IbmInstr};
 pub use waveform_sim::{
     integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,
 };

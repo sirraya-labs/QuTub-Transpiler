@@ -171,6 +171,59 @@ fn merge_adjacent_rz(instrs: Vec<IbmInstr>) -> Vec<IbmInstr> {
     out
 }
 
+/// Checks a real backend's *own* published basis-gate list (e.g. from
+/// `submit_ibm.py --dump-coupling-map`'s `basis_gates` field, itself
+/// read off `BackendV2.target.operation_names` on the Qiskit side)
+/// against the fixed assumption this module's `Rot`-expansion identity
+/// and [`to_ibm_qasm`] are built on: `{rz, sx, x, cx, measure}`.
+///
+/// This module's own doc comment already states that basis as a
+/// premise, not something derived per-device -- it was true of IBM's
+/// CNOT-native generations, but several current-generation IBM devices
+/// are **ECR**-native instead (`ecr` in place of `cx` as the native
+/// two-qubit gate; a fixed-angle *echoed cross-resonance* gate, not
+/// freely re-derivable from this module's `Rzz -> Cx . Rz . Cx`
+/// identity). Calling [`to_ibm_qasm`] against an ECR-native backend
+/// would silently emit `cx` instructions a submission pipeline then
+/// has to itself re-transpile -- exactly the "no longer testing what
+/// you think you're testing" failure mode this module's `Rot`
+/// expansion identity was written to avoid for the single-qubit gates.
+///
+/// Returns `Ok(())` only if `basis_gates` contains `cx` (case-
+/// insensitive) -- i.e. this module's assumed basis is actually a
+/// subset of what the real device supports. Does **not** attempt to
+/// generate an ECR-basis export itself: that needs its own derived
+/// identity (`Rzz`/`Cx` re-expressed in terms of a fixed-angle `ECR`,
+/// analogous to how `expand_rot` re-expresses `Rot` in terms of the
+/// fixed `SX`), which is real follow-on work, not something this
+/// check can paper over. Call this once, before [`to_ibm_qasm`], for
+/// any circuit actually headed to real hardware rather than a
+/// CX-native simulator.
+pub fn validate_cx_native_basis(basis_gates: &[String]) -> Result<(), String> {
+    let has_cx = basis_gates.iter().any(|g| g.eq_ignore_ascii_case("cx"));
+    if has_cx {
+        return Ok(());
+    }
+    let has_ecr = basis_gates.iter().any(|g| g.eq_ignore_ascii_case("ecr"));
+    if has_ecr {
+        return Err(
+            "validate_cx_native_basis: this backend's basis gates include 'ecr', not 'cx' -- \
+             it is ECR-native, not CX-native. ibm_export::to_ibm_qasm assumes a CX-native basis \
+             ({rz, sx, x, cx, measure}, see this module's own doc comment) and will emit `cx` \
+             instructions this backend cannot execute natively. An ECR-basis export needs its \
+             own decomposition identity (Rzz/Cx re-expressed via the fixed-angle ECR gate), not \
+             yet implemented here -- do not submit this export to an ECR-native backend."
+                .to_string(),
+        );
+    }
+    Err(format!(
+        "validate_cx_native_basis: this backend's basis gates ({:?}) contain neither 'cx' nor \
+         'ecr' -- ibm_export.rs's assumed CX-native basis ({{rz, sx, x, cx, measure}}) doesn't \
+         match this device; check the backend's real basis gates before submitting",
+        basis_gates
+    ))
+}
+
 /// Real OPENQASM 2.0 text for an `IbmQ`-lowered [`BackendCircuit`],
 /// using IBM's own basis gate names so it can be handed to Qiskit or
 /// IBM's job-submission API directly.
@@ -280,6 +333,31 @@ mod tests {
         let instrs = vec![IbmInstr::Rz(0, 0.3), IbmInstr::Rz(1, 0.1), IbmInstr::Rz(0, 0.4)];
         let merged = merge_adjacent_rz(instrs.clone());
         assert_eq!(merged, instrs, "gates on q0 aren't adjacent, shouldn't merge");
+    }
+
+    #[test]
+    fn validate_cx_native_basis_accepts_a_real_cx_native_basis() {
+        let basis = vec!["rz".to_string(), "sx".to_string(), "x".to_string(), "cx".to_string()];
+        assert!(validate_cx_native_basis(&basis).is_ok());
+    }
+
+    #[test]
+    fn validate_cx_native_basis_is_case_insensitive() {
+        let basis = vec!["RZ".to_string(), "SX".to_string(), "CX".to_string()];
+        assert!(validate_cx_native_basis(&basis).is_ok());
+    }
+
+    #[test]
+    fn validate_cx_native_basis_rejects_an_ecr_native_backend() {
+        let basis = vec!["rz".to_string(), "sx".to_string(), "x".to_string(), "ecr".to_string()];
+        let err = validate_cx_native_basis(&basis).unwrap_err();
+        assert!(err.contains("ecr"), "error should name ECR as the mismatch: {}", err);
+    }
+
+    #[test]
+    fn validate_cx_native_basis_rejects_an_unrecognized_basis() {
+        let basis = vec!["rz".to_string(), "iswap".to_string()];
+        assert!(validate_cx_native_basis(&basis).is_err());
     }
 
     #[test]
