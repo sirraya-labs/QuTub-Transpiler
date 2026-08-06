@@ -1657,6 +1657,47 @@ fn swap_count(c: &Circuit) -> usize {
     c.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
 }
 
+/// Splits a routed circuit's total `Gate::Swap` count into "routing"
+/// SWAPs (inserted mid-circuit to get some later real gate onto
+/// adjacent physical qubits) vs "restoration" SWAPs (the trailing
+/// block every router in this module appends via
+/// [`restore_identity_mapping`], after every real gate has already
+/// been scheduled, purely to walk physical qubits back to their
+/// starting wires before returning).
+///
+/// The split is exact, not a heuristic, for any circuit produced by
+/// this module's own routers: `restore_identity_mapping`/
+/// `route_to_layout` only ever runs once, as the very last step, so
+/// every SWAP it emits necessarily lands after the last non-SWAP gate
+/// in program order -- and every SWAP the main routing loop inserts is
+/// always immediately followed (possibly after more SWAPs) by the real
+/// gate it was inserted to enable, so it always lands at or before that
+/// index. `(routing, restoration)` -- `routing + restoration ==
+/// swap_count(routed)`.
+///
+/// Degenerate case: if `routed` is empty or contains only `Swap`s (no
+/// real gate at all -- never produced by this module's own routers on
+/// a non-empty input circuit, but not otherwise disallowed by
+/// `Circuit`'s own type), every SWAP present is counted as
+/// `restoration`, since there is no real gate for any of them to have
+/// been "routing" toward.
+pub fn restoration_swap_count(routed: &Circuit) -> (usize, usize) {
+    match routed.gates.iter().rposition(|g| !matches!(g, Gate::Swap(..))) {
+        Some(last_real_gate) => {
+            let routing = routed.gates[..=last_real_gate]
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(..)))
+                .count();
+            let restoration = routed.gates[last_real_gate + 1..]
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(..)))
+                .count();
+            (routing, restoration)
+        }
+        None => (0, swap_count(routed)),
+    }
+}
+
 /// Routes `circuit` against `coupling` via [`route`], [`route_lookahead`],
 /// and [`route_sabre`], and returns whichever result used fewest
 /// `Swap`s.

@@ -85,7 +85,7 @@ pub use pulse::{
     TwoQubitPulseCalibration,
 };
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
-pub use route::{route, route_lookahead, route_sabre, route_best};
+pub use route::{route, route_lookahead, route_sabre, route_best, route_qft, restoration_swap_count};
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, validate_cx_native_basis, IbmInstr};
 pub use waveform_sim::{
     integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,
