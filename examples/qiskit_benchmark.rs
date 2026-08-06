@@ -405,8 +405,27 @@ fn main() {
     fs::create_dir_all("qiskit_benchmark_qasm").expect("failed to create output dir");
 
     println!("\n=== SIRRAYA ROUTING RESULTS (WITH QFT OPTIMIZER) ===");
-    println!("{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>12}  {:>10}",
-        "benchmark", "src gates", "depth (IBM)", "1q (IBM)", "2q (IBM)", "est fidelity", "est swaps");
+    println!("{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>9}  {:>9}",
+        "benchmark", "src gates", "depth (IBM)", "1q (IBM)", "2q (IBM)", "fidelity", "swaps");
+    let mut total_routing_swaps = 0usize;
+    let mut total_restoration_swaps = 0usize;
+    let mut total_no_restore_swaps = 0usize;
+    let mut total_fidelity_delta_pp = 0.0f64;
+    // Restoration/no_restore numbers are printed as a second, separate
+    // table below (see restoration_rows) rather than crammed into this
+    // row -- the combined single-table version ran 178 characters
+    // wide, which wraps (and visually garbles digits across the wrap
+    // point) in any terminal narrower than that.
+    struct RestorationRow {
+        name: String,
+        routing_swaps: usize,
+        restoration_swaps: usize,
+        restoration_pct: f64,
+        no_restore_swaps: usize,
+        est_fidelity_nr: f64,
+        fidelity_delta_pp: f64,
+    }
+    let mut restoration_rows: Vec<RestorationRow> = Vec::new();
 
     for (name, circuit) in &benchmarks {
         let qasm_text = circuit_to_portable_qasm(circuit, name);
@@ -419,10 +438,42 @@ fn main() {
         let coupling = CouplingMap::heavy_hex_for(circuit.num_qubits);
         let routed = sirraya_qutub_transpiler::route::route_best(circuit, &coupling);
         
-        // Count swaps in the routed circuit
+        // Count swaps in the routed circuit, split into "routing"
+        // (mid-circuit, load-bearing) vs "restoration" (trailing
+        // identity-restore block) -- see restoration_swap_count's own
+        // doc comment. The restoration fraction is the thing Priority
+        // 2 (`skip_restore`) would actually eliminate, so it's what
+        // decides whether that lever is worth building.
         let swap_count = routed.gates.iter()
             .filter(|g| matches!(g, Gate::Swap(..)))
             .count();
+        let (routing_swaps, restoration_swaps) =
+            sirraya_qutub_transpiler::route::restoration_swap_count(&routed);
+        debug_assert_eq!(
+            routing_swaps + restoration_swaps, swap_count,
+            "restoration_swap_count's split must account for every swap route_best emitted"
+        );
+        total_routing_swaps += routing_swaps;
+        total_restoration_swaps += restoration_swaps;
+        let restoration_pct = if swap_count > 0 {
+            100.0 * restoration_swaps as f64 / swap_count as f64
+        } else {
+            0.0
+        };
+
+        // route_best_no_restore re-selects candidates by routing-swap
+        // count rather than total, so this is not necessarily
+        // `routing_swaps` above (a different candidate can win once
+        // restoration is off the table) -- see its own doc comment.
+        // Only valid for a circuit whose result is read off its
+        // Measures, not its final layout -- see restoration table's
+        // own footnote below.
+        let no_restore_routed =
+            sirraya_qutub_transpiler::route::route_best_no_restore(circuit, &coupling);
+        let no_restore_swaps = no_restore_routed.gates.iter()
+            .filter(|g| matches!(g, Gate::Swap(..)))
+            .count();
+        total_no_restore_swaps += no_restore_swaps;
 
         // Now lower the routed circuit to IBM's native basis
         let optimized = optimize_ir(&routed);
@@ -431,19 +482,85 @@ fn main() {
         let cal = fidelity::PublishedCalibration::ibm_heron_r2();
         let est_fidelity = fidelity::estimate_backend_circuit_fidelity(&bc, &cal);
 
+        // Same lowering pipeline, run on the no_restore circuit instead
+        // of guessing the fidelity impact from the swap-count delta --
+        // 2-qubit gates dominate estimate_backend_circuit_fidelity's
+        // model and every Swap lowers to 3 CX/CZ (see native.rs's
+        // Swap -> Cx;Cx;Cx identity), so this is the real number, not
+        // an inference from the table's swap columns.
+        let optimized_nr = optimize_ir(&no_restore_routed);
+        let bc_nr = lower(&optimized_nr, Backend::IbmQ);
+        let est_fidelity_nr = fidelity::estimate_backend_circuit_fidelity(&bc_nr, &cal);
+        let fidelity_delta_pp = (est_fidelity_nr - est_fidelity) * 100.0;
+        total_fidelity_delta_pp += fidelity_delta_pp;
+
         export_coupling_map(&coupling, &format!("qiskit_benchmark_qasm/{}_coupling.txt", name));
 
         println!(
-            "{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>11.6}%  {:>10}",
+            "{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>8.2}%  {:>9}",
             name,
             circuit.gates.len(),
             backend_depth(&bc),
             single,
             two,
             est_fidelity * 100.0,
-            swap_count
+            swap_count,
+        );
+
+        restoration_rows.push(RestorationRow {
+            name: name.to_string(),
+            routing_swaps,
+            restoration_swaps,
+            restoration_pct,
+            no_restore_swaps,
+            est_fidelity_nr,
+            fidelity_delta_pp,
+        });
+    }
+
+    println!("\n=== RESTORATION TAX / route_best_no_restore ===");
+    println!("{:<28}  {:>8}  {:>8}  {:>8}  {:>10}  {:>9}  {:>9}",
+        "benchmark", "routing", "restore", "restore%", "no_restore", "nr fid%", "Δfid(pp)");
+    for r in &restoration_rows {
+        println!(
+            "{:<28}  {:>8}  {:>8}  {:>7.2}%  {:>10}  {:>8.2}%  {:>+8.4}",
+            r.name,
+            r.routing_swaps,
+            r.restoration_swaps,
+            r.restoration_pct,
+            r.no_restore_swaps,
+            r.est_fidelity_nr * 100.0,
+            r.fidelity_delta_pp,
         );
     }
+    println!("(no_restore is only valid for circuits whose result is read off Measures, not final qubit layout)");
+    println!(
+        "Average no_restore fidelity delta: {:+.4} percentage points across {} benchmarks",
+        total_fidelity_delta_pp / benchmarks.len() as f64,
+        benchmarks.len()
+    );
+
+    let total_swaps = total_routing_swaps + total_restoration_swaps;
+    let overall_restoration_pct = if total_swaps > 0 {
+        100.0 * total_restoration_swaps as f64 / total_swaps as f64
+    } else {
+        0.0
+    };
+    println!(
+        "\nTotals: {} routing swaps, {} restoration swaps, {:.2}% of all swaps are restoration tax",
+        total_routing_swaps, total_restoration_swaps, overall_restoration_pct
+    );
+    println!(
+        "route_best_no_restore totals: {} swaps ({} fewer than route_best's {} total, {:.2}% reduction)",
+        total_no_restore_swaps,
+        total_swaps.saturating_sub(total_no_restore_swaps),
+        total_swaps,
+        if total_swaps > 0 {
+            100.0 * (total_swaps.saturating_sub(total_no_restore_swaps)) as f64 / total_swaps as f64
+        } else {
+            0.0
+        }
+    );
 
     println!("\n=== QISKIT COMPARISON ===");
     println!("Run: python3 qiskit_transpile_compare.py");

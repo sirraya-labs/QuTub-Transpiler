@@ -219,10 +219,55 @@ pub fn lower_with_coupling(
     backend: Backend,
     coupling: Option<&crate::coupling::CouplingMap>,
 ) -> BackendCircuit {
+    lower_with_coupling_impl(circuit, backend, coupling, crate::route::route_best)
+}
+
+/// As [`lower`], but for callers who don't need the routed circuit's
+/// physical layout to match its logical layout once the circuit is
+/// done -- see [`crate::route::route_best_no_restore`]'s own doc
+/// comment for exactly which callers that is (in short: a circuit
+/// whose result is read off `Gate::Measure`s, not final qubit
+/// position -- the case `submit_ibm.py`'s real-hardware submission
+/// path is in, since a job's measurement counts only ever depend on
+/// which physical wire each `Measure` targeted *at that point in
+/// program order*, not on wherever qubits end up afterward).
+///
+/// Deliberately a separate, explicitly-named function rather than a
+/// change to `lower`/`lower_with_coupling`'s own default: those two
+/// are the shared implementation behind *every* caller that lowers a
+/// circuit for any backend, not just real-hardware submission, and
+/// nothing here can tell which kind of caller it has. A caller that
+/// composes this circuit's output with a second circuit fragment
+/// back-to-back, or otherwise relies on physical qubit `i` meaning
+/// logical qubit `i` at the end, needs `lower`/`lower_with_coupling`'s
+/// restored-identity guarantee and would silently get a wrong result
+/// if that guarantee were dropped out from under it.
+pub fn lower_no_restore(circuit: &Circuit, backend: Backend) -> BackendCircuit {
+    lower_with_coupling_no_restore(circuit, backend, backend.coupling_map(circuit.num_qubits).as_ref())
+}
+
+/// [`lower_with_coupling`], but routes via
+/// [`crate::route::route_best_no_restore`] instead of
+/// [`crate::route::route_best`] -- see [`lower_no_restore`]'s own doc
+/// comment for which callers this is (and isn't) safe for.
+pub fn lower_with_coupling_no_restore(
+    circuit: &Circuit,
+    backend: Backend,
+    coupling: Option<&crate::coupling::CouplingMap>,
+) -> BackendCircuit {
+    lower_with_coupling_impl(circuit, backend, coupling, crate::route::route_best_no_restore)
+}
+
+fn lower_with_coupling_impl(
+    circuit: &Circuit,
+    backend: Backend,
+    coupling: Option<&crate::coupling::CouplingMap>,
+    route: impl Fn(&Circuit, &crate::coupling::CouplingMap) -> Circuit,
+) -> BackendCircuit {
     let routed_storage;
     let circuit: &Circuit = match coupling {
         Some(coupling) => {
-            routed_storage = crate::route::route_best(circuit, coupling);
+            routed_storage = route(circuit, coupling);
             &routed_storage
         }
         None => circuit,

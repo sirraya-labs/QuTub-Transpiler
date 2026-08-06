@@ -50,6 +50,62 @@ use crate::ir::{Circuit, Gate, LogicalQubit, PhysicalQubit};
 use crate::ir_optimize::commutes;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+/// A routed circuit paired with the exact index into `circuit.gates`
+/// where the trailing [`restore_identity_mapping`] block -- if any --
+/// begins. Every router in this module computes this for free: it's
+/// just `circuit.gates.len()` at the moment right before that router's
+/// own final `restore_identity_mapping`/`route_to_layout` call, so
+/// there is no reason for code that actually needs the boundary
+/// ([`route_best_no_restore`]) to re-derive it heuristically from gate
+/// *shape* afterward the way [`restoration_swap_count`] does.
+///
+/// That heuristic -- "the trailing run of `Gate::Swap`s is
+/// restoration" -- silently assumes the source circuit's own last real
+/// gate is never itself a `Swap`, and that gates come out in original
+/// program order. Both assumptions can be false: a circuit can
+/// genuinely end in real `Swap`s (e.g. the standard QFT cascade's
+/// trailing bit-reversal, `qft_like`'s own trailing block in this
+/// module's tests), and [`route_sabre`]'s commutation-aware front-layer
+/// scheduling can legitimately emit gates out of original program
+/// order when they provably commute. Either one makes the heuristic
+/// mistake real, load-bearing circuit content for restoration -- which
+/// `route_best_no_restore` would then silently strip. `RoutedCircuit`
+/// sidesteps the guesswork entirely by having each router report its
+/// own boundary directly.
+struct RoutedCircuit {
+    circuit: Circuit,
+    /// Number of gates in `circuit.gates` before the restoration tail;
+    /// `circuit.gates[..restoration_start]` is real routed content,
+    /// `circuit.gates[restoration_start..]` is pure identity-restore
+    /// SWAPs (possibly empty).
+    restoration_start: usize,
+}
+
+impl RoutedCircuit {
+    /// SWAPs among the real, pre-restoration content only -- the
+    /// number [`route_best_no_restore`] actually wants to minimize
+    /// once restoration is going to be discarded regardless (see that
+    /// function's own doc comment on why it can't just reuse
+    /// `route_best`'s total-SWAP comparison).
+    fn routing_swap_count(&self) -> usize {
+        self.circuit.gates[..self.restoration_start]
+            .iter()
+            .filter(|g| matches!(g, Gate::Swap(..)))
+            .count()
+    }
+
+    /// Drops the restoration tail exactly, using the recorded
+    /// boundary rather than re-scanning gate shape.
+    fn strip_restoration(&self) -> Circuit {
+        let mut out = Circuit::new(self.circuit.num_qubits);
+        out.num_clbits = self.circuit.num_clbits;
+        for g in &self.circuit.gates[..self.restoration_start] {
+            out.push(g.clone());
+        }
+        out
+    }
+}
+
 /// Routes `circuit` against `coupling`, returning a new [`Circuit`]
 /// with `Swap`s inserted wherever a two-qubit gate needed one, *and*
 /// a final run of `Swap`s restoring every qubit to its original
@@ -110,6 +166,14 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 /// qubits, with no risk of routing silently swapping control and
 /// target on an asymmetric gate.
 pub fn route(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
+    route_boundary(circuit, coupling).circuit
+}
+
+/// [`route`], but also returns the exact index into the result's
+/// `gates` where the trailing [`restore_identity_mapping`] block
+/// begins -- see [`RoutedCircuit`]'s own doc comment for why this
+/// exists instead of [`restoration_swap_count`]'s heuristic.
+fn route_boundary(circuit: &Circuit, coupling: &CouplingMap) -> RoutedCircuit {
     let num_qubits = circuit.num_qubits;
     let mut logical_to_physical: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
     let mut physical_to_logical: Vec<LogicalQubit> = (0..num_qubits).map(LogicalQubit).collect();
@@ -156,9 +220,10 @@ pub fn route(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         }
     }
 
+    let restoration_start = out.gates.len();
     restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
 
-    out
+    RoutedCircuit { circuit: out, restoration_start }
 }
 
 /// Updates both mapping directions for a `Swap(from, to)` that's about
@@ -854,6 +919,12 @@ const LOOKAHEAD_WEIGHT: f64 = 0.5;
 /// If `coupling.num_qubits() != circuit.num_qubits` -- same
 /// requirement [`route`] implicitly has.
 pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
+    route_lookahead_boundary(circuit, coupling).circuit
+}
+
+/// [`route_lookahead`], but also returns the real/restoration boundary
+/// -- see [`RoutedCircuit`]'s own doc comment.
+fn route_lookahead_boundary(circuit: &Circuit, coupling: &CouplingMap) -> RoutedCircuit {
     let num_qubits = circuit.num_qubits;
     debug_assert_eq!(
         coupling.num_qubits(),
@@ -1056,9 +1127,10 @@ pub fn route_lookahead(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         swap_mapping(&mut logical_to_physical, &mut physical_to_logical, p1, p2);
     }
 
+    let restoration_start = out.gates.len();
     restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
 
-    out
+    RoutedCircuit { circuit: out, restoration_start }
 }
 
 // ---------------------------------------------------------------------
@@ -1314,6 +1386,7 @@ fn sabre_pass(
     logical_to_physical: &mut [PhysicalQubit],
     physical_to_logical: &mut [LogicalQubit],
     mut on_event: impl FnMut(SabreEvent),
+    mut on_frontier: impl FnMut(usize, usize),
     rng_state: &mut u64,
 ) {
     let num_qubits = logical_to_physical.len();
@@ -1462,6 +1535,9 @@ fn sabre_pass(
             .into_iter()
             .map(|gi| (gate_qubits[gi][0], gate_qubits[gi][1]))
             .collect();
+
+        let front_two_qubit_count = front.iter().filter(|&&gi| gate_qubits[gi].len() == 2).count();
+        on_frontier(front_two_qubit_count, extended.len());
 
         let mut best_swap: Option<(PhysicalQubit, PhysicalQubit)> = None;
         let mut best_score = f64::MAX;
@@ -1630,7 +1706,508 @@ fn sabre_pass(
 /// for the same one-shot-per-circuit call [`route_best`] already makes
 /// of every other router, not for a hot loop calling this at high
 /// frequency.
+/// Sweep-only variant of [`route_sabre`] with a caller-supplied trials-
+/// per-seed count instead of the fixed [`SABRE_TRIALS_PER_SEED`]
+/// constant, so a trial-count sensitivity curve can be measured
+/// without hand-editing the constant and recompiling for every point.
+/// Not part of the crate's real public API -- exists purely for the
+/// `sabre_sweep` experiment.
+/// Sweep-only instrumented variant: identical to [`route_sabre_with_trials`]
+/// except it also records `(front_two_qubit_count, extended_set_size)`
+/// at every swap-decision point of whichever trial ends up winning
+/// (fewest total SWAPs) -- i.e. what the frontier actually looked like
+/// during the routing this crate would really ship for this circuit,
+/// not an average over discarded trials.
+pub fn route_sabre_with_frontier_stats(
+    circuit: &Circuit,
+    coupling: &CouplingMap,
+    trials_per_seed: usize,
+) -> (Circuit, Vec<(usize, usize)>) {
+    let num_qubits = circuit.num_qubits;
+
+    let mut fallback = Circuit::new(num_qubits);
+    fallback.num_clbits = circuit.num_clbits;
+    for g in &circuit.gates {
+        fallback.push(g.clone());
+    }
+    if num_qubits <= 1 {
+        return (fallback, Vec::new());
+    }
+
+    let dist = distance_matrix(coupling);
+    let gate_qubits: Vec<Vec<LogicalQubit>> = circuit
+        .gates
+        .iter()
+        .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+        .collect();
+    if gate_qubits.iter().all(|qs| qs.len() < 2) {
+        return (fallback, Vec::new());
+    }
+    let reversed_gate_qubits: Vec<Vec<LogicalQubit>> = gate_qubits.iter().rev().cloned().collect();
+    let reversed_gates: Vec<Gate> = circuit.gates.iter().rev().cloned().collect();
+
+    let identity_seed: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
+    let greedy_seed = choose_initial_layout(circuit, coupling);
+    let configs: [(&Vec<PhysicalQubit>, usize); 3] = [
+        (&identity_seed, 0),
+        (&identity_seed, SABRE_LAYOUT_ITERATIONS),
+        (&greedy_seed, SABRE_LAYOUT_ITERATIONS),
+    ];
+
+    let mut best: Option<Circuit> = None;
+    let mut best_swaps = usize::MAX;
+    let mut best_stats: Vec<(usize, usize)> = Vec::new();
+
+    for (seed_idx, (seed_layout, layout_iterations)) in configs.iter().enumerate() {
+        for trial in 0..trials_per_seed {
+            let mut rng_state: u64 = (0x9E3779B97F4A7C15u64
+                ^ ((seed_idx as u64 + 1) << 40)
+                ^ (trial as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                | 1;
+
+            let mut l2p: Vec<PhysicalQubit> = (*seed_layout).clone();
+            let mut p2l = vec![LogicalQubit(0); num_qubits];
+            for (lq, &pq) in l2p.iter().enumerate() {
+                p2l[pq.0] = LogicalQubit(lq);
+            }
+
+            for _ in 0..*layout_iterations {
+                sabre_pass(
+                    &circuit.gates, &gate_qubits, coupling, &dist,
+                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                );
+                sabre_pass(
+                    &reversed_gates, &reversed_gate_qubits, coupling, &dist,
+                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                );
+            }
+
+            let mut out = Circuit::new(num_qubits);
+            out.num_clbits = circuit.num_clbits;
+            let mut cur_l2p: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
+            let mut cur_p2l: Vec<LogicalQubit> = (0..num_qubits).map(LogicalQubit).collect();
+            route_to_layout(&mut out, &mut cur_l2p, &mut cur_p2l, &p2l, coupling);
+
+            let mut trial_stats: Vec<(usize, usize)> = Vec::new();
+            sabre_pass(
+                &circuit.gates,
+                &gate_qubits,
+                coupling,
+                &dist,
+                &mut cur_l2p,
+                &mut cur_p2l,
+                |evt| match evt {
+                    SabreEvent::Execute { gate_index, layout } => {
+                        let g = &circuit.gates[gate_index];
+                        let qs = &gate_qubits[gate_index];
+                        let remapped = if qs.len() < 2 {
+                            remap_single(g, layout[qs[0].0].0)
+                        } else {
+                            remap_two(g, layout[qs[0].0].0, layout[qs[1].0].0)
+                        };
+                        out.push(remapped);
+                    }
+                    SabreEvent::Swap(p1, p2) => {
+                        out.push(Gate::Swap(p1.0, p2.0));
+                    }
+                },
+                |front_w, ext_w| trial_stats.push((front_w, ext_w)),
+                &mut rng_state,
+            );
+
+            restore_identity_mapping(&mut out, &mut cur_l2p, &mut cur_p2l, coupling);
+
+            let total = swap_count(&out);
+            if total < best_swaps {
+                best_swaps = total;
+                best_stats = trial_stats;
+                best = Some(out);
+            }
+        }
+    }
+
+    (best.expect("at least one trial always runs"), best_stats)
+}
+
+/// Scores a hypothetical layout (not necessarily the committed one) by
+/// the same normalized front+extended-set distance formula
+/// [`sabre_pass`]'s swap loop uses, factored out so [`sabre_pass2`]'s
+/// depth-2 search can call it twice per candidate first-swap (once per
+/// hypothetical second swap) without duplicating the formula.
+fn score_layout(
+    l2p: &[PhysicalQubit],
+    front: &[usize],
+    gate_qubits: &[Vec<LogicalQubit>],
+    dist: &[Vec<usize>],
+    extended: &[(LogicalQubit, LogicalQubit)],
+) -> f64 {
+    let mut front_score = 0.0f64;
+    let mut front_count = 0usize;
+    for &gi in front {
+        let qs = &gate_qubits[gi];
+        if qs.len() == 2 {
+            front_score += dist[l2p[qs[0].0].0][l2p[qs[1].0].0] as f64;
+            front_count += 1;
+        }
+    }
+    let mut ext_score = 0.0f64;
+    for &(a_lq, b_lq) in extended {
+        ext_score += dist[l2p[a_lq.0].0][l2p[b_lq.0].0] as f64;
+    }
+    front_score / front_count.max(1) as f64 + LOOKAHEAD_WEIGHT * (ext_score / extended.len().max(1) as f64)
+}
+
+/// Identical to [`sabre_pass`] except the swap-selection step scores
+/// each first candidate swap by its *best available two-swap
+/// continuation* (search depth 2), not just its own immediate score --
+/// then commits only that first swap and re-plans from scratch, the
+/// same "search deeper, act shallow" structure a beam search uses one
+/// ply at a time. Everything else (front-layer execution, extended-set
+/// construction, decay, jitter) is unchanged from `sabre_pass`.
+///
+/// Cost: for each of the (typically small, see frontier-width
+/// diagnostic) first-level candidate swaps, a second full candidate
+/// search is run from the hypothetical post-swap layout -- roughly
+/// `O(candidates^2)` scoring evaluations per swap decision instead of
+/// `O(candidates)`, which is why this is a separate function rather
+/// than folded into `sabre_pass` itself.
+#[allow(clippy::too_many_arguments)]
+fn sabre_pass2(
+    gates: &[Gate],
+    gate_qubits: &[Vec<LogicalQubit>],
+    coupling: &CouplingMap,
+    dist: &[Vec<usize>],
+    logical_to_physical: &mut [PhysicalQubit],
+    physical_to_logical: &mut [LogicalQubit],
+    mut on_event: impl FnMut(SabreEvent),
+    rng_state: &mut u64,
+) {
+    let num_qubits = logical_to_physical.len();
+    if gate_qubits.is_empty() {
+        return;
+    }
+    let total_gates = gate_qubits.len();
+
+    let predecessors = build_commutation_predecessors(gates, gate_qubits);
+    let mut pred_remaining: Vec<usize> = predecessors.iter().map(|p| p.len()).collect();
+    let mut dependency_successors: Vec<Vec<usize>> = vec![Vec::new(); total_gates];
+    for (gi, preds) in predecessors.iter().enumerate() {
+        for &p in preds {
+            dependency_successors[p].push(gi);
+        }
+    }
+
+    let successors = build_successors(gate_qubits, num_qubits);
+    let mut executed = vec![false; total_gates];
+    let mut remaining = total_gates;
+
+    let mut front: Vec<usize> = (0..total_gates).filter(|&gi| pred_remaining[gi] == 0).collect();
+
+    let mut decay = vec![1.0f64; num_qubits];
+    let mut swaps_since_reset = 0usize;
+
+    while remaining > 0 {
+        let mut progressed = true;
+        while progressed {
+            progressed = false;
+            let mut newly_executed: Vec<usize> = Vec::new();
+            for &gi in &front {
+                if executed[gi] {
+                    continue;
+                }
+                let qs = &gate_qubits[gi];
+                let executable = if qs.len() < 2 {
+                    true
+                } else {
+                    coupling.is_adjacent(
+                        logical_to_physical[qs[0].0].0,
+                        logical_to_physical[qs[1].0].0,
+                    )
+                };
+                if executable {
+                    on_event(SabreEvent::Execute {
+                        gate_index: gi,
+                        layout: logical_to_physical,
+                    });
+                    executed[gi] = true;
+                    remaining -= 1;
+                    newly_executed.push(gi);
+                    progressed = true;
+                }
+            }
+            if progressed {
+                front.retain(|&gi| !executed[gi]);
+                let mut candidates: BTreeSet<usize> = BTreeSet::new();
+                for &gi in &newly_executed {
+                    for &s in &dependency_successors[gi] {
+                        if executed[s] {
+                            continue;
+                        }
+                        pred_remaining[s] -= 1;
+                        if pred_remaining[s] == 0 {
+                            candidates.insert(s);
+                        }
+                    }
+                }
+                for gi in candidates {
+                    if !executed[gi] && !front.contains(&gi) {
+                        front.push(gi);
+                    }
+                }
+            }
+        }
+
+        if remaining == 0 {
+            break;
+        }
+
+        let mut touched_physical: BTreeSet<PhysicalQubit> = BTreeSet::new();
+        for &gi in &front {
+            for &q in &gate_qubits[gi] {
+                touched_physical.insert(logical_to_physical[q.0]);
+            }
+        }
+        let mut candidate_swaps: BTreeSet<(PhysicalQubit, PhysicalQubit)> = BTreeSet::new();
+        for &p in &touched_physical {
+            for n in coupling.neighbors(p.0) {
+                let n = PhysicalQubit(n);
+                candidate_swaps.insert(if p.0 < n.0 { (p, n) } else { (n, p) });
+            }
+        }
+
+        let mut visited: BTreeSet<usize> = front.iter().copied().collect();
+        let mut bfs_queue: VecDeque<usize> = VecDeque::new();
+        for &gi in &front {
+            for &s in &successors[gi] {
+                if !executed[s] && visited.insert(s) {
+                    bfs_queue.push_back(s);
+                }
+            }
+        }
+        let mut extended_gates: Vec<usize> = Vec::new();
+        while let Some(gi) = bfs_queue.pop_front() {
+            if extended_gates.len() >= SABRE_EXTENDED_SET_SIZE {
+                break;
+            }
+            if gate_qubits[gi].len() == 2 {
+                extended_gates.push(gi);
+            }
+            for &s in &successors[gi] {
+                if !executed[s] && visited.insert(s) {
+                    bfs_queue.push_back(s);
+                }
+            }
+        }
+        let extended: Vec<(LogicalQubit, LogicalQubit)> = extended_gates
+            .into_iter()
+            .map(|gi| (gate_qubits[gi][0], gate_qubits[gi][1]))
+            .collect();
+
+        // Depth-2 search: for each first candidate, apply it to a
+        // scratch layout, regenerate candidates from the resulting
+        // touched-physical set, and take the *best* achievable
+        // second-swap score as that first candidate's value. Decay and
+        // jitter are applied only to the first (actually committed)
+        // swap, matching `sabre_pass`'s own semantics for what decay is
+        // for -- spreading real, committed SWAP usage across physical
+        // qubits, not penalizing a hypothetical second move that's
+        // never actually taken.
+        let mut best_swap: Option<(PhysicalQubit, PhysicalQubit)> = None;
+        let mut best_score = f64::MAX;
+        for &(p1, p2) in &candidate_swaps {
+            let mut l2p_1 = logical_to_physical.to_vec();
+            let mut p2l_1 = physical_to_logical.to_vec();
+            swap_mapping(&mut l2p_1, &mut p2l_1, p1, p2);
+
+            let mut touched_2: BTreeSet<PhysicalQubit> = BTreeSet::new();
+            for &gi in &front {
+                for &q in &gate_qubits[gi] {
+                    touched_2.insert(l2p_1[q.0]);
+                }
+            }
+            let mut candidate_swaps_2: BTreeSet<(PhysicalQubit, PhysicalQubit)> = BTreeSet::new();
+            for &p in &touched_2 {
+                for n in coupling.neighbors(p.0) {
+                    let n = PhysicalQubit(n);
+                    candidate_swaps_2.insert(if p.0 < n.0 { (p, n) } else { (n, p) });
+                }
+            }
+
+            let mut best_continuation = score_layout(&l2p_1, &front, gate_qubits, dist, &extended);
+            for &(p3, p4) in &candidate_swaps_2 {
+                let mut l2p_2 = l2p_1.clone();
+                let mut p2l_2 = p2l_1.clone();
+                swap_mapping(&mut l2p_2, &mut p2l_2, p3, p4);
+                let s = score_layout(&l2p_2, &front, gate_qubits, dist, &extended);
+                if s < best_continuation {
+                    best_continuation = s;
+                }
+            }
+
+            let decay_factor = decay[p1.0].max(decay[p2.0]);
+            let jitter = (next_xorshift(rng_state) as f64 / u64::MAX as f64) * SABRE_JITTER_SCALE;
+            let score = decay_factor * best_continuation + jitter;
+
+            let better = score < best_score
+                || (score == best_score && best_swap.map_or(true, |bp| (p1, p2) < bp));
+            if better {
+                best_score = score;
+                best_swap = Some((p1, p2));
+            }
+        }
+
+        let (p1, p2) = best_swap.expect(
+            "a blocked two-qubit front-layer gate's physical qubits have at least one \
+             coupling-adjacent neighbor to swap with, since coupling is connected",
+        );
+        on_event(SabreEvent::Swap(p1, p2));
+        swap_mapping(logical_to_physical, physical_to_logical, p1, p2);
+        decay[p1.0] += SABRE_DECAY_INCREMENT;
+        decay[p2.0] += SABRE_DECAY_INCREMENT;
+        swaps_since_reset += 1;
+        if swaps_since_reset >= SABRE_DECAY_RESET_INTERVAL {
+            for d in decay.iter_mut() {
+                *d = 1.0;
+            }
+            swaps_since_reset = 0;
+        }
+    }
+}
+
+/// [`route_sabre_with_trials`], but using [`sabre_pass2`]'s depth-2
+/// swap search for the final commit pass (the one that actually emits
+/// gates) instead of `sabre_pass`'s depth-1 greedy choice. The layout-
+/// refinement sweeps (forward/backward, before the commit pass) still
+/// use the cheaper depth-1 `sabre_pass`, since they only ever produce a
+/// *candidate initial layout* to be physically realized and re-routed
+/// by the commit pass anyway -- spending depth-2 search there wouldn't
+/// change what gets emitted, only how the (already realization-costed)
+/// candidate layout was chosen.
+pub fn route_sabre2_with_trials(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> Circuit {
+    route_sabre2_impl(circuit, coupling, trials_per_seed).circuit
+}
+
+/// [`route_sabre2_with_trials`]'s implementation, returning the
+/// real/restoration boundary alongside the circuit -- see
+/// [`RoutedCircuit`]'s own doc comment.
+fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> RoutedCircuit {
+    let num_qubits = circuit.num_qubits;
+
+    let mut fallback = Circuit::new(num_qubits);
+    fallback.num_clbits = circuit.num_clbits;
+    for g in &circuit.gates {
+        fallback.push(g.clone());
+    }
+    if num_qubits <= 1 {
+        let restoration_start = fallback.gates.len();
+        return RoutedCircuit { circuit: fallback, restoration_start };
+    }
+
+    let dist = distance_matrix(coupling);
+    let gate_qubits: Vec<Vec<LogicalQubit>> = circuit
+        .gates
+        .iter()
+        .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+        .collect();
+    if gate_qubits.iter().all(|qs| qs.len() < 2) {
+        let restoration_start = fallback.gates.len();
+        return RoutedCircuit { circuit: fallback, restoration_start };
+    }
+    let reversed_gate_qubits: Vec<Vec<LogicalQubit>> = gate_qubits.iter().rev().cloned().collect();
+    let reversed_gates: Vec<Gate> = circuit.gates.iter().rev().cloned().collect();
+
+    let identity_seed: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
+    let greedy_seed = choose_initial_layout(circuit, coupling);
+    let configs: [(&Vec<PhysicalQubit>, usize); 3] = [
+        (&identity_seed, 0),
+        (&identity_seed, SABRE_LAYOUT_ITERATIONS),
+        (&greedy_seed, SABRE_LAYOUT_ITERATIONS),
+    ];
+
+    let mut best: Option<RoutedCircuit> = None;
+    let mut best_swaps = usize::MAX;
+
+    for (seed_idx, (seed_layout, layout_iterations)) in configs.iter().enumerate() {
+        for trial in 0..trials_per_seed {
+            let mut rng_state: u64 = (0x9E3779B97F4A7C15u64
+                ^ ((seed_idx as u64 + 1) << 40)
+                ^ (trial as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+                | 1;
+
+            let mut l2p: Vec<PhysicalQubit> = (*seed_layout).clone();
+            let mut p2l = vec![LogicalQubit(0); num_qubits];
+            for (lq, &pq) in l2p.iter().enumerate() {
+                p2l[pq.0] = LogicalQubit(lq);
+            }
+
+            for _ in 0..*layout_iterations {
+                sabre_pass(
+                    &circuit.gates, &gate_qubits, coupling, &dist,
+                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                );
+                sabre_pass(
+                    &reversed_gates, &reversed_gate_qubits, coupling, &dist,
+                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                );
+            }
+
+            let mut out = Circuit::new(num_qubits);
+            out.num_clbits = circuit.num_clbits;
+            let mut cur_l2p: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
+            let mut cur_p2l: Vec<LogicalQubit> = (0..num_qubits).map(LogicalQubit).collect();
+            route_to_layout(&mut out, &mut cur_l2p, &mut cur_p2l, &p2l, coupling);
+
+            sabre_pass2(
+                &circuit.gates,
+                &gate_qubits,
+                coupling,
+                &dist,
+                &mut cur_l2p,
+                &mut cur_p2l,
+                |evt| match evt {
+                    SabreEvent::Execute { gate_index, layout } => {
+                        let g = &circuit.gates[gate_index];
+                        let qs = &gate_qubits[gate_index];
+                        let remapped = if qs.len() < 2 {
+                            remap_single(g, layout[qs[0].0].0)
+                        } else {
+                            remap_two(g, layout[qs[0].0].0, layout[qs[1].0].0)
+                        };
+                        out.push(remapped);
+                    }
+                    SabreEvent::Swap(p1, p2) => {
+                        out.push(Gate::Swap(p1.0, p2.0));
+                    }
+                },
+                &mut rng_state,
+            );
+
+            let restoration_start = out.gates.len();
+            restore_identity_mapping(&mut out, &mut cur_l2p, &mut cur_p2l, coupling);
+
+            let total = swap_count(&out);
+            if total < best_swaps {
+                best_swaps = total;
+                best = Some(RoutedCircuit { circuit: out, restoration_start });
+            }
+        }
+    }
+
+    best.expect("at least one trial always runs")
+}
+
+pub fn route_sabre_with_trials(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> Circuit {
+    route_sabre_impl(circuit, coupling, trials_per_seed).circuit
+}
+
 pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
+    route_sabre_impl(circuit, coupling, SABRE_TRIALS_PER_SEED).circuit
+}
+
+/// [`route_sabre`]/[`route_sabre_with_trials`]'s shared implementation,
+/// returning the real/restoration boundary alongside the circuit -- see
+/// [`RoutedCircuit`]'s own doc comment.
+fn route_sabre_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> RoutedCircuit {
     let num_qubits = circuit.num_qubits;
     debug_assert_eq!(
         coupling.num_qubits(),
@@ -1644,7 +2221,10 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         fallback.push(g.clone());
     }
     if num_qubits <= 1 {
-        return fallback;
+        // Identity mapping throughout: nothing was ever routed, so
+        // every gate here is real content, none of it restoration.
+        let restoration_start = fallback.gates.len();
+        return RoutedCircuit { circuit: fallback, restoration_start };
     }
 
     let dist = distance_matrix(coupling);
@@ -1658,7 +2238,8 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         // physical qubit is already exactly where its logical qubit
         // needs it (identity mapping), so the unmodified circuit is
         // already a valid answer.
-        return fallback;
+        let restoration_start = fallback.gates.len();
+        return RoutedCircuit { circuit: fallback, restoration_start };
     }
     let reversed_gate_qubits: Vec<Vec<LogicalQubit>> = gate_qubits.iter().rev().cloned().collect();
     // Reversed `Gate`s to match `reversed_gate_qubits`, so
@@ -1697,11 +2278,11 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         (&greedy_seed, SABRE_LAYOUT_ITERATIONS),
     ];
 
-    let mut best: Option<Circuit> = None;
+    let mut best: Option<RoutedCircuit> = None;
     let mut best_swaps = usize::MAX;
 
     for (seed_idx, (seed_layout, layout_iterations)) in configs.iter().enumerate() {
-        for trial in 0..SABRE_TRIALS_PER_SEED {
+        for trial in 0..trials_per_seed {
             let mut rng_state: u64 = (0x9E3779B97F4A7C15u64
                 ^ ((seed_idx as u64 + 1) << 40)
                 ^ (trial as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
@@ -1722,6 +2303,7 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
                     &mut l2p,
                     &mut p2l,
                     |_| {},
+                    |_, _| {},
                     &mut rng_state,
                 );
                 sabre_pass(
@@ -1732,6 +2314,7 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
                     &mut l2p,
                     &mut p2l,
                     |_| {},
+                    |_, _| {},
                     &mut rng_state,
                 );
             }
@@ -1770,15 +2353,17 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
                         out.push(Gate::Swap(p1.0, p2.0));
                     }
                 },
+                |_, _| {},
                 &mut rng_state,
             );
 
+            let restoration_start = out.gates.len();
             restore_identity_mapping(&mut out, &mut cur_l2p, &mut cur_p2l, coupling);
 
             let total = swap_count(&out);
             if total < best_swaps {
                 best_swaps = total;
-                best = Some(out);
+                best = Some(RoutedCircuit { circuit: out, restoration_start });
             }
         }
     }
@@ -1801,17 +2386,31 @@ fn swap_count(c: &Circuit) -> usize {
 /// block every router in this module appends via
 /// [`restore_identity_mapping`], after every real gate has already
 /// been scheduled, purely to walk physical qubits back to their
-/// starting wires before returning).
+/// starting wires before returning) -- inferred from `routed`'s gate
+/// *shape* alone: "everything after the last non-`Swap` gate is
+/// restoration."
 ///
-/// The split is exact, not a heuristic, for any circuit produced by
-/// this module's own routers: `restore_identity_mapping`/
-/// `route_to_layout` only ever runs once, as the very last step, so
-/// every SWAP it emits necessarily lands after the last non-SWAP gate
-/// in program order -- and every SWAP the main routing loop inserts is
-/// always immediately followed (possibly after more SWAPs) by the real
-/// gate it was inserted to enable, so it always lands at or before that
-/// index. `(routing, restoration)` -- `routing + restoration ==
-/// swap_count(routed)`.
+/// # This is a heuristic, not exact -- know its failure modes
+/// The shape-only inference silently assumes two things that don't
+/// always hold: (1) the *source* circuit's own last real gate is never
+/// itself a `Swap`, and (2) gates come out of the router in original
+/// program order. Both can be false -- a circuit can genuinely end in
+/// real `Swap`s (the standard QFT cascade's trailing bit-reversal is
+/// exactly this shape; see `qft_like` in this module's own tests), and
+/// [`route_sabre`]'s commutation-aware front-layer scheduling can
+/// legitimately emit gates out of original program order when they
+/// provably commute. On either circuit, this function can mistake real,
+/// load-bearing circuit content for restoration.
+///
+/// For any caller that has the routed circuit fresh from one of this
+/// module's own routers (rather than receiving an opaque `Circuit`
+/// after the fact) and actually needs an exact split -- as opposed to
+/// just an approximate cost estimate, which is this function's only
+/// remaining use in this module -- use the router's own
+/// [`RoutedCircuit`]-returning `*_boundary`/`*_impl` form instead,
+/// which reports the boundary directly rather than inferring it.
+/// [`route_best_no_restore`] does exactly this, for exactly this
+/// reason.
 ///
 /// Degenerate case: if `routed` is empty or contains only `Swap`s (no
 /// real gate at all -- never produced by this module's own routers on
@@ -1837,11 +2436,11 @@ pub fn restoration_swap_count(routed: &Circuit) -> (usize, usize) {
 }
 
 /// Routes `circuit` against `coupling` via [`route`], [`route_lookahead`],
-/// and [`route_sabre`], and returns whichever result used fewest
-/// `Swap`s.
+/// [`route_sabre`], and [`route_sabre2_with_trials`], and returns
+/// whichever result used fewest `Swap`s.
 ///
-/// This exists because none of the three is a strict improvement on
-/// the other two in every case:
+/// This exists because none of the candidates is a strict improvement
+/// on the others in every case:
 /// - `route_lookahead`'s initial-layout selection is a one-shot greedy
 ///   heuristic that scores a *candidate layout's* quality but never
 ///   prices in what it costs to physically *reach* that layout (see
@@ -1859,6 +2458,15 @@ pub fn restoration_swap_count(routed: &Circuit) -> (usize, usize) {
 ///   and aren't guaranteed to match it exactly on every run (jitter
 ///   means a specific trial could in principle land one SWAP worse
 ///   before this function's own selection catches it).
+/// - `route_sabre2_with_trials`'s depth-2 commit-pass search costs
+///   roughly `O(candidates^2)` scoring evaluations per swap decision
+///   instead of `route_sabre`'s `O(candidates)` (see `sabre_pass2`'s
+///   own doc comment) for a benefit that isn't guaranteed on every
+///   circuit -- looking two swaps ahead can still commit to a first
+///   swap that's locally optimal-looking but globally no better (or
+///   occasionally worse, before jitter/trial averaging) than the
+///   depth-1 choice, so it's compared here rather than assumed to
+///   dominate.
 /// - `route`'s single-gate greedy walk has no failure mode beyond what
 ///   each individual gate needs, so it's always a safe floor, just
 ///   usually not the best available answer.
@@ -1903,6 +2511,17 @@ pub fn route_best(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     let naive = route(circuit, coupling);
     let smart = route_lookahead(circuit, coupling);
     let sabre = route_sabre(circuit, coupling);
+    // `route_sabre2_with_trials`'s depth-2 commit-pass search (see its
+    // own doc comment) is strictly more expensive per trial than
+    // `route_sabre`'s depth-1 pass, never cheaper, so it's added here
+    // as one more candidate scored by `swap_count` -- same pattern as
+    // every other router in this comparison -- rather than replacing
+    // `route_sabre` outright: nothing about depth-2 search guarantees
+    // it beats depth-1 on every circuit (a deeper look ahead can still
+    // commit to a locally-better swap that's globally worse), so this
+    // function's own "let swap_count decide" contract is exactly what
+    // settles that question per-circuit instead of assuming an answer.
+    let sabre2 = route_sabre2_with_trials(circuit, coupling, SABRE_TRIALS_PER_SEED);
     let mut best = naive;
     if swap_count(&smart) < swap_count(&best) {
         best = smart;
@@ -1910,12 +2529,75 @@ pub fn route_best(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
     if swap_count(&sabre) < swap_count(&best) {
         best = sabre;
     }
+    if swap_count(&sabre2) < swap_count(&best) {
+        best = sabre2;
+    }
     if let Some(qft_routed) = route_qft(circuit, coupling) {
         if swap_count(&qft_routed) < swap_count(&best) {
             best = qft_routed;
         }
     }
     best
+}
+
+/// [`route_best`], but for callers who don't need the returned
+/// circuit's physical layout to match its logical layout once the
+/// circuit is done -- the common case being a circuit that ends in
+/// `Gate::Measure`s, since a `Measure` already records whichever
+/// physical wire its qubit was on *at that point in program order*
+/// (see `Gate::Measure`'s own doc comment), not whatever the final
+/// layout ends up being. For such a caller, every SWAP
+/// `restore_identity_mapping` appends after the last real gate is pure
+/// cost with no effect on the result -- exactly the "restoration tax"
+/// `restoration_swap_count` measures (concentrated as high as ~29% of
+/// a circuit's SWAPs on some of this crate's own benchmarks).
+///
+/// Callers that don't fit that description -- composing this circuit's
+/// output with a second circuit fragment back-to-back, or anything
+/// else that relies on physical qubit `i` meaning logical qubit `i` at
+/// the end -- should use [`route_best`] instead, which keeps that
+/// guarantee.
+///
+/// # Candidate selection differs from `route_best`
+/// `route_best` picks the candidate with fewest *total* SWAPs, which
+/// is the right comparison when every candidate pays its own
+/// restoration cost. Here, restoration SWAPs are about to be discarded
+/// regardless of which candidate has more of them, so candidates are
+/// compared by [`RoutedCircuit::routing_swap_count`] instead -- a
+/// candidate that has fewer total SWAPs than another purely because it
+/// front-loaded more of its cost into (soon to be dropped) restoration
+/// is not actually the better choice once restoration is gone, and
+/// `route_best`'s own selection would silently pick it anyway if this
+/// function just stripped `route_best`'s output instead of re-selecting.
+///
+/// # Why this doesn't use `restoration_swap_count`/`strip_restoration_swaps`
+/// Those two infer the real/restoration boundary heuristically, from
+/// gate *shape* (the trailing run of `Gate::Swap`s), which silently
+/// assumes the source circuit's own last real gate is never itself a
+/// `Swap` and that gates come out in original program order -- both
+/// false in general (a circuit can genuinely end in real `Swap`s, e.g.
+/// the standard QFT cascade's trailing bit-reversal, and
+/// [`route_sabre`]'s commutation-aware scheduling can reorder gates).
+/// Getting this wrong here doesn't just miscount -- it makes this
+/// function select a worse-but-mislabeled candidate *and* then strip
+/// real circuit content from it, silently corrupting the result. Each
+/// candidate below instead reports its own exact boundary via
+/// [`RoutedCircuit`], so no inference is needed.
+pub fn route_best_no_restore(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
+    let mut candidates = vec![
+        route_boundary(circuit, coupling),
+        route_lookahead_boundary(circuit, coupling),
+        route_sabre_impl(circuit, coupling, SABRE_TRIALS_PER_SEED),
+        route_sabre2_impl(circuit, coupling, SABRE_TRIALS_PER_SEED),
+    ];
+    if let Some(qft_routed) = route_qft_boundary(circuit, coupling) {
+        candidates.push(qft_routed);
+    }
+    let best = candidates
+        .iter()
+        .min_by_key(|c| c.routing_swap_count())
+        .expect("candidates always has at least the four unconditional routers pushed above");
+    best.strip_restoration()
 }
 
 // ---------------------------------------------------------------------
@@ -2138,13 +2820,26 @@ fn emit_qft_cascade(n: usize, angles: &QftAngles, path: &[PhysicalQubit]) -> Vec
 /// If `coupling.num_qubits() != circuit.num_qubits` -- same
 /// requirement every other router in this module has.
 pub fn route_qft(circuit: &Circuit, coupling: &CouplingMap) -> Option<Circuit> {
+    route_qft_boundary(circuit, coupling).map(|rc| rc.circuit)
+}
+
+/// [`route_qft`], but also returns the real/restoration boundary -- see
+/// [`RoutedCircuit`]'s own doc comment. Note that unlike the general
+/// routers, `route_qft`'s own trailing `Swap`s from
+/// [`emit_qft_cascade`] are *not* at risk of being mistaken for
+/// restoration here, since [`emit_qft_cascade`]'s own last emitted gate
+/// is always a single-qubit `H` (its outer loop's final iteration has
+/// an empty inner loop) -- but this function still reports the real
+/// boundary explicitly rather than relying on that fact, for the same
+/// reason every other router in this module does.
+fn route_qft_boundary(circuit: &Circuit, coupling: &CouplingMap) -> Option<RoutedCircuit> {
     let n = circuit.num_qubits;
     let angles = detect_qft_cascade(circuit)?;
 
     if n == 0 {
         let mut out = Circuit::new(0);
         out.num_clbits = circuit.num_clbits;
-        return Some(out);
+        return Some(RoutedCircuit { circuit: out, restoration_start: 0 });
     }
     debug_assert_eq!(
         coupling.num_qubits(),
@@ -2186,9 +2881,10 @@ pub fn route_qft(circuit: &Circuit, coupling: &CouplingMap) -> Option<Circuit> {
     // this function's doc comment for why that (not a tracked replay
     // of the cascade's own Swaps) is the correct mapping to restore
     // identity from.
+    let restoration_start = out.gates.len();
     restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
 
-    Some(out)
+    Some(RoutedCircuit { circuit: out, restoration_start })
 }
 
 fn remap_single(gate: &Gate, new_q: usize) -> Gate {
@@ -2747,6 +3443,166 @@ mod tests {
         let coupling = CouplingMap::heavy_hex_for(10);
         let routed = route_best(&c, &coupling);
         assert_eq!(swap_count(&routed), 0, "routed: {:?}", routed.gates);
+    }
+
+    #[test]
+    fn route_best_no_restore_never_exceeds_route_best_swap_count() {
+        let cases: Vec<(Circuit, CouplingMap)> = vec![
+            (qft_like(8), CouplingMap::heavy_hex_for(8)),
+            (qft_like(12), CouplingMap::heavy_hex_for(12)),
+            {
+                let mut c = Circuit::new(8);
+                for i in 0..8 {
+                    for j in (i + 1)..8 {
+                        c.push(Gate::Cx(i, j));
+                    }
+                }
+                (c, CouplingMap::heavy_hex_for(8))
+            },
+        ];
+        for (c, coupling) in &cases {
+            let with_restore = swap_count(&route_best(c, coupling));
+            let no_restore = swap_count(&route_best_no_restore(c, coupling));
+            assert!(
+                no_restore <= with_restore,
+                "route_best_no_restore ({}) should never need more swaps than \
+                 route_best ({}), since it's free to reuse route_best's own \
+                 candidates minus their trailing restoration block",
+                no_restore,
+                with_restore
+            );
+        }
+    }
+
+    #[test]
+    fn route_best_no_restore_output_has_no_restoration_swaps_left() {
+        // By construction (RoutedCircuit::strip_restoration truncates
+        // right at the winning candidate's own recorded boundary),
+        // route_best_no_restore's own output should never itself
+        // contain a trailing restoration block -- confirmed here via
+        // restoration_swap_count directly, rather than just trusting
+        // the doc comment. This circuit has no real trailing `Swap`s
+        // of its own (all-to-all `Cx`, not a QFT), so
+        // restoration_swap_count's shape-based heuristic is safe to
+        // use for this check -- see its own doc comment for the cases
+        // where it isn't.
+        let mut c = Circuit::new(8);
+        for i in 0..8 {
+            for j in (i + 1)..8 {
+                c.push(Gate::Cx(i, j));
+            }
+        }
+        let coupling = CouplingMap::heavy_hex_for(8);
+        let routed = route_best_no_restore(&c, &coupling);
+        let (_, restoration) = restoration_swap_count(&routed);
+        assert_eq!(
+            restoration, 0,
+            "route_best_no_restore's own output must never contain a trailing \
+             restoration block, routed: {:?}",
+            routed.gates
+        );
+    }
+
+    /// Test-only mirror of `route_best_no_restore`'s own candidate
+    /// selection, except it hands back the winning [`RoutedCircuit`]
+    /// itself -- real routed content *and* its real restoration tail,
+    /// as computed by whichever router actually won -- instead of just
+    /// the already-stripped `Circuit` the public function returns. See
+    /// `route_best_no_restore_action_matches_original_once_restored_back`
+    /// for why the test needs this instead of reconstructing a mapping
+    /// on its own.
+    fn route_best_no_restore_boundary(circuit: &Circuit, coupling: &CouplingMap) -> RoutedCircuit {
+        let mut candidates = vec![
+            route_boundary(circuit, coupling),
+            route_lookahead_boundary(circuit, coupling),
+            route_sabre_impl(circuit, coupling, SABRE_TRIALS_PER_SEED),
+            route_sabre2_impl(circuit, coupling, SABRE_TRIALS_PER_SEED),
+        ];
+        if let Some(qft_routed) = route_qft_boundary(circuit, coupling) {
+            candidates.push(qft_routed);
+        }
+        candidates
+            .into_iter()
+            .min_by_key(|c| c.routing_swap_count())
+            .expect("candidates always has at least the four unconditional routers pushed above")
+    }
+
+    #[test]
+    fn route_best_no_restore_action_matches_original_once_restored_back() {
+        // route_best_no_restore's whole point is to skip the trailing
+        // identity-restore swaps, so its output's final physical
+        // layout is *not* identity -- a direct fidelity comparison
+        // against `circuit` (the pattern every other preserves_action
+        // test in this file uses, which assumes identity at the end)
+        // isn't the right check here.
+        //
+        // This test used to replay `no_restore`'s own Swaps from
+        // identity via generic `swap_mapping` bookkeeping to guess
+        // whatever layout it left qubits on, then restore identity from
+        // *that* guessed layout. That's exactly the heuristic
+        // `route_qft_boundary`'s own doc comment (see its "Why step 5
+        // doesn't track the cascade's own Swaps" section) warns is
+        // invalid for a `route_qft` winner: `emit_qft_cascade`'s
+        // embedded Swaps are not ordinary data relocations, and naively
+        // replaying them concludes an "exactly reversed" mapping
+        // relative to the circuit's real action -- restoring identity
+        // from that wrong mapping then silently corrupts the result.
+        // That's exactly what this test used to catch, as a false
+        // positive: ~2% fidelity on `qft_like(8)`, whose `route_best`
+        // winner is `route_qft`.
+        //
+        // So instead of reconstructing a mapping at all, mirror
+        // `route_best_no_restore`'s own selection
+        // (`route_best_no_restore_boundary` above) to get the winning
+        // `RoutedCircuit` directly. Its restoration tail was already
+        // appended by the router that produced it, using that router's
+        // own correct, non-heuristic bookkeeping -- for `route_qft`
+        // that's the closed-form `path_physical_to_logical` mapping,
+        // not a replay of its cascade Swaps. Re-appending that exact
+        // tail to the stripped circuit is therefore guaranteed
+        // action-preserving by construction, for every candidate.
+        let cases: Vec<(Circuit, CouplingMap)> = vec![
+            (qft_like(8), CouplingMap::heavy_hex_for(8)),
+            {
+                let mut c = Circuit::new(6);
+                for q in 0..5 {
+                    c.push(Gate::Cx(q, (q + 3) % 6));
+                }
+                (c, CouplingMap::heavy_hex_for(6))
+            },
+        ];
+        for (c, coupling) in &cases {
+            let winner = route_best_no_restore_boundary(c, coupling);
+            let no_restore = winner.strip_restoration();
+            assert_eq!(
+                no_restore.gates,
+                route_best_no_restore(c, coupling).gates,
+                "test's mirrored selection must agree with the real route_best_no_restore"
+            );
+
+            let mut restored = no_restore.clone();
+            for g in &winner.circuit.gates[winner.restoration_start..] {
+                restored.push(g.clone());
+            }
+
+            let mut direct = randomized_register(c.num_qubits);
+            let mut restored_reg = direct.clone();
+            for g in &c.gates {
+                apply_gate(&mut direct, g);
+            }
+            for g in &restored.gates {
+                apply_gate(&mut restored_reg, g);
+            }
+            let fidelity = direct.fidelity(&restored_reg).unwrap();
+            assert!(
+                (fidelity - 1.0).abs() < TOL,
+                "route_best_no_restore's action (once identity-restored back) doesn't \
+                 match original: fidelity {} (no_restore: {:?}, restored: {:?})",
+                fidelity,
+                no_restore.gates,
+                restored.gates
+            );
+        }
     }
 
     #[test]
