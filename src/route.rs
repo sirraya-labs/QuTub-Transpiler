@@ -47,6 +47,7 @@
 
 use crate::coupling::CouplingMap;
 use crate::ir::{Circuit, Gate, LogicalQubit, PhysicalQubit};
+use crate::ir_optimize::commutes;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Routes `circuit` against `coupling`, returning a new [`Circuit`]
@@ -1107,16 +1108,6 @@ const SABRE_DECAY_RESET_INTERVAL: usize = 5;
 /// the heuristic's actual judgment).
 const SABRE_JITTER_SCALE: f64 = 1e-3;
 
-fn build_queues(gate_qubits: &[Vec<LogicalQubit>], num_qubits: usize) -> Vec<VecDeque<usize>> {
-    let mut queues: Vec<VecDeque<usize>> = vec![VecDeque::new(); num_qubits];
-    for (gi, qs) in gate_qubits.iter().enumerate() {
-        for &q in qs {
-            queues[q.0].push_back(gi);
-        }
-    }
-    queues
-}
-
 /// The gate-dependency DAG's direct-successor relation: `successors[gi]`
 /// is every gate index that comes immediately after `gi` on at least
 /// one of `gi`'s own qubits -- i.e. every gate that becomes one step
@@ -1137,6 +1128,77 @@ fn build_queues(gate_qubits: &[Vec<LogicalQubit>], num_qubits: usize) -> Vec<Vec
 /// about to matter, the same "what's coming up across the whole
 /// circuit, not just at this exact bottleneck" view real SABRE's own
 /// extended set gives its heuristic.
+/// The gate-dependency DAG's true predecessor relation for [`sabre_pass`]'s
+/// front-layer eligibility -- as opposed to [`build_successors`], which
+/// only feeds the *heuristic* extended-lookahead set. This is the hard
+/// gate: `predecessors[gi]` is every earlier gate `gi` cannot be
+/// scheduled ahead of, and until every one of them has executed, `gi`
+/// is not front-eligible at all (see [`sabre_pass`]'s own doc comment).
+///
+/// Before this function existed, `sabre_pass` used the same strict
+/// per-qubit FIFO-queue mechanism [`route_lookahead`] still uses today
+/// (see [`gate_is_front`]): gate `gi` had to wait for
+/// *every* earlier gate on each of its wires, whether or not the two
+/// actually had to happen in that order. That's a correct but
+/// needlessly conservative dependency -- a diagonal single-qubit gate
+/// on a `Cx`'s control wire, say, doesn't actually have to wait for the
+/// `Cx` at all (see [`crate::ir_optimize`]'s module doc for the
+/// derivation). Reusing that already-proven, already-tested `commutes`
+/// predicate here means `sabre_pass`'s front layer can legitimately
+/// contain such a gate the moment its *true* predecessors have executed,
+/// giving the router more genuinely-independent gates to schedule
+/// around a bottleneck instead of one artificially serialized by wire
+/// order alone -- more scheduling freedom to route the SWAPs that
+/// matter instead of ones forced by a dependency that was never real.
+///
+/// # Algorithm
+/// For every ordered pair `(i, j)` with `i < j` that shares at least
+/// one qubit, `i` is a predecessor of `j` unless `commutes(gates[i],
+/// gates[j])`. This is the full pairwise check, not just "nearest
+/// wire-neighbor" -- deliberately: skipping straight to the nearest
+/// same-wire predecessor and assuming transitivity covers the rest is
+/// the trap ("silently drop a real ordering constraint three gates
+/// back"), because a gate can sit in between two others on a wire that
+/// it itself commutes with but that don't commute with *each other*'s
+/// intended order relative to the pair on either side. Checking every
+/// earlier co-touching gate directly is the version with no missed
+/// constraints. It costs O(gates^2) in the worst case (this crate's
+/// benchmark circuits top out at a few hundred gates, so this hasn't
+/// needed to be revisited); some of the resulting edges are redundant
+/// with an already-implied transitive path, but a redundant edge never
+/// forbids a schedule that a minimal edge set would have allowed --
+/// only a *missing* edge would silently do that -- so redundancy costs
+/// a little wasted bookkeeping, never correctness.
+///
+/// `commutes`'s own coverage is what actually bounds how much slack
+/// this finds: today it only has rules for single-qubit-gate-vs-
+/// two-qubit-gate pairs (`Cx`-control, `Cx`-target, `Cz`-either-wire --
+/// see its own doc comment), no two-qubit/two-qubit rule yet (e.g.
+/// `Cx(a,b)`/`Cx(a,c)` sharing a control, which do commute but aren't
+/// recognized as such here). That's a real, separate follow-up --
+/// widening `commutes` itself, not this function -- left out here
+/// deliberately rather than derived and verified in the same pass as
+/// this scheduling change.
+fn build_commutation_predecessors(
+    gates: &[Gate],
+    gate_qubits: &[Vec<LogicalQubit>],
+) -> Vec<Vec<usize>> {
+    let total = gate_qubits.len();
+    let qubit_sets: Vec<BTreeSet<usize>> = gate_qubits
+        .iter()
+        .map(|qs| qs.iter().map(|q| q.0).collect())
+        .collect();
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for j in 0..total {
+        for i in 0..j {
+            if !qubit_sets[i].is_disjoint(&qubit_sets[j]) && !commutes(&gates[i], &gates[j]) {
+                predecessors[j].push(i);
+            }
+        }
+    }
+    predecessors
+}
+
 fn build_successors(gate_qubits: &[Vec<LogicalQubit>], num_qubits: usize) -> Vec<Vec<usize>> {
     let mut per_qubit_order: Vec<Vec<usize>> = vec![Vec::new(); num_qubits];
     for (gi, qs) in gate_qubits.iter().enumerate() {
@@ -1228,7 +1290,24 @@ enum SabreEvent<'a> {
 /// purely to diversify which candidate wins an otherwise-tied score
 /// across [`route_sabre`]'s different trials -- it never overrides a
 /// real score difference.
+///
+/// - **Commutation-aware front layer.** A gate's front-layer
+///   eligibility no longer waits on strict per-qubit program order
+///   (every earlier gate on each of its wires, full stop) -- it waits
+///   only on [`build_commutation_predecessors`]'s true predecessors,
+///   which omits an earlier same-wire gate the two are proven (via
+///   [`crate::ir_optimize::commutes`]) to commute with. Two gates that
+///   commute don't have to execute in their original program order for
+///   the circuit's action to come out the same, so this lets a
+///   genuinely independent gate become schedulable the moment its real
+///   predecessors are done, instead of being artificially serialized
+///   behind a same-wire gate it never actually depended on -- more
+///   real scheduling freedom for the SWAP-selection heuristic below to
+///   route around a bottleneck with, not more candidates chasing the
+///   same forced order. See that function's own doc comment for the
+///   derivation and what it does and doesn't cover.
 fn sabre_pass(
+    gates: &[Gate],
     gate_qubits: &[Vec<LogicalQubit>],
     coupling: &CouplingMap,
     dist: &[Vec<usize>],
@@ -1241,14 +1320,30 @@ fn sabre_pass(
     if gate_qubits.is_empty() {
         return;
     }
-    let mut queues = build_queues(gate_qubits, num_qubits);
-    let successors = build_successors(gate_qubits, num_qubits);
     let total_gates = gate_qubits.len();
+
+    // Front-layer eligibility (the hard gate: `remaining` only ever
+    // drops when a gate has *no* unexecuted true predecessor left) is
+    // commutation-aware, per [`build_commutation_predecessors`] --
+    // deliberately a different, more precise relation than
+    // `successors` below, which only feeds the heuristic extended-set
+    // lookahead and stays on the coarser per-qubit-program-order
+    // relation (see that function's own doc comment on why relaxing it
+    // isn't needed for correctness there).
+    let predecessors = build_commutation_predecessors(gates, gate_qubits);
+    let mut pred_remaining: Vec<usize> = predecessors.iter().map(|p| p.len()).collect();
+    let mut dependency_successors: Vec<Vec<usize>> = vec![Vec::new(); total_gates];
+    for (gi, preds) in predecessors.iter().enumerate() {
+        for &p in preds {
+            dependency_successors[p].push(gi);
+        }
+    }
+
+    let successors = build_successors(gate_qubits, num_qubits);
     let mut executed = vec![false; total_gates];
     let mut remaining = total_gates;
 
-    let mut front: Vec<usize> =
-        (0..total_gates).filter(|&gi| gate_is_front(gi, gate_qubits, &queues)).collect();
+    let mut front: Vec<usize> = (0..total_gates).filter(|&gi| pred_remaining[gi] == 0).collect();
 
     let mut decay = vec![1.0f64; num_qubits];
     let mut swaps_since_reset = 0usize;
@@ -1278,9 +1373,6 @@ fn sabre_pass(
                     });
                     executed[gi] = true;
                     remaining -= 1;
-                    for &q in qs {
-                        queues[q.0].pop_front();
-                    }
                     newly_executed.push(gi);
                     progressed = true;
                 }
@@ -1289,17 +1381,18 @@ fn sabre_pass(
                 front.retain(|&gi| !executed[gi]);
                 let mut candidates: BTreeSet<usize> = BTreeSet::new();
                 for &gi in &newly_executed {
-                    for &q in &gate_qubits[gi] {
-                        if let Some(&next_gi) = queues[q.0].front() {
-                            candidates.insert(next_gi);
+                    for &s in &dependency_successors[gi] {
+                        if executed[s] {
+                            continue;
+                        }
+                        pred_remaining[s] -= 1;
+                        if pred_remaining[s] == 0 {
+                            candidates.insert(s);
                         }
                     }
                 }
                 for gi in candidates {
-                    if !executed[gi]
-                        && gate_is_front(gi, gate_qubits, &queues)
-                        && !front.contains(&gi)
-                    {
+                    if !executed[gi] && !front.contains(&gi) {
                         front.push(gi);
                     }
                 }
@@ -1568,6 +1661,14 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
         return fallback;
     }
     let reversed_gate_qubits: Vec<Vec<LogicalQubit>> = gate_qubits.iter().rev().cloned().collect();
+    // Reversed `Gate`s to match `reversed_gate_qubits`, so
+    // `build_commutation_predecessors` run on the reversed direction
+    // sees the same gates in the same (reversed) relative order --
+    // `commutes` is symmetric (`commutes(a,b) == commutes(b,a)`, see
+    // its own doc comment), so this correctly yields the transpose of
+    // the forward pass's dependency DAG rather than a second,
+    // independently-derived one.
+    let reversed_gates: Vec<Gate> = circuit.gates.iter().rev().cloned().collect();
 
     let identity_seed: Vec<PhysicalQubit> = (0..num_qubits).map(PhysicalQubit).collect();
     let greedy_seed = choose_initial_layout(circuit, coupling);
@@ -1613,8 +1714,18 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
             }
 
             for _ in 0..*layout_iterations {
-                sabre_pass(&gate_qubits, coupling, &dist, &mut l2p, &mut p2l, |_| {}, &mut rng_state);
                 sabre_pass(
+                    &circuit.gates,
+                    &gate_qubits,
+                    coupling,
+                    &dist,
+                    &mut l2p,
+                    &mut p2l,
+                    |_| {},
+                    &mut rng_state,
+                );
+                sabre_pass(
+                    &reversed_gates,
                     &reversed_gate_qubits,
                     coupling,
                     &dist,
@@ -1638,6 +1749,7 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
             route_to_layout(&mut out, &mut cur_l2p, &mut cur_p2l, &p2l, coupling);
 
             sabre_pass(
+                &circuit.gates,
                 &gate_qubits,
                 coupling,
                 &dist,
@@ -3188,5 +3300,135 @@ mod tests {
             );
             assert_route_best_preserves_action(&c, &coupling);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Commutation-aware SABRE front-layer scheduling
+    // (`build_commutation_predecessors`).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn commuting_control_side_gate_has_no_dependency_edge_to_the_cx() {
+        // Rz(0, t) . Cx(0, 1): Rz sits on Cx's *control* wire, where
+        // ir_optimize::commutes's rule 1 says a diagonal gate commutes
+        // through Cx unconditionally. The naive per-qubit-order
+        // dependency would still force Cx to wait on Rz (same wire,
+        // earlier in program order) -- the commutation-aware version
+        // must not.
+        let gates = vec![Gate::Rz(0, 0.4), Gate::Cx(0, 1)];
+        let gate_qubits: Vec<Vec<LogicalQubit>> =
+            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
+        assert_eq!(
+            predecessors[1],
+            Vec::<usize>::new(),
+            "Cx should have no true predecessor on its control wire when the earlier gate is a \
+             commuting diagonal gate, got {:?}",
+            predecessors[1]
+        );
+    }
+
+    #[test]
+    fn non_commuting_control_side_gate_still_has_a_dependency_edge_to_the_cx() {
+        // X(0) . Cx(0, 1): X is single-qubit but NOT diagonal, and
+        // sits on the CONTROL wire where only diagonal gates commute
+        // (rule 1) -- X-basis gates only commute through Cx on the
+        // TARGET wire (rule 3). This must still be a real dependency,
+        // the mirror case of the test above confirming the relaxation
+        // doesn't overreach into pairs that were never proven to
+        // commute.
+        let gates = vec![Gate::X(0), Gate::Cx(0, 1)];
+        let gate_qubits: Vec<Vec<LogicalQubit>> =
+            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
+        assert_eq!(
+            predecessors[1],
+            vec![0],
+            "Cx must still wait on a non-commuting earlier gate on its control wire, got {:?}",
+            predecessors[1]
+        );
+    }
+
+    #[test]
+    fn disjoint_gates_have_no_dependency_edge_regardless_of_program_order() {
+        let gates = vec![Gate::H(0), Gate::X(1)];
+        let gate_qubits: Vec<Vec<LogicalQubit>> =
+            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
+        assert!(predecessors[1].is_empty());
+    }
+
+    #[test]
+    fn dependency_edges_are_not_missed_across_an_intervening_commuting_gate() {
+        // Rz(0, t) . Cx(0, 1) . X(0), all on wire 0 (Cx also touches
+        // wire 1): the middle Cx commutes with the leading Rz (control
+        // wire, rule 1) -- no edge 0->1 -- but Rz and X do NOT commute
+        // with each other directly (both single-qubit, same wire,
+        // neither is one of the two/diagonal-vs-Cx/Cz shapes any of
+        // the three rules cover), so there's a real edge 0->2 on top
+        // of the real edge 1->2 (X isn't X-basis-through-Cx-target
+        // here, it's sitting on Cx's control wire, so rule 3 doesn't
+        // apply either -- edge 1->2 is real too).
+        //
+        // This is exactly the trap this function's own doc comment
+        // warns about: gate 0 and gate 1 commute, so a "just check the
+        // nearest predecessor on each wire" implementation would find
+        // gate 1 as X's nearest blocker, assume transitivity through
+        // it covers gate 0 too, and silently drop the real 0->2
+        // constraint -- since there's no 0->1 edge to carry it. The
+        // full pairwise check must not drop it.
+        let gates = vec![Gate::Rz(0, 0.4), Gate::Cx(0, 1), Gate::X(0)];
+        let gate_qubits: Vec<Vec<LogicalQubit>> =
+            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
+        assert_eq!(predecessors[1], Vec::<usize>::new(), "Cx should not depend on the commuting Rz");
+        assert_eq!(
+            predecessors[2],
+            vec![0, 1],
+            "X must depend on BOTH the non-commuting Rz (direct, since 0 and 1 commute so there's \
+             no transitive path from 0 to carry it) and the non-commuting Cx, got {:?}",
+            predecessors[2]
+        );
+    }
+
+    #[test]
+    fn route_sabre_preserves_action_on_a_circuit_with_commuting_front_layer_gates() {
+        // A circuit shaped so the commutation-aware relaxation actually
+        // fires during routing (several Rz's on Cx control wires,
+        // interleaved with genuinely blocked long-range two-qubit
+        // gates on a linear coupling map) -- the real correctness bar
+        // this change has to clear is that reordering provably-
+        // commuting gates during scheduling never changes the circuit
+        // this crate actually executes, checked the same way every
+        // other routing identity in this module is (fidelity against a
+        // reference simulator run from a random initial state), not
+        // just by trusting the commutation algebra on its own.
+        let mut c = Circuit::new(6);
+        c.push(Gate::Rz(0, 0.3))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rz(2, 0.7))
+            .push(Gate::Cx(2, 3))
+            .push(Gate::Cx(0, 5))
+            .push(Gate::Rz(3, 1.1))
+            .push(Gate::Cx(3, 4))
+            .push(Gate::Cx(1, 4));
+        let coupling = CouplingMap::linear(6);
+        assert_route_best_preserves_action(&c, &coupling);
+
+        let routed = route_sabre(&c, &coupling);
+        let mut direct = randomized_register(c.num_qubits);
+        let mut routed_reg = direct.clone();
+        for g in &c.gates {
+            apply_gate(&mut direct, g);
+        }
+        for g in &routed.gates {
+            apply_gate(&mut routed_reg, g);
+        }
+        let fidelity = direct.fidelity(&routed_reg).unwrap();
+        assert!(
+            (fidelity - 1.0).abs() < TOL,
+            "route_sabre with commutation-aware scheduling doesn't match original: fidelity {}",
+            fidelity
+        );
     }
 }
