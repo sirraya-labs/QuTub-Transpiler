@@ -163,7 +163,19 @@ fn diagonal_commutes_through_cz(a: &Gate, b: &Gate) -> bool {
 /// rules this module implements applies in either argument order (see
 /// this module's doc comment). This is the check the commuting-reorder
 /// pass below actually uses in place of a bare `disjoint` call.
-fn commutes(a: &Gate, b: &Gate) -> bool {
+///
+/// `pub(crate)` (rather than private) so `crate::route`'s SABRE-style
+/// router can reuse this exact, already-derived-and-tested predicate to
+/// decide which gates sharing a wire are a genuine ordering constraint
+/// versus which just happen to be adjacent in program order -- see
+/// `route.rs`'s `build_commutation_predecessors` doc comment. No new
+/// commutation rule is added here for that caller: this predicate only
+/// covers single-qubit-gate-vs-two-qubit-gate pairs today (see this
+/// module's doc comment), so a routing-relevant two-qubit/two-qubit
+/// rule (e.g. `Cx(a,b)`/`Cx(a,c)` sharing a control) is deliberately
+/// out of scope for this change and would need its own derivation and
+/// test, same bar as rules 1-3 below.
+pub(crate) fn commutes(a: &Gate, b: &Gate) -> bool {
     disjoint(a, b)
         || diagonal_commutes_through_cx_control(a, b)
         || diagonal_commutes_through_cx_control(b, a)
