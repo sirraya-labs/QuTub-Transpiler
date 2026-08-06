@@ -105,6 +105,55 @@ impl CouplingMap {
         self.num_qubits
     }
 
+    /// Builds a coupling map directly from a list of undirected edges
+    /// over `num_qubits` physical qubits -- e.g. a real backend's own
+    /// published or live-queried connectivity (see `submit_ibm.py`'s
+    /// `--dump-coupling-map` and `crate::backend::lower_with_coupling`),
+    /// instead of one of this module's synthetic topology generators
+    /// above. `ibm_export.rs`'s own module doc flags exactly why this
+    /// constructor exists: a circuit routed against a synthetic map's
+    /// edges has no guarantee of matching a *specific* real chip's
+    /// actual wiring (disabled qubits, chip-specific layout), so a
+    /// two-qubit gate placed against the synthetic map can land on a
+    /// pair that isn't coupled on the real device at all.
+    ///
+    /// Edges may be given in either direction and may repeat; both are
+    /// normalized to this struct's own smaller-index-first storage
+    /// convention. Returns `Err` for a self-loop (`a == b`, never a
+    /// real coupling edge) or an endpoint `>= num_qubits` -- a real
+    /// device's own edge list should never contain either, and
+    /// silently dropping a malformed edge here would hide a bug in
+    /// whatever produced the list (e.g. a stale qubit-count) instead of
+    /// surfacing it at load time, before it can cause a confusing
+    /// routing failure downstream.
+    pub fn from_edges(
+        num_qubits: usize,
+        edges: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Result<Self, String> {
+        let mut set = HashSet::new();
+        for (a, b) in edges {
+            if a == b {
+                return Err(format!(
+                    "CouplingMap::from_edges: self-loop at qubit {} is not a valid coupling edge",
+                    a
+                ));
+            }
+            if a >= num_qubits || b >= num_qubits {
+                return Err(format!(
+                    "CouplingMap::from_edges: edge ({}, {}) references a qubit index \
+                     >= num_qubits ({})",
+                    a, b, num_qubits
+                ));
+            }
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            set.insert((lo, hi));
+        }
+        Ok(Self {
+            num_qubits,
+            edges: set,
+        })
+    }
+
     /// The real heavy-hex lattice for an `m`-row, `n`-column grid of
     /// hexagons (`m, n >= 1`): a hexagonal lattice of "data" qubits
     /// with one extra "flag" qubit subdividing every edge. See this
@@ -770,6 +819,55 @@ mod tests {
             "a 2x3 grid should have 4 corners (degree 2) and 2 edge-midpoints (degree 3): {:?}",
             degrees
         );
+    }
+
+    #[test]
+    fn from_edges_builds_a_map_matching_a_hand_checked_topology() {
+        // A tiny "T" shape: 0-1, 1-2, 1-3. Qubit 1 should be the only
+        // degree-3 node.
+        let map = CouplingMap::from_edges(4, [(0, 1), (1, 2), (1, 3)]).unwrap();
+        assert_eq!(map.num_qubits(), 4);
+        assert!(map.is_adjacent(0, 1));
+        assert!(map.is_adjacent(1, 2));
+        assert!(map.is_adjacent(1, 3));
+        assert!(!map.is_adjacent(0, 2));
+        assert!(!map.is_adjacent(2, 3));
+        let degree = |q: usize| (0..4).filter(|&o| o != q && map.is_adjacent(q, o)).count();
+        assert_eq!(degree(1), 3);
+        assert_eq!(degree(0), 1);
+    }
+
+    #[test]
+    fn from_edges_is_direction_and_duplicate_insensitive() {
+        // (2,0) and a repeated (0,2) should collapse to the same single
+        // edge as (0,2), matching this struct's own storage convention.
+        let a = CouplingMap::from_edges(3, [(0, 2)]).unwrap();
+        let b = CouplingMap::from_edges(3, [(2, 0), (0, 2)]).unwrap();
+        assert!(a.is_adjacent(0, 2) && b.is_adjacent(0, 2));
+        assert_eq!(a.neighbors(0), b.neighbors(0));
+    }
+
+    #[test]
+    fn from_edges_rejects_self_loop() {
+        assert!(CouplingMap::from_edges(3, [(1, 1)]).is_err());
+    }
+
+    #[test]
+    fn from_edges_rejects_out_of_range_endpoint() {
+        assert!(CouplingMap::from_edges(3, [(0, 5)]).is_err());
+    }
+
+    /// The actual point of this constructor: a real device's own
+    /// (possibly irregular -- some qubits disabled, non-uniform
+    /// degree) edge list should route exactly as told, not get
+    /// "corrected" toward a regular topology the way the synthetic
+    /// generators above are.
+    #[test]
+    fn from_edges_supports_irregular_real_device_style_topologies() {
+        // A star with one disabled spoke (no edge to qubit 4 at all).
+        let map = CouplingMap::from_edges(5, [(0, 1), (0, 2), (0, 3)]).unwrap();
+        assert_eq!(map.neighbors(4).len(), 0, "qubit 4 has no edges, same as a disabled qubit");
+        assert_eq!(map.neighbors(0).len(), 3);
     }
 
     /// No qubit in a square grid should have more than 4 neighbors, and

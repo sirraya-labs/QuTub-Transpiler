@@ -731,9 +731,23 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
     // other physical qubit -- the natural anchor for the very first
     // (highest-weight) logical qubit, and the fallback "stay central"
     // target for any logical qubit with no already-placed partner yet.
+    //
+    // Deliberately does NOT filter out `usize::MAX` (unreachable)
+    // entries before summing: on a coupling map with an isolated/
+    // disconnected physical qubit (e.g. `CouplingMap::from_edges` given
+    // a real device's edge list with a qubit that has no edges at all),
+    // filtering made that qubit's sum artificially the *smallest*
+    // (every unreachable pair just vanishes from the sum instead of
+    // counting against it), so it looked like the ideal "center" when
+    // it's actually the worst possible choice -- every other qubit's
+    // distance to it is `usize::MAX`. `saturating_add` instead lets an
+    // unreachable neighbor saturate the whole sum to `usize::MAX`,
+    // correctly ranking a disconnected qubit last (or tied-last with
+    // any other disconnected qubit, broken by ascending index same as
+    // every other tie here) without overflowing.
     let center = PhysicalQubit(
         (0..n_phys)
-            .min_by_key(|&p| dist[p].iter().filter(|&&d| d != usize::MAX).sum::<usize>())
+            .min_by_key(|&p| dist[p].iter().fold(0usize, |acc, &d| acc.saturating_add(d)))
             .expect("n_phys == num_qubits >= 1, checked above"),
     );
 
@@ -762,13 +776,25 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
                                 }
                             }
                         }
+                        // `saturating_mul`/`saturating_add` rather than
+                        // `*`/`+`: `dist[p][..]` (and `score`, built
+                        // from it above) can legitimately be
+                        // `usize::MAX` when `p` is unreachable from
+                        // whatever it's being scored against -- a real,
+                        // if rare, possibility on any coupling map with
+                        // a disconnected physical qubit, not just a
+                        // theoretical one. Saturating keeps such a
+                        // qubit correctly ranked as maximally bad
+                        // instead of panicking (debug) or silently
+                        // wrapping to a tiny, falsely-attractive score
+                        // (release).
                         if any_neighbor {
                             // Tie-break by physical index too, packed
                             // into the low bits, so results stay
                             // deterministic without a second sort pass.
-                            score * n_phys + p
+                            score.saturating_mul(n_phys).saturating_add(p)
                         } else {
-                            dist[p][center.0] * n_phys + p
+                            dist[p][center.0].saturating_mul(n_phys).saturating_add(p)
                         }
                     })
                     .expect("there must be an unused physical qubit left: n_phys == num_qubits"),
@@ -1655,6 +1681,47 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
 /// anything else in the circuit.
 fn swap_count(c: &Circuit) -> usize {
     c.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
+}
+
+/// Splits a routed circuit's total `Gate::Swap` count into "routing"
+/// SWAPs (inserted mid-circuit to get some later real gate onto
+/// adjacent physical qubits) vs "restoration" SWAPs (the trailing
+/// block every router in this module appends via
+/// [`restore_identity_mapping`], after every real gate has already
+/// been scheduled, purely to walk physical qubits back to their
+/// starting wires before returning).
+///
+/// The split is exact, not a heuristic, for any circuit produced by
+/// this module's own routers: `restore_identity_mapping`/
+/// `route_to_layout` only ever runs once, as the very last step, so
+/// every SWAP it emits necessarily lands after the last non-SWAP gate
+/// in program order -- and every SWAP the main routing loop inserts is
+/// always immediately followed (possibly after more SWAPs) by the real
+/// gate it was inserted to enable, so it always lands at or before that
+/// index. `(routing, restoration)` -- `routing + restoration ==
+/// swap_count(routed)`.
+///
+/// Degenerate case: if `routed` is empty or contains only `Swap`s (no
+/// real gate at all -- never produced by this module's own routers on
+/// a non-empty input circuit, but not otherwise disallowed by
+/// `Circuit`'s own type), every SWAP present is counted as
+/// `restoration`, since there is no real gate for any of them to have
+/// been "routing" toward.
+pub fn restoration_swap_count(routed: &Circuit) -> (usize, usize) {
+    match routed.gates.iter().rposition(|g| !matches!(g, Gate::Swap(..))) {
+        Some(last_real_gate) => {
+            let routing = routed.gates[..=last_real_gate]
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(..)))
+                .count();
+            let restoration = routed.gates[last_real_gate + 1..]
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(..)))
+                .count();
+            (routing, restoration)
+        }
+        None => (0, swap_count(routed)),
+    }
 }
 
 /// Routes `circuit` against `coupling` via [`route`], [`route_lookahead`],

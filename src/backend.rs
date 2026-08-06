@@ -469,7 +469,17 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
             BackendGate::Rz(..) | BackendGate::Rot(..) => unreachable!("handled above"),
         }
     }
-    for q in acc.keys().copied().collect::<Vec<_>>() {
+    // Sorted rather than the raw (randomized) HashMap iteration order
+    // -- see the identical fix/comment on `optimize`'s trailing flush
+    // loop above `pending_rz`. Same reasoning: these are disjoint
+    // qubits, so the order is semantically free, but leaving it to
+    // hash-seed randomness makes `resynthesize`'s output nondeterministic
+    // across calls, which is exactly what broke
+    // `lower_and_lower_with_coupling_agree_when_given_the_backends_own_default_map`
+    // even after `optimize`'s own trailing-flush order was fixed.
+    let mut trailing: Vec<usize> = acc.keys().copied().collect();
+    trailing.sort_unstable();
+    for q in trailing {
         flush(q, &mut acc, &mut out, axis);
     }
     bc.gates = out;
@@ -720,7 +730,16 @@ pub fn optimize(bc: &mut BackendCircuit) {
         }
     }
 
-    for q in pending_rz.keys().copied().collect::<Vec<_>>() {
+    // Sorted rather than the raw (randomized) HashMap iteration order:
+    // any leftover pending Rz's here are on disjoint qubits and their
+    // relative order doesn't change the circuit's semantics, but an
+    // unspecified order makes `optimize`'s output non-deterministic
+    // across runs/calls -- which breaks exact-equality tests like
+    // `lower_and_lower_with_coupling_agree_when_given_the_backend's_own_default_map`
+    // even though both sides are computing the same circuit.
+    let mut trailing: Vec<usize> = pending_rz.keys().copied().collect();
+    trailing.sort_unstable();
+    for q in trailing {
         flush(q, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
     }
 
@@ -877,6 +896,90 @@ mod tests {
             }
             // Routing must not have changed the circuit's action.
             check_backend_matches(&c, backend);
+        }
+    }
+
+    /// [`lower_with_coupling`] with an explicit real-style (irregular)
+    /// map is what `submit_ibm.py --dump-coupling-map` +
+    /// `CouplingMap::from_edges` is for: this pins down that routing
+    /// actually happens against the *given* map (not the backend's own
+    /// synthetic default), and that the routed circuit still lands
+    /// only on that map's real edges.
+    #[test]
+    fn lower_with_coupling_routes_against_the_given_map_not_the_synthetic_default() {
+        // A deliberately irregular 5-qubit line with one qubit (3)
+        // dropped from the middle -- nothing like heavy_hex_for(5) or
+        // square_grid_for(5) -- exactly the kind of real-device-style
+        // topology `from_edges` exists for.
+        let coupling = crate::coupling::CouplingMap::from_edges(
+            5,
+            [(0, 1), (1, 2), (2, 4)],
+        )
+        .unwrap();
+
+        let mut c = Circuit::new(5);
+        c.push(Gate::H(0)).push(Gate::Cx(0, 4));
+
+        let bc = lower_with_coupling(&c, Backend::IbmQ, Some(&coupling));
+        for g in &bc.gates {
+            let pair = match *g {
+                BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => Some((a, b)),
+                BackendGate::Rzz(a, b, _) => Some((a, b)),
+                _ => None,
+            };
+            if let Some((a, b)) = pair {
+                assert!(
+                    coupling.is_adjacent(a, b),
+                    "two-qubit gate {:?} not on an edge of the explicitly-given map",
+                    g
+                );
+            }
+        }
+
+        // Same action as an unrouted/no-topology lowering, up to the
+        // routing-inserted Swaps -- checked the same way
+        // lower_routes_distant_gates_onto_adjacent_qubits does for the
+        // synthetic-default path.
+        check_backend_matches(&c, Backend::IbmQ);
+    }
+
+    /// `lower_with_coupling(..., None)` must skip routing entirely,
+    /// same as `lower` already does for `TrappedIon` (whose
+    /// `coupling_map` is always `None`) -- i.e. it's a real, distinct
+    /// choice from "use the synthetic default", not an error case.
+    #[test]
+    fn lower_with_coupling_none_skips_routing() {
+        let mut c = Circuit::new(3);
+        c.push(Gate::H(0)).push(Gate::Cx(0, 2));
+
+        let bc = lower_with_coupling(&c, Backend::IbmQ, None);
+        // Cx(0, 2) is far apart on IbmQ's own default heavy-hex map,
+        // so if this had routed, we'd very likely see a Swap-derived
+        // extra Cx pair. With no coupling map, it should lower with
+        // exactly the same native two-qubit gate count as an
+        // unrouted, source-level Cx costs on IbmQ (1, per
+        // push_native_cx's fast path).
+        let (_, two_count) = bc.gate_counts();
+        assert_eq!(
+            two_count, 1,
+            "no coupling map given -- Cx(0,2) should lower directly with no routing SWAPs: {:?}",
+            bc.gates
+        );
+    }
+
+    #[test]
+    fn lower_and_lower_with_coupling_agree_when_given_the_backends_own_default_map() {
+        let c = sample_circuit();
+        for backend in [Backend::IbmQ, Backend::Rigetti] {
+            let default_map = backend.coupling_map(c.num_qubits);
+            let via_lower = lower(&c, backend);
+            let via_explicit = lower_with_coupling(&c, backend, default_map.as_ref());
+            assert_eq!(
+                via_lower.gates, via_explicit.gates,
+                "backend {:?}: lower() should just be lower_with_coupling() called with \
+                 the backend's own default map",
+                backend
+            );
         }
     }
 
