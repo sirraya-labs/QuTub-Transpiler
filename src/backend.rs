@@ -469,7 +469,17 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
             BackendGate::Rz(..) | BackendGate::Rot(..) => unreachable!("handled above"),
         }
     }
-    for q in acc.keys().copied().collect::<Vec<_>>() {
+    // Sorted rather than the raw (randomized) HashMap iteration order
+    // -- see the identical fix/comment on `optimize`'s trailing flush
+    // loop above `pending_rz`. Same reasoning: these are disjoint
+    // qubits, so the order is semantically free, but leaving it to
+    // hash-seed randomness makes `resynthesize`'s output nondeterministic
+    // across calls, which is exactly what broke
+    // `lower_and_lower_with_coupling_agree_when_given_the_backends_own_default_map`
+    // even after `optimize`'s own trailing-flush order was fixed.
+    let mut trailing: Vec<usize> = acc.keys().copied().collect();
+    trailing.sort_unstable();
+    for q in trailing {
         flush(q, &mut acc, &mut out, axis);
     }
     bc.gates = out;
@@ -720,7 +730,16 @@ pub fn optimize(bc: &mut BackendCircuit) {
         }
     }
 
-    for q in pending_rz.keys().copied().collect::<Vec<_>>() {
+    // Sorted rather than the raw (randomized) HashMap iteration order:
+    // any leftover pending Rz's here are on disjoint qubits and their
+    // relative order doesn't change the circuit's semantics, but an
+    // unspecified order makes `optimize`'s output non-deterministic
+    // across runs/calls -- which breaks exact-equality tests like
+    // `lower_and_lower_with_coupling_agree_when_given_the_backend's_own_default_map`
+    // even though both sides are computing the same circuit.
+    let mut trailing: Vec<usize> = pending_rz.keys().copied().collect();
+    trailing.sort_unstable();
+    for q in trailing {
         flush(q, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
     }
 

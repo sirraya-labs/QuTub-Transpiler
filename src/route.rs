@@ -731,9 +731,23 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
     // other physical qubit -- the natural anchor for the very first
     // (highest-weight) logical qubit, and the fallback "stay central"
     // target for any logical qubit with no already-placed partner yet.
+    //
+    // Deliberately does NOT filter out `usize::MAX` (unreachable)
+    // entries before summing: on a coupling map with an isolated/
+    // disconnected physical qubit (e.g. `CouplingMap::from_edges` given
+    // a real device's edge list with a qubit that has no edges at all),
+    // filtering made that qubit's sum artificially the *smallest*
+    // (every unreachable pair just vanishes from the sum instead of
+    // counting against it), so it looked like the ideal "center" when
+    // it's actually the worst possible choice -- every other qubit's
+    // distance to it is `usize::MAX`. `saturating_add` instead lets an
+    // unreachable neighbor saturate the whole sum to `usize::MAX`,
+    // correctly ranking a disconnected qubit last (or tied-last with
+    // any other disconnected qubit, broken by ascending index same as
+    // every other tie here) without overflowing.
     let center = PhysicalQubit(
         (0..n_phys)
-            .min_by_key(|&p| dist[p].iter().filter(|&&d| d != usize::MAX).sum::<usize>())
+            .min_by_key(|&p| dist[p].iter().fold(0usize, |acc, &d| acc.saturating_add(d)))
             .expect("n_phys == num_qubits >= 1, checked above"),
     );
 
@@ -762,13 +776,25 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
                                 }
                             }
                         }
+                        // `saturating_mul`/`saturating_add` rather than
+                        // `*`/`+`: `dist[p][..]` (and `score`, built
+                        // from it above) can legitimately be
+                        // `usize::MAX` when `p` is unreachable from
+                        // whatever it's being scored against -- a real,
+                        // if rare, possibility on any coupling map with
+                        // a disconnected physical qubit, not just a
+                        // theoretical one. Saturating keeps such a
+                        // qubit correctly ranked as maximally bad
+                        // instead of panicking (debug) or silently
+                        // wrapping to a tiny, falsely-attractive score
+                        // (release).
                         if any_neighbor {
                             // Tie-break by physical index too, packed
                             // into the low bits, so results stay
                             // deterministic without a second sort pass.
-                            score * n_phys + p
+                            score.saturating_mul(n_phys).saturating_add(p)
                         } else {
-                            dist[p][center.0] * n_phys + p
+                            dist[p][center.0].saturating_mul(n_phys).saturating_add(p)
                         }
                     })
                     .expect("there must be an unused physical qubit left: n_phys == num_qubits"),
