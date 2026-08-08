@@ -449,20 +449,15 @@ fn invert3(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
 /// Weighted quadratic (Richardson) extrapolation: fit `y = a + b*x +
 /// c*x^2` instead of a straight line, and read off `a` (the value at
 /// `scale = 0`) plus its propagated uncertainty, along with the
-/// curvature term `c` and its own uncertainty. This is a cross-check
-/// on the linear ZNE fit above, not a replacement for it: `gate_error_rate`
-/// amplifies a *per-gate* rate that gets `clamp(0.0, 0.5)`-ed, so the
-/// noise-vs-scale relationship this crate's noise model actually
-/// produces isn't guaranteed to be exactly linear, especially once
-/// `noise_scale` pushes the per-gate rate near that clamp. If `c` is
-/// many-sigma from zero, that's direct evidence of real curvature --
-/// the kind that would show up exactly as "residual doesn't shrink
-/// with shots even though stderr does" when forced through a linear
-/// model, since more shots only ever tighten the fit *to the wrong
-/// curve*, they don't straighten the curve out.
-/// Returns `(intercept, intercept_stderr, quadratic_coeff, quadratic_coeff_stderr)`,
-/// or `None` if the normal-equations matrix is singular.
-fn weighted_quadratic_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64]) -> Option<(f64, f64, f64, f64)> {
+/// curvature term `c` and its own uncertainty. This is a two-term
+/// Taylor approximation to whatever the *true* noise-vs-scale curve
+/// is -- see `weighted_exponential_extrapolate` below for the actual
+/// functional form this crate's noise model produces, of which this
+/// quadratic is just the local tangent-plus-bend.
+/// Returns `(intercept, intercept_stderr, quadratic_coeff,
+/// quadratic_coeff_stderr, chi_square, degrees_of_freedom)`, or
+/// `None` if the normal-equations matrix is singular.
+fn weighted_quadratic_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64]) -> Option<(f64, f64, f64, f64, f64, usize)> {
     let weights: Vec<f64> = stderrs.iter().map(|&s| 1.0 / s.max(1e-9).powi(2)).collect();
 
     let mut m = [[0.0f64; 3]; 3];
@@ -484,7 +479,136 @@ fn weighted_quadratic_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64
     let coeffs: Vec<f64> = (0..3).map(|r| (0..3).map(|c| inv[r][c] * rhs[c]).sum()).collect();
     let intercept_stderr = inv[0][0].max(0.0).sqrt();
     let quad_coeff_stderr = inv[2][2].max(0.0).sqrt();
-    Some((coeffs[0], intercept_stderr, coeffs[2], quad_coeff_stderr))
+
+    let chi2: f64 = (0..scales.len())
+        .map(|i| {
+            let x = scales[i];
+            let model = coeffs[0] + coeffs[1] * x + coeffs[2] * x * x;
+            weights[i] * (values[i] - model).powi(2)
+        })
+        .sum();
+    let dof = scales.len().saturating_sub(3);
+
+    Some((coeffs[0], intercept_stderr, coeffs[2], quad_coeff_stderr, chi2, dof))
+}
+
+/// Weighted nonlinear (Gauss-Newton) fit of `y = A + B * exp(-k * x)`
+/// -- an asymptotic decay toward a floor `A`, approached from `A + B`
+/// at `x = 0`. This is the functional form this crate's noise model
+/// actually produces, not an arbitrary alternative to try: each
+/// `push_pauli_kick` is an independent stochastic Pauli-flip event
+/// (no coherent/systematic rotation error is ever injected here, so
+/// Pauli twirling has nothing to act on in this model), and
+/// `gate_error_rate` composes a single per-gate flip probability `p`
+/// across ~250 gates. For a chain of independent Pauli kicks, the
+/// *expectation value* survives with probability that compounds
+/// multiplicatively across gates -- roughly `(1 - 2p)^N` in form --
+/// not additively. A straight line is only the first-order Taylor
+/// term of that curve at small `p`; a quadratic is the second-order
+/// term. As `noise_scale` (and therefore `p`) is pushed out to 3-4x
+/// to buy the earlier diagnostics more degrees of freedom, the
+/// higher-order terms this exponential captures directly -- and the
+/// polynomial fits only approximate -- stop being negligible. Fitting
+/// the exponential removes the approximation rather than patching
+/// around it with one more polynomial term.
+///
+/// Returns `(intercept, intercept_stderr, asymptote_a, amplitude_b,
+/// decay_rate_k, chi_square, degrees_of_freedom)` where `intercept =
+/// A + B` is the fitted value at `scale = 0`, or `None` if there
+/// aren't enough points for a 3-parameter fit to have any slack, or
+/// if the Gauss-Newton normal equations become singular along the
+/// way.
+fn weighted_exponential_extrapolate(
+    scales: &[f64],
+    values: &[f64],
+    stderrs: &[f64],
+) -> Option<(f64, f64, f64, f64, f64, f64, usize)> {
+    let n = scales.len();
+    if n < 4 {
+        return None;
+    }
+    let weights: Vec<f64> = stderrs.iter().map(|&s| 1.0 / s.max(1e-9).powi(2)).collect();
+
+    // Initial guess: asymptote near the most-amplified (largest-scale,
+    // most-decayed) point, amplitude from the total observed spread,
+    // a modest positive decay rate. Gauss-Newton converges quickly
+    // from here for a well-behaved monotonic decay curve like this.
+    let mut p = [*values.last().unwrap(), values[0] - values.last().unwrap(), 0.3];
+    if p[1].abs() < 1e-9 {
+        p[1] = 1e-3;
+    }
+
+    for _iter in 0..200 {
+        let mut jt_w_j = [[0.0f64; 3]; 3];
+        let mut jt_w_r = [0.0f64; 3];
+        for i in 0..n {
+            let x = scales[i];
+            let w = weights[i];
+            let e = (-p[2] * x).exp();
+            let model = p[0] + p[1] * e;
+            let r = values[i] - model;
+            // df/dp for f = A + B*exp(-k*x): [dA, dB, dk].
+            let j = [1.0, e, -p[1] * x * e];
+            for row in 0..3 {
+                jt_w_r[row] += w * j[row] * r;
+                for col in 0..3 {
+                    jt_w_j[row][col] += w * j[row] * j[col];
+                }
+            }
+        }
+        let inv = invert3(&jt_w_j)?;
+        let mut delta = [0.0f64; 3];
+        let mut moved = 0.0f64;
+        for row in 0..3 {
+            for col in 0..3 {
+                delta[row] += inv[row][col] * jt_w_r[col];
+            }
+            p[row] += delta[row];
+            moved += delta[row].abs();
+        }
+        if moved < 1e-12 {
+            break;
+        }
+    }
+
+    // Final chi^2 and parameter covariance at the converged point.
+    let mut jt_w_j = [[0.0f64; 3]; 3];
+    let mut chi2 = 0.0;
+    for i in 0..n {
+        let x = scales[i];
+        let w = weights[i];
+        let e = (-p[2] * x).exp();
+        let model = p[0] + p[1] * e;
+        let r = values[i] - model;
+        chi2 += w * r * r;
+        let j = [1.0, e, -p[1] * x * e];
+        for row in 0..3 {
+            for col in 0..3 {
+                jt_w_j[row][col] += w * j[row] * j[col];
+            }
+        }
+    }
+    let cov = invert3(&jt_w_j)?;
+    let dof = n.saturating_sub(3);
+
+    let intercept = p[0] + p[1];
+    let intercept_var = cov[0][0] + cov[1][1] + 2.0 * cov[0][1];
+    let intercept_stderr = intercept_var.max(0.0).sqrt();
+
+    Some((intercept, intercept_stderr, p[0], p[1], p[2], chi2, dof))
+}
+
+/// Akaike Information Criterion: `chi^2 + 2*k`, `k` = free parameters.
+/// Lower is better. Unlike the old "does curvature clear 2 sigma"
+/// heuristic, AIC directly trades goodness-of-fit against model
+/// complexity, so a fancier model only wins when it earns its extra
+/// parameters rather than just because it *can* bend toward the
+/// points. A difference under ~2 is conventionally treated as "not
+/// decisively better" (Burnham & Anderson); this crate uses that same
+/// threshold below rather than switching models on a coin-flip-sized
+/// AIC gap.
+fn aic(chi2: f64, k: usize) -> f64 {
+    chi2 + 2.0 * k as f64
 }
 
 // ---------------------------------------------------------------------
@@ -714,38 +838,54 @@ fn main() {
         scale_mean.push(mean);
         scale_stderr.push((variance / shots_f).sqrt());
     }
-    // --- 3b. Fit the noise-vs-scale relationship two ways before
-    //         deciding what to report: a straight line (standard ZNE)
-    //         and a quadratic (Richardson) curve. Compute both now,
-    //         not after printing a headline number, so the headline
-    //         number itself can reflect which fit the data actually
-    //         supports -- see the model-selection comment below.
+    // --- 3b. Fit the noise-vs-scale relationship three ways before
+    //         deciding what to report: a straight line (standard ZNE),
+    //         a quadratic (Richardson) curve, and an exponential decay
+    //         -- the actual functional form this noise model produces
+    //         (see `weighted_exponential_extrapolate`'s doc comment).
+    //         Compute all three now, not after printing a headline
+    //         number, so the headline number reflects whichever model
+    //         the data actually supports.
     let (linear_mitigated, linear_mitigated_stderr, _, _, lin_chi2, lin_dof) =
         weighted_linear_fit(&zne_scales, &scale_mean, &scale_stderr);
     let lin_reduced_chi2 = if lin_dof > 0 { lin_chi2 / lin_dof as f64 } else { f64::NAN };
     let poor_linear_fit = lin_dof > 0 && lin_reduced_chi2 > 2.0;
-    let quad_dof = zne_scales.len().saturating_sub(3);
     let quad_fit = weighted_quadratic_extrapolate(&zne_scales, &scale_mean, &scale_stderr);
-    let curvature_significant = quad_fit
-        .map(|(_, _, quad_coeff, quad_coeff_stderr)| quad_coeff.abs() / quad_coeff_stderr.max(1e-12) > 2.0)
-        .unwrap_or(false);
+    let exp_fit = weighted_exponential_extrapolate(&zne_scales, &scale_mean, &scale_stderr);
 
-    // Model selection: a curvature term that's crossed 2-sigma is
-    // direct evidence the linear fit is biased, not just imprecise --
-    // and unlike imprecision, more shots at the same five-to-seven
-    // scales won't fix it (see the power note printed below). So when
-    // curvature is significant, the quadratic intercept becomes the
-    // number actually used for the error decomposition, the
-    // consistency check, and the summary -- not just something shown
-    // alongside the linear number for comparison. When curvature
-    // isn't significant, nothing changes from the original behavior:
-    // the linear intercept is reported, same as any standard ZNE run.
-    let (mitigated, mitigated_stderr, mitigation_model) = if curvature_significant {
-        let (quad_intercept, quad_intercept_stderr, _, _) = quad_fit.unwrap();
-        (quad_intercept, quad_intercept_stderr, "quadratic (curvature detected)")
-    } else {
-        (linear_mitigated, linear_mitigated_stderr, "linear")
-    };
+    // Model selection via AIC (chi^2 + 2*k), not the old "curvature >
+    // 2 sigma" single hypothesis test: this weighs *all three* models
+    // against each other on the same footing, penalizing the two
+    // 3-parameter models for their extra flexibility rather than
+    // rewarding them just for being able to bend toward the points.
+    // A model only displaces a simpler one if its AIC is at least
+    // ~2 lower -- the conventional "decisively better" threshold --
+    // so a fit that merely ties the simpler model on chi^2 loses on
+    // parameter count and the simpler model stays reported.
+    let lin_aic = aic(lin_chi2, 2);
+    let quad_aic = quad_fit.map(|(_, _, _, _, chi2, _)| aic(chi2, 3));
+    let exp_aic = exp_fit.map(|(_, _, _, _, _, chi2, _)| aic(chi2, 3));
+
+    let mut best_aic = lin_aic;
+    let (mut mitigated, mut mitigated_stderr, mut mitigation_model) =
+        (linear_mitigated, linear_mitigated_stderr, "linear");
+    if let Some(a) = quad_aic {
+        if a < best_aic - 2.0 {
+            best_aic = a;
+            let (qi, qis, _, _, _, _) = quad_fit.unwrap();
+            mitigated = qi;
+            mitigated_stderr = qis;
+            mitigation_model = "quadratic";
+        }
+    }
+    if let Some(a) = exp_aic {
+        if a < best_aic - 2.0 {
+            let (ei, eis, _, _, _, _, _) = exp_fit.unwrap();
+            mitigated = ei;
+            mitigated_stderr = eis;
+            mitigation_model = "exponential (physically motivated)";
+        }
+    }
 
     let raw_gap = (scale_mean[0] - exact_avg).abs();
     let mitigated_gap = (mitigated - exact_avg).abs();
@@ -757,8 +897,11 @@ fn main() {
     println!("  {}", "-".repeat(48));
     println!("  raw noisy mean (1x noise)         {:>12.6}  (stderr {:.6})", scale_mean[0], scale_stderr[0]);
     println!("  ZNE-mitigated mean (linear)        {:>12.6}  (stderr {:.6})", linear_mitigated, linear_mitigated_stderr);
-    if let Some((quad_intercept, quad_intercept_stderr, _, _)) = quad_fit {
-        println!("  ZNE-mitigated mean (quadratic)     {:>12.6}  (stderr {:.6})", quad_intercept, quad_intercept_stderr);
+    if let Some((qi, qis, _, _, _, _)) = quad_fit {
+        println!("  ZNE-mitigated mean (quadratic)     {:>12.6}  (stderr {:.6})", qi, qis);
+    }
+    if let Some((ei, eis, _, _, _, _, _)) = exp_fit {
+        println!("  ZNE-mitigated mean (exponential)   {:>12.6}  (stderr {:.6})", ei, eis);
     }
     println!("  exact reference (RK4)             {:>12.6}", exact_avg);
     println!(
@@ -776,8 +919,7 @@ fn main() {
     } else if improvement_significant {
         println!(
             "ZNE moved the estimate {:.6} *away* from exact, exceeding the mitigated fit's \
-             stderr ({:.6}) -- likely genuine linear-extrapolation bias, not sampling noise. \
-             Consider a quadratic (Richardson) extrapolation or more noise-shots per scale.",
+             stderr ({:.6}) -- likely genuine extrapolation-model bias, not sampling noise.",
             improvement.abs(), mitigated_stderr
         );
     } else {
@@ -797,92 +939,73 @@ fn main() {
         );
     }
 
-    // --- 3c. ZNE fit diagnostics: is a straight line actually the
-    //         right model for noise-vs-scale here, or is the linear
-    //         intercept converging to a stable-but-wrong number no
-    //         matter how many shots go into each point? Two
-    //         independent checks: (1) chi^2/dof of the linear fit
-    //         against its own points (large -> the line doesn't
-    //         explain the data even accounting for their stderrs),
-    //         and (2) a quadratic (Richardson) extrapolation, whose
-    //         curvature term being many-sigma from zero is direct
-    //         evidence the true noise-vs-scale relationship bends --
-    //         and, per the model selection above, is what actually
-    //         drives the reported number once it crosses threshold.
-    println!("\n  ZNE fit diagnostics (does a straight line actually describe noise-vs-scale here?):");
+    // --- 3c. ZNE fit diagnostics: which of the three models actually
+    //         describes noise-vs-scale here? Report chi^2/dof for
+    //         each (does the model even fit its own points, given
+    //         their stderrs) and then the AIC comparison that drove
+    //         the model-selection decision above.
+    println!("\n  ZNE fit diagnostics (which model actually describes noise-vs-scale here?):");
     println!(
-        "    Linear fit:     chi^2 = {:.3}, dof = {}, reduced chi^2 = {:.3}{}",
+        "    Linear:       chi^2 = {:.3}, dof = {}, reduced chi^2 = {:.3}{}   AIC = {:.3}",
         lin_chi2,
         lin_dof,
         lin_reduced_chi2,
-        if poor_linear_fit { "  [POOR FIT]" } else { "  [acceptable]" }
+        if poor_linear_fit { "  [POOR FIT]" } else { "  [acceptable]" },
+        lin_aic
     );
+    if let Some((qi, qis, qc, qcs, qchi2, qdof)) = quad_fit {
+        let q_reduced = if qdof > 0 { qchi2 / qdof as f64 } else { f64::NAN };
+        println!(
+            "    Quadratic:    chi^2 = {:.3}, dof = {}, reduced chi^2 = {:.3}   AIC = {:.3}   \
+             intercept = {:.6} (+/- {:.6}), curvature = {:.6} (+/- {:.6}, {:.1} sigma)",
+            qchi2, qdof, q_reduced, quad_aic.unwrap(), qi, qis, qc, qcs, qc.abs() / qcs.max(1e-12)
+        );
+    } else {
+        println!("    Quadratic:    could not be computed (degenerate/duplicate scale points).");
+    }
+    if let Some((ei, eis, a, b, k, echi2, edof)) = exp_fit {
+        let e_reduced = if edof > 0 { echi2 / edof as f64 } else { f64::NAN };
+        println!(
+            "    Exponential:  chi^2 = {:.3}, dof = {}, reduced chi^2 = {:.3}   AIC = {:.3}   \
+             intercept (A+B) = {:.6} (+/- {:.6}), asymptote A = {:.6}, amplitude B = {:.6}, \
+             decay k = {:.6}",
+            echi2, edof, e_reduced, exp_aic.unwrap(), ei, eis, a, b, k
+        );
+    } else {
+        println!(
+            "    Exponential:  not enough scale points for a 3-parameter nonlinear fit to have \
+             any slack (need >= 4), or the fit failed to converge."
+        );
+    }
     // Statistical power note: dof scales with the number of *distinct
     // scale points* the fit sees, not with shots per point -- so no
-    // amount of additional --noise-shots tightens this test's ability
-    // to catch a subtle bias. A reduced chi^2 near 1 and a
-    // low-sigma curvature term are only reassuring in proportion to
-    // how much dof backs them; at low dof both checks are weakly
-    // powered and "acceptable" / "not significant" should be read as
-    // "not detected", not "ruled out".
+    // amount of additional --noise-shots sharpens a model's ability
+    // to be distinguished from the others by AIC. It buys precision
+    // on each point's value, not additional points to compare curves
+    // against.
     let power_note = if lin_dof <= 2 {
-        "very low degrees of freedom -- a real but subtle bias could easily hide inside this \
-         much slack; treat both checks below as weakly powered rather than conclusive"
+        "very low degrees of freedom -- treat all three fits as weakly distinguishable from \
+         each other; the AIC gaps below could easily flip with a different noise draw"
     } else if lin_dof <= 4 {
-        "modest degrees of freedom -- enough to catch a clear bias but not a subtle one; more \
-         distinct noise-scale points (not more shots at the existing ones) is what sharpens \
-         this test further"
+        "modest degrees of freedom -- enough to catch a clearly-better model but not a subtly \
+         better one; more distinct noise-scale points (not more shots at the existing ones) \
+         sharpens this further"
     } else {
-        "enough degrees of freedom for these checks to carry real statistical weight"
+        "enough degrees of freedom for the AIC comparison below to carry real statistical weight"
     };
+    println!("    Statistical power:  linear dof = {} -- {}.", lin_dof, power_note);
     println!(
-        "    Statistical power:  linear dof = {}, curvature dof = {}  -- {}.",
-        lin_dof, quad_dof, power_note
+        "    -> Model selection (AIC, lower is better; >2 gap required to switch): linear = \
+         {:.3}{}{}",
+        lin_aic,
+        quad_aic.map(|a| format!(", quadratic = {:.3}", a)).unwrap_or_default(),
+        exp_aic.map(|a| format!(", exponential = {:.3}", a)).unwrap_or_default(),
     );
-    match quad_fit {
-        Some((quad_intercept, quad_intercept_stderr, quad_coeff, quad_coeff_stderr)) => {
-            let quad_sigma = quad_coeff.abs() / quad_coeff_stderr.max(1e-12);
-            println!(
-                "    Quadratic fit:  intercept = {:.6}  (+/- {:.6}),  curvature term = {:.6}  \
-                 (+/- {:.6}, {:.1} sigma from zero)",
-                quad_intercept, quad_intercept_stderr, quad_coeff, quad_coeff_stderr, quad_sigma
-            );
-            println!(
-                "    Linear vs. quadratic intercept: {:.6} vs. {:.6}  (shift {:.6}) -- {}",
-                linear_mitigated,
-                quad_intercept,
-                (linear_mitigated - quad_intercept).abs(),
-                if curvature_significant {
-                    "curvature is statistically significant; more shots tighten the linear fit \
-                     to the wrong curve rather than removing this bias -- a flat-or-worsening \
-                     residual despite shrinking stderr is expected under this model, not anomalous"
-                } else if lin_dof <= 4 {
-                    "curvature not significant, but dof is thin here -- this is 'not detected \
-                     at current power', not 'ruled out'; more distinct scale points would \
-                     sharpen this before concluding the linear fit is unbiased"
-                } else {
-                    "curvature not significant with reasonable statistical power -- the linear \
-                     fit's residual bias, if any, is small relative to what these points and \
-                     shots can resolve"
-                }
-            );
-            println!(
-                "    -> Model selection: reporting the {} estimate ({:.6} +/- {:.6}) for the \
-                 error decomposition, consistency check, and summary below{}",
-                mitigation_model,
-                mitigated,
-                mitigated_stderr,
-                if curvature_significant {
-                    " -- curvature crossed the 2-sigma threshold, so the linear fit is treated \
-                     as biased and the quadratic intercept is used instead."
-                } else {
-                    " -- curvature did not cross the 2-sigma threshold, so the linear fit \
-                     remains the reported estimate, same as standard ZNE."
-                }
-            );
-        }
-        None => println!("    Quadratic fit: could not be computed (degenerate/duplicate scale points)."),
-    }
+    println!(
+        "       Reporting the {} estimate ({:.6} +/- {:.6}) for the error decomposition, \
+         consistency check, and summary below.",
+        mitigation_model, mitigated, mitigated_stderr
+    );
 
     // The "vs. exact continuum physics" gap has two independent
     // sources, and ZNE can only ever fix one of them: (1) Trotter
