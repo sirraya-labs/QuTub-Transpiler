@@ -33,6 +33,7 @@ G --> J["Fidelity Estimation"]
 | Understand what this project is and why it exists | [Introduction](introduction.md) |
 | Add the crate to my own project and compile my first circuit | [Installation](installation.md) |
 | Clone the repo, build from source, and run the examples/tests | [Getting Started](getting-started.md) |
+| Browse the full example catalog, organized by what I'm trying to learn | [Examples](examples.md) |
 | Understand how the compiler is built internally, module by module | [Architecture](architecture.md) |
 | Contribute code, docs, or bug reports | [Contributing](contributing.md) |
 
