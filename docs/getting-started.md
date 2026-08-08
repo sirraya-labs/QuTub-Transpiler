@@ -61,7 +61,7 @@ lists every available example. Run one with:
 cargo run --example bell_state_end_to_end
 ```
 
-Examples cover Bell state preparation, quantum teleportation, GHZ state generation, QFT, Grover search, routing, native decomposition, OpenQASM parsing, circuit visualization, and hardware-aware compilation.
+For a guided tour — organized by what you're trying to learn, not just an alphabetical file list — see the [Examples](examples.md) page.
 
 ## Development workflow
 
