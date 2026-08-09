@@ -20,7 +20,7 @@ Contributions are welcome at every level, including:
 
 You do **not** need to be an expert in quantum computing or Rust to contribute.
 
-For the deep technical explanation of the compiler architecture and the reasoning behind its design decisions, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+For the deep technical explanation of the compiler architecture and the reasoning behind its design decisions, see [`ARCHITECTURE.md`](architecture.md).
 
 ---
 
@@ -146,7 +146,7 @@ Not every useful contribution requires writing Rust.
 | Improve test coverage            | Follow the [testing rule](#the-core-testing-rule) |
 | Pick up a beginner-friendly task | [Good first issues](#good-first-issues)           |
 | Propose a feature                | Start with an issue or discussion                 |
-| Work on a roadmap item           | See [`ARCHITECTURE.md`](ARCHITECTURE.md)          |
+| Work on a roadmap item           | See [`ARCHITECTURE.md`](architecture.md)          |
 | Improve compiler optimization    | Discuss the intended transformation first         |
 | Add a backend or topology        | Open an issue before implementation               |
 
@@ -168,7 +168,7 @@ A problem may already be known, actively worked on, or intentionally designed th
 
 This codebase contains a number of cases where an apparently simpler implementation was considered and deliberately rejected.
 
-Read [`ARCHITECTURE.md`](ARCHITECTURE.md) before assuming that an unusual implementation is accidental.
+Read [`ARCHITECTURE.md`](architecture.md) before assuming that an unusual implementation is accidental.
 
 ---
 
@@ -306,7 +306,7 @@ flowchart TD
 | `tests/decompositions.rs` | Gate identities verified against the real simulator |
 | `tests/measurement.rs`    | Statistical verification of `Gate::Measure`         |
 
-For the full explanation of each module, including the mathematical identities and design constraints behind them, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+For the full explanation of each module, including the mathematical identities and design constraints behind them, see [`ARCHITECTURE.md`](architecture.md).
 
 ---
 

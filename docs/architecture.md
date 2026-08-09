@@ -2,7 +2,7 @@
 
 > **Deep-dive architecture reference** for the Sirraya QuTub transpiler: its intermediate representation, optimization pipeline, hardware-aware routing, backend lowering, execution model, and verification strategy.
 >
-> **Looking for setup, tests, or PR instructions?** See [`CONTRIBUTING.md`](CONTRIBUTING.md). This document explains **what the transpiler does, why it is built this way, and what remains open**.
+> **Looking for setup, tests, or PR instructions?** See [`CONTRIBUTING.md`](contributing.md). This document explains **what the transpiler does, why it is built this way, and what remains open**.
 
 ---
 
@@ -1786,7 +1786,7 @@ The central architectural idea is:
 
 # 17. See also
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) contains:
+[`CONTRIBUTING.md`](contributing.md) contains:
 
 * project setup
 * test commands
