@@ -120,6 +120,23 @@ pub struct Circuit {
 }
 
 impl Circuit {
+    /// Creates a new empty circuit with `num_qubits` qubits and no
+    /// classical bits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::{Circuit, Gate};
+    ///
+    /// // A Bell circuit: H on qubit 0, then Cx from 0 to 1.
+    /// let mut c = Circuit::new(2);
+    /// c.push(Gate::H(0)).push(Gate::Cx(0, 1));
+    ///
+    /// let counts = c.gate_counts();
+    /// assert_eq!(counts["h"], 1);
+    /// assert_eq!(counts["cx"], 1);
+    /// assert!(c.validate().is_ok());
+    /// ```
     pub fn new(num_qubits: usize) -> Self {
         Self {
             num_qubits,
