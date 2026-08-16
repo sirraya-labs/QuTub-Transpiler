@@ -96,7 +96,13 @@ mod trapped_ion;
 
 pub use spec::{Backend, BackendSpec, RotAxis};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+// NOTE: no longer `Copy` -- see `NativeGate`'s identical note; `If`'s
+// `Box<BackendGate>` field is the same kind of heap allocation that
+// can't be. `resynthesize`'s `single_qubit_matrix` (the one place in
+// this file that used to take a `BackendGate` by value and then reuse
+// the original binding afterward, which only worked via implicit
+// copy) now takes `&BackendGate` instead -- see that function.
+#[derive(Debug, Clone, PartialEq)]
 pub enum BackendGate {
     Rz(usize, f64),
     /// The backend's native continuously-variable single-qubit
@@ -115,6 +121,40 @@ pub enum BackendGate {
     /// backend -- not a unitary rewrite target, so no lowering
     /// identity in this module ever targets it.
     Measure(usize, usize),
+    /// The backend-lowered counterpart of `ir::Gate::If` /
+    /// `native::NativeGate::If`: applies `inner` iff classical bit
+    /// `clbit` holds `value`. `lower`/`lower_with_coupling` produce it
+    /// by re-expressing a conditioned native gate exactly the way an
+    /// unconditioned one would be (via `push_ry`/`push_two_qubit_zz`/
+    /// direct `Rz`), then wrapping *every* `BackendGate` that
+    /// re-expansion emitted in the same condition -- so e.g. a
+    /// conditioned `Ry` lowered to an `Rx`-native backend becomes three
+    /// separately-conditioned `BackendGate`s (`Rot(pi/2)`,
+    /// `Rz(theta)`, `Rot(-pi/2)`, see [`push_ry_via_rx`]), not one `If`
+    /// wrapping all three -- the same reasoning `NativeGate::If`'s doc
+    /// comment gives for why that's the shape execution needs.
+    /// `inner` can be either 1- or 2-qubit-shaped depending on what got
+    /// re-expressed (e.g. an `Rx`-native backend's `push_two_qubit_zz`
+    /// identity for a conditioned `Rzz` produces conditioned `Cx`s, not
+    /// conditioned `Rzz`s) -- see [`BackendGate::qubits`].
+    If(usize, bool, Box<BackendGate>),
+}
+
+impl BackendGate {
+    /// Qubit indices this gate touches -- the backend-level mirror of
+    /// `ir::Gate::qubits`, including the same `If`-delegates-to-`inner`
+    /// rule. Used by [`optimize`] and [`resynthesize`] to treat a
+    /// conditioned gate as a real event on every wire it touches, the
+    /// same way `Measure` already is (see both functions' `If` arms).
+    pub(crate) fn qubits(&self) -> Vec<usize> {
+        match *self {
+            BackendGate::Rz(q, _) | BackendGate::Rot(q, _) | BackendGate::Measure(q, _) => vec![q],
+            BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => {
+                vec![a, b]
+            }
+            BackendGate::If(_, _, ref inner) => inner.qubits(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -142,18 +182,25 @@ impl BackendCircuit {
     /// numbers a per-backend fidelity budget needs. `Measure` is
     /// excluded from both, for the same reason `NativeCircuit::gate_counts`
     /// excludes it: it isn't a unitary gate, so a depolarizing-error
-    /// budget shouldn't price it as one.
+    /// budget shouldn't price it as one. `If` is unwrapped and its
+    /// `inner` counted as whatever it is, same reasoning as
+    /// `NativeCircuit::gate_counts`'s own `If` handling.
     pub fn gate_counts(&self) -> (usize, usize) {
         let mut single = 0;
         let mut two = 0;
         for g in &self.gates {
-            match g {
-                BackendGate::Rz(..) | BackendGate::Rot(..) => single += 1,
-                BackendGate::Cx(..) | BackendGate::Cz(..) | BackendGate::Rzz(..) => two += 1,
-                BackendGate::Measure(..) => {}
-            }
+            count_backend_gate(g, &mut single, &mut two);
         }
         (single, two)
+    }
+}
+
+fn count_backend_gate(g: &BackendGate, single: &mut usize, two: &mut usize) {
+    match g {
+        BackendGate::Rz(..) | BackendGate::Rot(..) => *single += 1,
+        BackendGate::Cx(..) | BackendGate::Cz(..) | BackendGate::Rzz(..) => *two += 1,
+        BackendGate::Measure(..) => {}
+        BackendGate::If(_, _, inner) => count_backend_gate(inner, single, two),
     }
 }
 
@@ -258,6 +305,60 @@ pub fn lower_with_coupling_no_restore(
     lower_with_coupling_impl(circuit, backend, coupling, crate::route::route_best_no_restore)
 }
 
+/// Relabels one already-native (`{Rz, Ry, Rzz, Measure}`) gate straight
+/// into `TrappedIon`'s own `BackendGate`s, 1:1, recursing into `If`'s
+/// `inner` so a conditioned gate keeps its condition through the
+/// relabeling rather than needing its own special case at every call
+/// site. Used only by the `is_native_decompose_target` branch of
+/// [`lower_with_coupling_impl`] -- every other backend goes through
+/// [`push_native_gate_reexpressed`] instead, which does real
+/// re-expansion work this function deliberately doesn't.
+fn relabel_native_to_trapped_ion(g: &crate::native::NativeGate) -> BackendGate {
+    use crate::native::NativeGate;
+    match *g {
+        NativeGate::Rz(q, a) => BackendGate::Rz(q, a),
+        NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
+        NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
+        NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
+        NativeGate::If(clbit, value, ref inner) => {
+            BackendGate::If(clbit, value, Box::new(relabel_native_to_trapped_ion(inner)))
+        }
+    }
+}
+
+/// Re-expresses one already-decomposed native gate into `bc`'s backend
+/// gate set -- exactly what the inline per-gate loop in
+/// [`lower_with_coupling_impl`]'s non-`TrappedIon` branch used to do
+/// directly for `Rz`/`Ry`/`Rzz`/`Measure`, factored out so `If` can
+/// call it recursively on `inner` and then wrap *everything* that
+/// recursive call pushed in the same classical condition. That "wrap
+/// everything" step matters because `push_ry`/`push_two_qubit_zz` can
+/// each emit more than one physical `BackendGate` for a single logical
+/// native gate (see `BackendGate::If`'s own doc comment) -- every one
+/// of them must carry the same condition, not just the first.
+fn push_native_gate_reexpressed(
+    bc: &mut BackendCircuit,
+    backend: Backend,
+    axis: RotAxis,
+    g: &crate::native::NativeGate,
+) {
+    use crate::native::NativeGate;
+    match *g {
+        NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
+        NativeGate::Ry(q, a) => push_ry(bc, axis, q, a),
+        NativeGate::Rzz(a, b, t) => backend.push_two_qubit_zz(bc, a, b, t),
+        NativeGate::Measure(q, c) => bc.push(BackendGate::Measure(q, c)),
+        NativeGate::If(clbit, value, ref inner) => {
+            let before = bc.gates.len();
+            push_native_gate_reexpressed(bc, backend, axis, inner);
+            let produced: Vec<BackendGate> = bc.gates.split_off(before);
+            for produced_gate in produced {
+                bc.push(BackendGate::If(clbit, value, Box::new(produced_gate)));
+            }
+        }
+    }
+}
+
 fn lower_with_coupling_impl(
     circuit: &Circuit,
     backend: Backend,
@@ -285,12 +386,7 @@ fn lower_with_coupling_impl(
         // TrappedIon today) -- nothing to re-express, just relabel.
         let native = crate::native::decompose(circuit);
         for g in &native.gates {
-            bc.push(match *g {
-                crate::native::NativeGate::Rz(q, a) => BackendGate::Rz(q, a),
-                crate::native::NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
-                crate::native::NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
-                crate::native::NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
-            });
+            bc.push(relabel_native_to_trapped_ion(g));
         }
         optimize(&mut bc);
     } else {
@@ -326,16 +422,7 @@ fn lower_with_coupling_impl(
                     let mut nc = crate::native::NativeCircuit::new(circuit.num_qubits);
                     crate::native::decompose_gate(&mut nc, gate);
                     for g in &nc.gates {
-                        match *g {
-                            crate::native::NativeGate::Rz(q, a) => bc.push(BackendGate::Rz(q, a)),
-                            crate::native::NativeGate::Ry(q, a) => push_ry(&mut bc, axis, q, a),
-                            crate::native::NativeGate::Rzz(a, b, t) => {
-                                backend.push_two_qubit_zz(&mut bc, a, b, t)
-                            }
-                            crate::native::NativeGate::Measure(q, c) => {
-                                bc.push(BackendGate::Measure(q, c))
-                            }
-                        }
+                        push_native_gate_reexpressed(&mut bc, backend, axis, g);
                     }
                 }
             }
@@ -410,6 +497,9 @@ pub(crate) fn push_h(bc: &mut BackendCircuit, axis: RotAxis, q: usize) {
             crate::native::NativeGate::Measure(..) => {
                 unreachable!("H never decomposes to Measure")
             }
+            crate::native::NativeGate::If(..) => {
+                unreachable!("H never decomposes to a conditioned gate")
+            }
         }
     }
 }
@@ -447,8 +537,8 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
 
     let axis = bc.backend.rot_axis();
 
-    fn single_qubit_matrix(axis: RotAxis, g: BackendGate) -> Option<(usize, Mat2)> {
-        match g {
+    fn single_qubit_matrix(axis: RotAxis, g: &BackendGate) -> Option<(usize, Mat2)> {
+        match *g {
             BackendGate::Rz(q, a) => Some((q, m_rz(a))),
             BackendGate::Rot(q, a) => {
                 let m = match axis {
@@ -488,7 +578,7 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
     let mut out: Vec<BackendGate> = Vec::with_capacity(bc.gates.len());
 
     for g in bc.gates.drain(..) {
-        if let Some((q, m)) = single_qubit_matrix(axis, g) {
+        if let Some((q, m)) = single_qubit_matrix(axis, &g) {
             let entry = acc.entry(q).or_insert_with(m_identity);
             *entry = matmul(m, *entry);
             continue;
@@ -509,6 +599,20 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
                 // rotation accumulated for it must be emitted first,
                 // the same as for a two-qubit gate touching q.
                 flush(q, &mut acc, &mut out, axis);
+                out.push(g);
+            }
+            BackendGate::If(_, _, ref inner) => {
+                // Same treatment as Measure just above, generalized to
+                // every wire the conditioned gate touches (one or two,
+                // depending on what `inner` is -- see
+                // `BackendGate::qubits`): a real event on each of them,
+                // so any pending single-qubit rotation there must be
+                // flushed first. `ref inner` (rather than binding by
+                // value) keeps `g` itself intact for `out.push(g)`
+                // below, since `BackendGate` is no longer `Copy`.
+                for q in inner.qubits() {
+                    flush(q, &mut acc, &mut out, axis);
+                }
                 out.push(g);
             }
             BackendGate::Rz(..) | BackendGate::Rot(..) => unreachable!("handled above"),
@@ -772,6 +876,23 @@ pub fn optimize(bc: &mut BackendCircuit) {
                 invalidate_pairs_touching(&mut last_2q, q);
                 out.push(Some(g));
             }
+            BackendGate::If(_, _, ref inner) => {
+                // Same barrier treatment as Measure just above, over
+                // every wire `inner` touches (one or two -- see
+                // `BackendGate::qubits`): a conditioned gate is a real
+                // event on those wires whether or not it ends up firing
+                // at runtime, since the *pulse* is compiled statically
+                // either way (see `emit.rs`'s execution of this
+                // variant, which is what actually decides at runtime).
+                // `ref inner` keeps `g` intact for `out.push(Some(g))`,
+                // since `BackendGate` is no longer `Copy`.
+                for q in inner.qubits() {
+                    flush(q, &mut pending_rz, &mut last_rot, &mut last_2q, &mut out);
+                    last_rot.remove(&q);
+                    invalidate_pairs_touching(&mut last_2q, q);
+                }
+                out.push(Some(g));
+            }
         }
     }
 
@@ -848,6 +969,13 @@ mod tests {
                     "apply_backend_circuit: Measure execution is blocked on confirming \
                      sirraya_qutub::core::QuantumRegister's measurement API (see P0.1's \
                      definition of done) -- no test in this file exercises Measure yet."
+                ),
+                BackendGate::If(..) => panic!(
+                    "apply_backend_circuit: If execution needs the same shot-based \
+                     methodology Measure above is blocked on, plus a way to feed this \
+                     direct-simulation comparison a classical outcome to condition on -- no \
+                     test in this file exercises If yet; see emit.rs's \
+                     apply_backend_to_with_measurement for the real, tested execution path."
                 ),
             }
         }
@@ -929,6 +1057,16 @@ mod tests {
                     BackendGate::Rzz(a, b, _) => Some((a, b)),
                     BackendGate::Rz(..) | BackendGate::Rot(..) => None,
                     BackendGate::Measure(..) => None,
+                    // Recurse rather than `None`: a conditioned Cx/Cz/
+                    // Rzz (possible on a non-TrappedIon backend, see
+                    // BackendGate::If's doc comment) still needs its
+                    // adjacency checked, exactly as much as an
+                    // unconditioned one would.
+                    BackendGate::If(_, _, ref inner) => match inner.as_ref() {
+                        BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => Some((*a, *b)),
+                        BackendGate::Rzz(a, b, _) => Some((*a, *b)),
+                        _ => None,
+                    },
                 };
                 if let Some((a, b)) = pair {
                     assert!(

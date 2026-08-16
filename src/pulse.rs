@@ -406,98 +406,127 @@ pub fn schedule(bc: &BackendCircuit, cal: &PulseCalibration) -> Result<Schedule,
     let mut busy_until: HashMap<usize, f64> = HashMap::new();
     let mut instructions = Vec::with_capacity(bc.gates.len());
 
+    for g in &bc.gates {
+        schedule_one(g, cal, &mut busy_until, &mut instructions)?;
+    }
+
+    Ok(Schedule { backend: bc.backend, instructions })
+}
+
+/// One gate's contribution to a [`Schedule`] -- the per-gate body
+/// [`schedule`]'s loop used to inline directly, factored out so
+/// `BackendGate::If` can recurse into its `inner` with the same logic
+/// rather than a second copy of it.
+fn schedule_one(
+    g: &BackendGate,
+    cal: &PulseCalibration,
+    busy_until: &mut HashMap<usize, f64>,
+    instructions: &mut Vec<PulseInstruction>,
+) -> Result<(), String> {
     fn qubit_time(q: usize, busy_until: &HashMap<usize, f64>) -> f64 {
         *busy_until.get(&q).unwrap_or(&0.0)
     }
 
-    for g in &bc.gates {
-        match *g {
-            BackendGate::Rz(q, theta) => {
-                let t = qubit_time(q, &busy_until);
-                instructions.push(PulseInstruction::ShiftPhase {
-                    channel: Channel::Drive(q),
-                    start_time_ns: t,
-                    angle_rad: theta,
-                });
-                // Zero duration: `busy_until[q]` is deliberately left
-                // untouched -- see this module's doc comment on
-                // virtual-Z.
-            }
-            BackendGate::Rot(q, theta) => {
-                let t = qubit_time(q, &busy_until);
-                let amplitude = cal.rot.pi_amplitude * theta / PI;
-                instructions.push(PulseInstruction::Play {
-                    channel: Channel::Drive(q),
-                    start_time_ns: t,
-                    duration_ns: cal.rot.duration_ns,
-                    envelope: Envelope::Drag {
-                        sigma_ns: cal.rot.sigma_ns,
-                        beta: cal.rot.drag_beta,
-                    },
-                    amplitude,
-                });
-                busy_until.insert(q, t + cal.rot.duration_ns);
-            }
-            BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => {
-                let t = qubit_time(a, &busy_until).max(qubit_time(b, &busy_until));
-                instructions.push(PulseInstruction::Play {
-                    channel: Channel::Control(a, b),
-                    start_time_ns: t,
-                    duration_ns: cal.two_qubit.duration_ns,
-                    envelope: Envelope::GaussianSquare {
-                        sigma_ns: cal.two_qubit.sigma_ns,
-                        risefall_ns: cal.two_qubit.risefall_ns,
-                    },
-                    amplitude: cal.two_qubit.amplitude,
-                });
-                let end = t + cal.two_qubit.duration_ns;
-                busy_until.insert(a, end);
-                busy_until.insert(b, end);
-            }
-            BackendGate::Rzz(a, b, theta) => {
-                let rzz_cal = cal.rzz.ok_or_else(|| {
-                    format!(
-                        "pulse scheduling for Rzz (TrappedIon's native two-qubit gate, on \
-                         qubits {a},{b}) has no calibration entry on backend {:?} -- see \
-                         this module's doc comment on backend coverage",
-                        cal.backend
-                    )
-                })?;
-                let t = qubit_time(a, &busy_until).max(qubit_time(b, &busy_until));
-                let amplitude = rzz_cal.pi_amplitude * theta / PI;
-                instructions.push(PulseInstruction::Play {
-                    channel: Channel::Control(a, b),
-                    start_time_ns: t,
-                    duration_ns: rzz_cal.duration_ns,
-                    envelope: Envelope::GaussianSquare {
-                        sigma_ns: rzz_cal.sigma_ns,
-                        risefall_ns: rzz_cal.risefall_ns,
-                    },
-                    amplitude,
-                });
-                let end = t + rzz_cal.duration_ns;
-                busy_until.insert(a, end);
-                busy_until.insert(b, end);
-            }
-            BackendGate::Measure(q, _c) => {
-                let t = qubit_time(q, &busy_until);
-                let duration = cal.readout_duration_ns;
-                instructions.push(PulseInstruction::Play {
-                    channel: Channel::Readout(q),
-                    start_time_ns: t,
-                    duration_ns: duration,
-                    envelope: Envelope::GaussianSquare {
-                        sigma_ns: duration / 8.0,
-                        risefall_ns: duration / 8.0,
-                    },
-                    amplitude: 1.0,
-                });
-                busy_until.insert(q, t + duration);
-            }
+    match *g {
+        BackendGate::Rz(q, theta) => {
+            let t = qubit_time(q, busy_until);
+            instructions.push(PulseInstruction::ShiftPhase {
+                channel: Channel::Drive(q),
+                start_time_ns: t,
+                angle_rad: theta,
+            });
+            // Zero duration: `busy_until[q]` is deliberately left
+            // untouched -- see this module's doc comment on
+            // virtual-Z.
+        }
+        BackendGate::Rot(q, theta) => {
+            let t = qubit_time(q, busy_until);
+            let amplitude = cal.rot.pi_amplitude * theta / PI;
+            instructions.push(PulseInstruction::Play {
+                channel: Channel::Drive(q),
+                start_time_ns: t,
+                duration_ns: cal.rot.duration_ns,
+                envelope: Envelope::Drag { sigma_ns: cal.rot.sigma_ns, beta: cal.rot.drag_beta },
+                amplitude,
+            });
+            busy_until.insert(q, t + cal.rot.duration_ns);
+        }
+        BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => {
+            let t = qubit_time(a, busy_until).max(qubit_time(b, busy_until));
+            instructions.push(PulseInstruction::Play {
+                channel: Channel::Control(a, b),
+                start_time_ns: t,
+                duration_ns: cal.two_qubit.duration_ns,
+                envelope: Envelope::GaussianSquare {
+                    sigma_ns: cal.two_qubit.sigma_ns,
+                    risefall_ns: cal.two_qubit.risefall_ns,
+                },
+                amplitude: cal.two_qubit.amplitude,
+            });
+            let end = t + cal.two_qubit.duration_ns;
+            busy_until.insert(a, end);
+            busy_until.insert(b, end);
+        }
+        BackendGate::Rzz(a, b, theta) => {
+            let rzz_cal = cal.rzz.ok_or_else(|| {
+                format!(
+                    "pulse scheduling for Rzz (TrappedIon's native two-qubit gate, on \
+                     qubits {a},{b}) has no calibration entry on backend {:?} -- see \
+                     this module's doc comment on backend coverage",
+                    cal.backend
+                )
+            })?;
+            let t = qubit_time(a, busy_until).max(qubit_time(b, busy_until));
+            let amplitude = rzz_cal.pi_amplitude * theta / PI;
+            instructions.push(PulseInstruction::Play {
+                channel: Channel::Control(a, b),
+                start_time_ns: t,
+                duration_ns: rzz_cal.duration_ns,
+                envelope: Envelope::GaussianSquare {
+                    sigma_ns: rzz_cal.sigma_ns,
+                    risefall_ns: rzz_cal.risefall_ns,
+                },
+                amplitude,
+            });
+            let end = t + rzz_cal.duration_ns;
+            busy_until.insert(a, end);
+            busy_until.insert(b, end);
+        }
+        BackendGate::Measure(q, _c) => {
+            let t = qubit_time(q, busy_until);
+            let duration = cal.readout_duration_ns;
+            instructions.push(PulseInstruction::Play {
+                channel: Channel::Readout(q),
+                start_time_ns: t,
+                duration_ns: duration,
+                envelope: Envelope::GaussianSquare {
+                    sigma_ns: duration / 8.0,
+                    risefall_ns: duration / 8.0,
+                },
+                amplitude: 1.0,
+            });
+            busy_until.insert(q, t + duration);
+        }
+        BackendGate::If(_, _, ref inner) => {
+            // Scheduled exactly as `inner` would be on its own --
+            // *this* static `Schedule` only ever describes which
+            // pulses exist and when, never whether one actually fires
+            // at runtime (see `emit.rs`'s execution of this variant,
+            // which is what makes that call). That split mirrors how
+            // this crate already treats the analogous case one layer
+            // up: `backend::lower`'s `If` handling compiles the pulse
+            // unconditionally into the schedule; the real-time
+            // classical feed-forward decision belongs to control
+            // electronics this static model doesn't represent, not to
+            // schedule construction. A genuine dynamic-circuits
+            // scheduler -- one that can express "wait for the
+            // classical result, then branch, with real feed-forward
+            // latency" -- is real, separate follow-on work this
+            // function doesn't attempt.
+            schedule_one(inner, cal, busy_until, instructions)?;
         }
     }
-
-    Ok(Schedule { backend: bc.backend, instructions })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -812,5 +841,44 @@ mod tests {
         // And each backend's own calibration still works.
         assert!(schedule(&ibm_bc, &cal()).is_ok());
         assert!(schedule(&rigetti_bc, &rigetti_ankaa3_pulse_calibration()).is_ok());
+    }
+
+    #[test]
+    fn if_is_scheduled_exactly_as_its_inner_gate_would_be() {
+        // BackendGate::If(_, _, Rot(..)) should produce the identical
+        // Play instruction (minus the classical condition, which this
+        // static Schedule model doesn't represent at all -- see
+        // schedule_one's own doc comment on that variant) that a bare
+        // Rot would, at the same time, with the same effect on
+        // busy_until. Built via backend::lower on an empty Circuit
+        // (like this file's other tests) since BackendCircuit::new is
+        // private outside backend.rs -- push is pub(crate), so the
+        // gates themselves can still be added directly.
+        let mut conditioned = backend::lower(&Circuit::new(1), Backend::TrappedIon);
+        conditioned.push(BackendGate::If(0, true, Box::new(BackendGate::Rot(0, PI))));
+        let mut plain = backend::lower(&Circuit::new(1), Backend::TrappedIon);
+        plain.push(BackendGate::Rot(0, PI));
+
+        let sched_conditioned = schedule(&conditioned, &trapped_ion_pulse_calibration()).unwrap();
+        let sched_plain = schedule(&plain, &trapped_ion_pulse_calibration()).unwrap();
+        assert_eq!(sched_conditioned.instructions, sched_plain.instructions);
+    }
+
+    #[test]
+    fn if_wrapping_a_two_qubit_gate_still_advances_busy_until_on_both_wires() {
+        // A conditioned two-qubit gate must still block a later
+        // single-qubit pulse on either of its wires from starting
+        // early -- same overlap-freedom guarantee as an unconditioned
+        // two-qubit gate.
+        let mut bc = backend::lower(&Circuit::new(2), Backend::TrappedIon);
+        bc.push(BackendGate::If(0, true, Box::new(BackendGate::Rzz(0, 1, PI / 2.0))));
+        bc.push(BackendGate::Rot(0, PI));
+        let sched = schedule(&bc, &trapped_ion_pulse_calibration()).unwrap();
+        assert!(
+            sched.has_no_overlaps(),
+            "a conditioned two-qubit gate must still reserve both its wires: {:?}",
+            sched.instructions
+        );
+        assert_eq!(sched.instructions.len(), 2, "expected exactly the Rzz pulse plus the Rot pulse");
     }
 }

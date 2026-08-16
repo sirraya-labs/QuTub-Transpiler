@@ -54,6 +54,19 @@
 //! crate for now -- see the accompanying `submit_ibm.py` for that,
 //! since there is no official Rust SDK for IBM Quantum Platform /
 //! Qiskit Runtime.
+//!
+//! It also doesn't yet export `BackendGate::If` (a classically-
+//! conditioned gate, see `ir::Gate::If`'s doc comment) -- `lower_ibm_native`
+//! errors on one rather than guessing. Real OPENQASM 2.0's `if`
+//! conditions on a whole `creg`'s *integer value*, not one indexed bit
+//! the way this crate's own `emit.rs`/`qasm.rs` dialect extension does
+//! (see `qasm.rs`'s `parse_if_condition` doc comment) -- correctly
+//! expressing a single-bit condition in IBM's real basis needs either a
+//! dedicated size-1 `creg` per condition or a documented bit-masking
+//! convention, and this module doesn't have either yet. Emitting
+//! something that merely *parses* as QASM without actually matching
+//! what the condition means would be exactly the kind of silent-wrong
+//! output this crate's own conventions elsewhere refuse to produce.
 
 use crate::backend::{Backend, BackendCircuit, BackendGate};
 
@@ -138,6 +151,18 @@ pub fn lower_ibm_native(circuit: &BackendCircuit) -> Result<Vec<IbmInstr>, Strin
                      (Cz belongs to Rigetti, Rzz to TrappedIon -- backend::lower should \
                      never emit either for Backend::IbmQ)",
                     gate
+                ));
+            }
+            BackendGate::If(clbit, ..) => {
+                return Err(format!(
+                    "lower_ibm_native: classically-conditioned gates (clbit {}) aren't \
+                     supported yet -- real OPENQASM 2.0's `if` conditions on a whole creg's \
+                     integer value, not one indexed bit the way this crate's own qasm.rs \
+                     dialect extension does (see that module's `parse_if_condition` doc \
+                     comment); correctly expressing a single-bit condition in IBM's real \
+                     basis needs a convention this module doesn't have yet -- see this \
+                     module's own doc comment.",
+                    clbit
                 ));
             }
         }

@@ -88,6 +88,14 @@ fn apply_ir_gate_directly(reg: &mut QuantumRegister, gate: &Gate) {
              to a measured bit), not this direct fidelity-comparison harness. No test in this \
              file exercises Measure; this arm exists only to satisfy exhaustiveness."
         ),
+        Gate::If(..) => panic!(
+            "apply_ir_gate_directly: If has no fidelity-based test yet, for the same reason \
+             as Measure above -- it reads a classical bit this direct fidelity-comparison \
+             harness has nowhere to produce. No test in this file exercises If; this arm \
+             exists only to satisfy exhaustiveness. (See emit.rs's \
+             apply_to_with_measurement/apply_native_gate_with_measurement for the real, \
+             tested execution path, and quantum_teleportation.rs for it in real use.)"
+        ),
     }
 }
 

@@ -354,20 +354,28 @@ fn circuit_to_portable_qasm(c: &Circuit, name: &str) -> String {
 fn backend_depth(c: &BackendCircuit) -> usize {
     let mut last_layer = vec![0usize; c.num_qubits];
     for gate in &c.gates {
-        let qs: Vec<usize> = match *gate {
-            BackendGate::Rz(q, _) | BackendGate::Rot(q, _) | BackendGate::Measure(q, _) => {
-                vec![q]
-            }
-            BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => {
-                vec![a, b]
-            }
-        };
+        let qs = backend_gate_qubits(gate);
         let layer = qs.iter().map(|&q| last_layer[q]).max().unwrap_or(0) + 1;
         for q in qs {
             last_layer[q] = layer;
         }
     }
     last_layer.into_iter().max().unwrap_or(0)
+}
+
+/// The qubit(s) a `BackendGate` touches. `If` delegates to `inner` --
+/// a conditioned gate occupies exactly the wire(s) its inner gate
+/// does, same as `ir::Gate::If` does at the source level (see
+/// `ir::Gate::qubits`'s doc comment in the crate itself). Written
+/// locally rather than calling the crate's own `BackendGate::qubits`
+/// helper, since that one is `pub(crate)` and not visible from an
+/// example binary.
+fn backend_gate_qubits(gate: &BackendGate) -> Vec<usize> {
+    match gate {
+        BackendGate::Rz(q, _) | BackendGate::Rot(q, _) | BackendGate::Measure(q, _) => vec![*q],
+        BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => vec![*a, *b],
+        BackendGate::If(_, _, inner) => backend_gate_qubits(inner),
+    }
 }
 
 fn export_coupling_map(coupling: &CouplingMap, path: &str) {

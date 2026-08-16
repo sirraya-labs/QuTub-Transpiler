@@ -52,14 +52,18 @@ fn wrap_angle(theta: f64) -> f64 {
 
 fn merge_pass(gates: &[NativeGate]) -> Vec<NativeGate> {
     let mut out: Vec<NativeGate> = Vec::with_capacity(gates.len());
-    for &g in gates {
-        let merged = out.last().copied().and_then(|last| try_merge(last, g));
+    for g in gates {
+        // `NativeGate` is no longer `Copy` (see its own doc comment --
+        // `If`'s `Box` field can't be), so this clones explicitly
+        // rather than leaning on an implicit copy the way this loop
+        // used to (`for &g in gates`).
+        let merged = out.last().cloned().and_then(|last| try_merge(last, g.clone()));
         match merged {
             Some(combined) => {
                 out.pop();
                 out.push(combined);
             }
-            None => out.push(g),
+            None => out.push(g.clone()),
         }
     }
     out
@@ -88,7 +92,7 @@ fn try_merge(last: NativeGate, g: NativeGate) -> Option<NativeGate> {
 fn drop_zero_pass(gates: &[NativeGate]) -> Vec<NativeGate> {
     gates
         .iter()
-        .copied()
+        .cloned()
         .filter(|g| match g {
             NativeGate::Rz(_, a) | NativeGate::Ry(_, a) => a.abs() > EPS,
             NativeGate::Rzz(_, _, a) => a.abs() > EPS,
@@ -96,6 +100,21 @@ fn drop_zero_pass(gates: &[NativeGate]) -> Vec<NativeGate> {
             // an "angle" to net to zero, and it's a real classical side
             // effect the caller depends on.
             NativeGate::Measure(..) => true,
+            // Drop iff the *wrapped* gate would be dropped on its own --
+            // an If(clbit, value, Rz(q, ~0)) is a no-op regardless of
+            // clbit's value, exactly as much as a bare Rz(q, ~0) would
+            // be, so this recurses into the same rule rather than
+            // keeping every If unconditionally (which would leave
+            // genuinely-zero conditioned rotations behind forever).
+            // Measure/If can't actually appear as `inner` here (see
+            // NativeGate::If's doc comment), but are matched
+            // conservatively (never dropped) rather than left
+            // unreachable, so this stays a total function.
+            NativeGate::If(_, _, inner) => match inner.as_ref() {
+                NativeGate::Rz(_, a) | NativeGate::Ry(_, a) => a.abs() > EPS,
+                NativeGate::Rzz(_, _, a) => a.abs() > EPS,
+                NativeGate::Measure(..) | NativeGate::If(..) => true,
+            },
         })
         .collect()
 }
@@ -139,6 +158,39 @@ mod tests {
         nc.push(NativeGate::Measure(0, 0));
         let opt = optimize(&nc);
         assert_eq!(opt.gates, vec![NativeGate::Measure(0, 0)]);
+    }
+
+    #[test]
+    fn keeps_a_conditioned_nonzero_rotation() {
+        let mut nc = NativeCircuit::new(1);
+        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.5))));
+        let opt = optimize(&nc);
+        assert_eq!(opt.gates, vec![NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.5)))]);
+    }
+
+    #[test]
+    fn drops_a_conditioned_zero_rotation() {
+        // If(clbit, value, Rz(q, ~0)) is a no-op no matter what clbit
+        // holds -- same as an unconditioned zero-angle Rz.
+        let mut nc = NativeCircuit::new(1);
+        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.0))));
+        let opt = optimize(&nc);
+        assert!(opt.gates.is_empty());
+    }
+
+    #[test]
+    fn never_merges_two_adjacent_conditioned_rotations() {
+        // try_merge only matches bare Rz/Ry/Rzz pairs -- two If-wrapped
+        // rotations, even same-axis and same-qubit, fall through to its
+        // wildcard and stay separate. (Fusing them would only be valid
+        // if both share the same clbit/value, which this pass doesn't
+        // currently check -- see this module's doc comment for the
+        // scope this pass covers.)
+        let mut nc = NativeCircuit::new(1);
+        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.2))));
+        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.3))));
+        let opt = optimize(&nc);
+        assert_eq!(opt.gates.len(), 2, "conditioned rotations should not be fused by this pass");
     }
 
     #[test]
