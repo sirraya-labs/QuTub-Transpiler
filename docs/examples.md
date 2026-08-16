@@ -1,6 +1,6 @@
 # Examples
 
-The repository ships fourteen runnable examples in `examples/`, each with its own dedicated page below. Every one is real, working code against the actual compiler — nothing here is pseudocode or a notebook stand-in.
+The repository ships fifteen runnable examples in `examples/`, each with its own dedicated page below. Every one is real, working code against the actual compiler — nothing here is pseudocode or a notebook stand-in.
 
 Run any example with:
 
@@ -23,6 +23,7 @@ cargo run --release --example <name>
 | Convince myself a compiler rewrite didn't silently change my circuit | [`verify_equivalence`](examples/verify_equivalence.md) |
 | See a real variational algorithm, with real hardware noise and real error mitigation | [`vqe_h2_ground_state`](examples/vqe_h2_ground_state.md) or [`qaoa_portfolio_optimization`](examples/qaoa_portfolio_optimization.md) |
 | See a physics simulation benchmarked against an independent classical reference | [`trotter_ising_dynamics`](examples/trotter_ising_dynamics.md) |
+| See a communication protocol verified two independent ways, with no-cloning/no-signaling checked numerically | [`quantum_teleportation`](examples/quantum_teleportation.md) |
 
 ---
 
@@ -96,7 +97,7 @@ The crate's actual correctness harness: 40 randomized circuits, every rewrite th
 
 ## Algorithms & applications
 
-Three complete, real algorithms — each running ideal-simulator validation, real backend routing, real Monte-Carlo hardware noise, and statistically rigorous zero-noise extrapolation with propagated uncertainty, not a bare point estimate.
+Four complete, real algorithms and protocols — each running ideal-simulator validation, real backend routing, real Monte-Carlo hardware noise, and statistically rigorous zero-noise extrapolation with propagated uncertainty, not a bare point estimate.
 
 ### [`vqe_h2_ground_state`](examples/vqe_h2_ground_state.md)
 
@@ -109,6 +110,10 @@ QAOA solving a small Markowitz portfolio-selection problem, checked against brut
 ### [`trotter_ising_dynamics`](examples/trotter_ising_dynamics.md)
 
 Trotterized time evolution of a transverse-field Ising chain — the same experiment shape as IBM's 2023 "utility" paper — verified against an independent RK4 integration of the Schrödinger equation, with an error decomposition separating algorithmic error from hardware-noise error.
+
+### [`quantum_teleportation`](examples/quantum_teleportation.md)
+
+Quantum teleportation (Bennett, Brassard, Crépeau, Jozsa, Peres & Wootters, 1993) run through the real routing/lowering/fidelity-estimation pipeline, with the classically-conditioned correction applied directly against the simulator register. Verified against the simulator's own density-matrix machinery, cross-checked by an independent Bloch-vector calculation, across six input states — with no-cloning and no-signaling checked numerically via per-outcome fidelity and outcome-independence statistics, not just asserted.
 
 ---
 
