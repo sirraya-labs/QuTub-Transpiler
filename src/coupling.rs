@@ -93,6 +93,17 @@ pub struct CouplingMap {
 
 impl CouplingMap {
     /// A nearest-neighbor chain: qubit `q` is adjacent to `q + 1` only.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(4);
+    /// assert_eq!(map.num_qubits(), 4);
+    /// assert!(map.is_adjacent(0, 1));
+    /// assert!(!map.is_adjacent(0, 2));
+    /// ```
     pub fn linear(num_qubits: usize) -> Self {
         let mut edges = HashSet::new();
         for q in 0..num_qubits.saturating_sub(1) {
@@ -126,6 +137,20 @@ impl CouplingMap {
     /// whatever produced the list (e.g. a stale qubit-count) instead of
     /// surfacing it at load time, before it can cause a confusing
     /// routing failure downstream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // A triangle over 3 qubits; edges may be given in either direction.
+    /// let map = CouplingMap::from_edges(3, vec![(0, 1), (2, 1), (0, 2)]).unwrap();
+    /// assert_eq!(map.num_qubits(), 3);
+    ///
+    /// // Self-loops and out-of-range endpoints are rejected.
+    /// assert!(CouplingMap::from_edges(3, vec![(1, 1)]).is_err());
+    /// assert!(CouplingMap::from_edges(3, vec![(0, 5)]).is_err());
+    /// ```
     pub fn from_edges(
         num_qubits: usize,
         edges: impl IntoIterator<Item = (usize, usize)>,
@@ -170,6 +195,16 @@ impl CouplingMap {
     /// If `rows == 0` or `cols == 0` -- there is no such thing as a
     /// 0-row or 0-column grid of hexagons; use [`CouplingMap::linear`]
     /// (or an empty map) for a topology-free 0/1-qubit case instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // A single hexagon: 6 data + 6 flag qubits = 12 total.
+    /// let map = CouplingMap::heavy_hex_grid(1, 1);
+    /// assert_eq!(map.num_qubits(), 12);
+    /// ```
     pub fn heavy_hex_grid(rows: usize, cols: usize) -> Self {
         assert!(
             rows >= 1 && cols >= 1,
@@ -196,6 +231,16 @@ impl CouplingMap {
     /// `num_qubits <= 1` returns a topology-free map (no edges needed
     /// to route a 0- or 1-qubit circuit), matching
     /// [`CouplingMap::linear`]'s behavior at the same sizes.
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // The smallest heavy-hex lattice with at least 16 qubits,
+    /// // truncated to exactly 16.
+    /// let map = CouplingMap::heavy_hex_for(16);
+    /// assert_eq!(map.num_qubits(), 16);
+    /// ```
     pub fn heavy_hex_for(num_qubits: usize) -> Self {
         if num_qubits <= 1 {
             return Self {
@@ -245,6 +290,15 @@ impl CouplingMap {
     /// If `rows == 0` or `cols == 0` -- there is no such thing as a
     /// 0-row or 0-column grid; use [`CouplingMap::linear`] (or an empty
     /// map) for a topology-free 0/1-qubit case instead.
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // A 2x3 rectangular grid of qubits: 6 total.
+    /// let map = CouplingMap::square_grid(2, 3);
+    /// assert_eq!(map.num_qubits(), 6);
+    /// ```
     pub fn square_grid(rows: usize, cols: usize) -> Self {
         assert!(
             rows >= 1 && cols >= 1,
@@ -268,6 +322,16 @@ impl CouplingMap {
     /// `num_qubits <= 1` returns a topology-free map, matching
     /// [`CouplingMap::linear`]/[`CouplingMap::heavy_hex_for`]'s
     /// behavior at the same sizes.
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // The smallest square grid with at least 5 qubits,
+    /// // truncated to exactly 5.
+    /// let map = CouplingMap::square_grid_for(5);
+    /// assert_eq!(map.num_qubits(), 5);
+    /// ```
     pub fn square_grid_for(num_qubits: usize) -> Self {
         if num_qubits <= 1 {
             return Self {
@@ -293,6 +357,19 @@ impl CouplingMap {
         }
     }
 
+    /// True if qubits `a` and `b` are directly coupled (an edge exists
+    /// between them, in either direction).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(4);
+    /// assert!(map.is_adjacent(0, 1));
+    /// assert!(map.is_adjacent(1, 0));
+    /// assert!(!map.is_adjacent(0, 2));
+    /// ```
     pub fn is_adjacent(&self, a: usize, b: usize) -> bool {
         let key = if a < b { (a, b) } else { (b, a) };
         self.edges.contains(&key)
@@ -305,6 +382,15 @@ impl CouplingMap {
     /// (point-to-point), this is the building block for algorithms that
     /// need the graph's actual adjacency structure, e.g. any non-linear
     /// map like [`CouplingMap::heavy_hex_for`]/[`CouplingMap::heavy_hex_grid`].
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // The middle qubit of a 3-qubit chain is coupled to both ends.
+    /// let map = CouplingMap::linear(3);
+    /// assert_eq!(map.neighbors(1), vec![0, 2]);
+    /// ```
     pub fn neighbors(&self, q: usize) -> Vec<usize> {
         let mut out = Vec::new();
         for &(a, b) in &self.edges {
@@ -324,6 +410,15 @@ impl CouplingMap {
     /// happens for [`CouplingMap::linear`], but a routing pass built on
     /// top of a future non-linear map should still handle it rather
     /// than panic on a caller's behalf).
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(4);
+    /// assert_eq!(map.shortest_path(0, 3), Some(vec![0, 1, 2, 3]));
+    /// assert_eq!(map.shortest_path(2, 2), Some(vec![2]));
+    /// ```
     pub fn shortest_path(&self, start: usize, goal: usize) -> Option<Vec<usize>> {
         if start == goal {
             return Some(vec![start]);
