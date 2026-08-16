@@ -2910,6 +2910,13 @@ fn remap_single(gate: &Gate, new_q: usize) -> Gate {
         // its classical bit `c` fixed and only moves the qubit -- `c`
         // is not a physical wire and routing never touches it.
         Measure(_, c) => Measure(new_q, c),
+        // `If`'s own qubit(s) are wherever `inner`'s are (see
+        // `Gate::qubits`), so remapping it means recursing into
+        // `inner` with the same `remap_single`/`remap_two` split the
+        // caller already used to get here -- `clbit`/`value` are
+        // classical, untouched by routing, same as `Measure`'s `c`
+        // above.
+        If(clbit, value, ref inner) => If(clbit, value, Box::new(remap_single(inner, new_q))),
         _ => unreachable!("remap_single called on a two-qubit gate"),
     }
 }
@@ -2924,6 +2931,9 @@ fn remap_two(gate: &Gate, new_first: usize, new_second: usize) -> Gate {
         Ryy(_, _, t) => Ryy(new_first, new_second, t),
         Rzz(_, _, t) => Rzz(new_first, new_second, t),
         Cp(_, _, l) => Cp(new_first, new_second, l),
+        If(clbit, value, ref inner) => {
+            If(clbit, value, Box::new(remap_two(inner, new_first, new_second)))
+        }
         _ => unreachable!("remap_two called on a single-qubit gate"),
     }
 }
@@ -2979,6 +2989,11 @@ mod tests {
                  (QuantumRegister::fidelity doesn't apply to a measured bit), not a variant \
                  of this direct-simulation comparison. None of this file's existing tests \
                  push a Measure gate, so this arm exists only to satisfy exhaustiveness."
+            ),
+            Gate::If(..) => panic!(
+                "apply_gate: If has no fidelity-based test yet, for the same reason as \
+                 Measure above. None of this file's existing tests push an If gate, so this \
+                 arm exists only to satisfy exhaustiveness."
             ),
         }
     }

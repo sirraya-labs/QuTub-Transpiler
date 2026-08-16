@@ -28,9 +28,10 @@
 //!
 //! ## How this differs from a toy simulation
 //!
-//! Two things distinguish this from just calling `sirraya_qutub`
+//! Three things distinguish this from just calling `sirraya_qutub`
 //! directly (see that crate's own `examples/teleportation.rs`, which
-//! this follows for the measurement/correction/verification structure):
+//! this follows for the overall measurement/correction/verification
+//! shape):
 //!
 //! 1. **The entangling half of the circuit goes through the real
 //!    pipeline** -- `ir_optimize::optimize`, `route::route_best`
@@ -44,34 +45,45 @@
 //!    Bloch-vector calculation, across six different input states and
 //!    many repeated trials per state -- not asserted once for a single
 //!    hardcoded case.
+//! 3. **Bob's correction is a real, compiled part of the circuit**,
+//!    not something applied by hand after execution -- see the next
+//!    section for what changed and why.
 //!
-//! **One honest architectural note.** `ir::Circuit`/`Gate` has no
-//! classical-control construct today -- `Gate::Measure` writes a
-//! classical bit, but there's no "apply this gate only if that bit is
-//! 1" gate. That's a real, open gap (in the same spirit as
-//! architecture.md's own "what's finished vs. open" sections), not
-//! something this example works around silently. So the classically-
-//! conditioned half of the protocol -- the measurement and the
-//! resulting correction -- is applied directly against the
-//! `QuantumRegister` `emit::run` returns, via `measure_single_qubit`
-//! and `apply_pauli_x`/`apply_pauli_z`, exactly like
-//! `sirraya_qutub`'s own reference example does. This mirrors how real
-//! hardware actually splits the problem: static gate compilation
-//! (what this crate's pipeline does) is a separate concern from
-//! real-time classical feed-forward control electronics (what this
-//! step stands in for) -- it is not a workaround, it's the same
-//! division of labor real teleportation hardware uses.
+//! **Real classical control, not a workaround.** Earlier revisions of
+//! this example applied Bob's correction directly against the
+//! `QuantumRegister` `emit::run` returned, via `measure_single_qubit`
+//! and `apply_pauli_x`/`apply_pauli_z`, because `ir::Circuit`/`Gate`
+//! had no classical-control construct -- `Gate::Measure` could write a
+//! classical bit, but there was no "apply this gate only if that bit
+//! is 1" gate. That gap is now closed: [`Gate::If`] exists,
+//! `native::decompose_gate`/`backend::lower` carry a condition all the
+//! way through native decomposition and backend lowering (splitting it
+//! across every physical gate a multi-gate `inner` produces), and
+//! `emit::run_with_measurement`/`emit::run_backend_with_measurement`
+//! actually evaluate it against the classical bits a preceding
+//! `Measure` wrote. So the *entire* protocol -- entangling half, both
+//! of Alice's measurements, and both halves of Bob's correction -- is
+//! now one compiled [`Circuit`] (see [`full_teleportation_circuit`]),
+//! run through exactly the same `ir_optimize::optimize` -> `decompose`
+//! -> `emit::run_with_measurement` pipeline (or, for the noisy run,
+//! also through `route::route_best` and `backend::lower`) as every
+//! other gate in this example already was -- not a special case
+//! bolted on after the fact.
 //!
-//! **Why the routed circuit's qubit indices are safe to use directly
-//! after execution.** `route::route`, `route_lookahead`, `route_sabre`,
-//! and `route_qft` -- everything `route_best` can return -- all call
+//! **Why the routed circuit's qubit indices are still safe to use
+//! directly.** `route::route`, `route_lookahead`, `route_sabre`, and
+//! `route_qft` -- everything `route_best` can return -- all call
 //! `restore_identity_mapping` before returning (see `route.rs`'s own
 //! module doc). So physical qubit `i` in the circuit `route_best`
 //! hands back always means logical qubit `i` again by the time it's
-//! done, which is what makes it safe to call
-//! `register.measure_single_qubit(0)` / `(1)` and correct qubit `2`
-//! directly after running a *routed* circuit, without separately
-//! tracking a logical/physical remapping ourselves.
+//! done. That's what makes it safe to write `Gate::If(1, true,
+//! Box::new(Gate::X(2)))` against *logical* qubit 2 in
+//! [`full_teleportation_circuit`] below and trust that it still means
+//! Bob's qubit after `NoisyBackendExecutor` routes the whole circuit
+//! through a real coupling map -- the same guarantee that used to
+//! justify reading qubit 2 straight off the register after execution
+//! now equally justifies embedding a reference to it inside the
+//! circuit itself.
 //!
 //! Run with:
 //!
@@ -164,6 +176,31 @@ fn teleportation_entangling_circuit(prep: fn(&mut Circuit, usize)) -> Circuit {
     c
 }
 
+/// The complete protocol as a single compiled `Circuit`: the unitary
+/// entangling half above, followed by Alice's two measurements and
+/// Bob's classically-conditioned correction, all as real `Gate`s.
+/// Classical bit layout: clbit 0 holds q0's outcome (m0), clbit 1
+/// holds q1's outcome (m1) -- matching the two return values
+/// `run_teleportation_trial` reports.
+///
+/// **Derivation of the correction.** Tracking the state algebraically
+/// through the `Cx`+`H` above shows q2 ends up as `X^m1 Z^m0 |psi>`
+/// before correction, so applying `X` (conditioned on m1) then `Z`
+/// (conditioned on m0) inverts exactly that -- same convention
+/// `sirraya_qutub::examples::teleportation` uses, now expressed as two
+/// `Gate::If`s instead of two hand-written `if` statements around
+/// direct register calls (see this file's own doc comment for that
+/// history).
+fn full_teleportation_circuit(prep: fn(&mut Circuit, usize)) -> Circuit {
+    let mut c = teleportation_entangling_circuit(prep);
+    c.num_clbits = 2;
+    c.push(Gate::Measure(0, 0)); // m0
+    c.push(Gate::Measure(1, 1)); // m1
+    c.push(Gate::If(1, true, Box::new(Gate::X(2)))); // X iff m1 == 1
+    c.push(Gate::If(0, true, Box::new(Gate::Z(2)))); // Z iff m0 == 1
+    c
+}
+
 /// The independent ground truth for a given prep routine: what a
 /// single qubit prepared by `prep` alone actually looks like as a
 /// density matrix, run through the same real pipeline (not
@@ -193,30 +230,47 @@ fn bloch_vector(dm: &DensityMatrix) -> (f64, f64, f64) {
 }
 
 // ---------------------------------------------------------------------
-// 2. Execution seam -- identical shape to `trotter_ising_dynamics.rs`'s
-//    `CircuitExecutor`, so the same trial logic below can run against
-//    either the ideal simulator or the noisy backend model.
+// 2. Execution seam -- same shape as `trotter_ising_dynamics.rs`'s
+//    `CircuitExecutor` (ideal vs. noisy-backend, swappable behind one
+//    trait), so the same trial logic below can run against either.
+//    `run` here returns classical outcomes alongside the register,
+//    which trotter's version has no need to -- its circuits never
+//    measure mid-circuit the way this one now genuinely does.
 // ---------------------------------------------------------------------
 
 trait CircuitExecutor {
-    fn run(&mut self, circuit: &Circuit) -> Result<QuantumRegister, String>;
+    /// Returns the final register *and* every classical outcome a
+    /// `Measure` in `circuit` wrote (indexed by clbit) -- needed now
+    /// that `circuit` itself can contain `Gate::If`, which reads those
+    /// outcomes back during execution (see `emit::run_with_measurement`).
+    fn run(&mut self, circuit: &Circuit) -> Result<(QuantumRegister, Vec<u8>), String>;
 }
 
 struct IdealExecutor;
 
 impl CircuitExecutor for IdealExecutor {
-    fn run(&mut self, circuit: &Circuit) -> Result<QuantumRegister, String> {
+    fn run(&mut self, circuit: &Circuit) -> Result<(QuantumRegister, Vec<u8>), String> {
         let optimized = ir_optimize::optimize(circuit);
         let native = decompose(&optimized);
-        emit::run(&native)
+        emit::run_with_measurement(&native)
     }
 }
 
-fn gate_qubits(gate: &Gate) -> Vec<usize> {
-    match gate {
-        Gate::H(q) | Gate::X(q) | Gate::S(q) | Gate::Rx(q, _) | Gate::Ry(q, _) | Gate::Rz(q, _) => vec![*q],
-        Gate::Cx(a, b) | Gate::Swap(a, b) => vec![*a, *b],
-        _ => vec![],
+/// Qubits [`push_pauli_kick`] should follow this gate's real hardware
+/// action with a noise event on. Simply `gate.qubits()` for almost
+/// everything -- including `Gate::If`, which now delegates to its
+/// `inner`'s own qubits, so a conditioned correction gets the same
+/// style of noise injection an unconditioned one would -- except a
+/// `Measure`, which is deliberately excluded: this simple per-gate
+/// depolarizing-kick model approximates *gate* error, and a
+/// measurement's own readout error would need its own separate model.
+/// Applying a general Pauli kick to a qubit that's already been read
+/// out doesn't correspond to anything this model is trying to capture.
+fn noise_injection_qubits(gate: &Gate) -> Vec<usize> {
+    if matches!(gate, Gate::Measure(..)) {
+        Vec::new()
+    } else {
+        gate.qubits()
     }
 }
 
@@ -257,30 +311,40 @@ impl NoisyBackendExecutor {
 }
 
 impl CircuitExecutor for NoisyBackendExecutor {
-    fn run(&mut self, circuit: &Circuit) -> Result<QuantumRegister, String> {
+    fn run(&mut self, circuit: &Circuit) -> Result<(QuantumRegister, Vec<u8>), String> {
         let routed_gates: Vec<Gate> = match self.backend.coupling_map(self.n) {
             Some(coupling) => route_best(circuit, &coupling).gates,
             None => circuit.gates.clone(),
         };
         let p_gate = self.gate_error_rate(routed_gates.len());
         let mut noisy = Circuit::new(self.n);
+        // route_best's output doesn't carry num_clbits forward the way
+        // its .gates do (only .gates is used above) -- Circuit::new
+        // defaults to 0, so this must be set explicitly or
+        // `full_teleportation_circuit`'s Measure/If gates would decompose
+        // against a NativeCircuit with nowhere to write/read a
+        // classical outcome.
+        noisy.num_clbits = circuit.num_clbits;
         for gate in &routed_gates {
             noisy.push(gate.clone());
-            for q in gate_qubits(gate) {
+            for q in noise_injection_qubits(gate) {
                 push_pauli_kick(&mut noisy, q, p_gate, &mut self.rng);
             }
         }
         let optimized = ir_optimize::optimize(&noisy);
         let native = decompose(&optimized);
-        emit::run(&native)
+        emit::run_with_measurement(&native)
     }
 }
 
 // ---------------------------------------------------------------------
-// 3. One teleportation trial: run the entangling circuit through
-//    whichever executor is given, then perform the genuinely random
-//    measurement and classical correction directly on the returned
-//    register, then verify Bob's qubit two independent ways.
+// 3. One teleportation trial: run the *complete* protocol -- entangling
+//    circuit, both measurements, and both halves of Bob's classically-
+//    conditioned correction -- as a single compiled `Circuit` through
+//    whichever executor is given, then verify Bob's qubit two
+//    independent ways. Nothing here calls the register's own
+//    measure/correct methods directly anymore -- see this file's own
+//    doc comment on `Gate::If` for what changed.
 // ---------------------------------------------------------------------
 
 /// `(m0, m1, fidelity_via_density_matrix, fidelity_via_bloch_vector)`.
@@ -294,26 +358,20 @@ fn run_teleportation_trial(
     prep: fn(&mut Circuit, usize),
     target: &DensityMatrix,
 ) -> Result<(u8, u8, f64, f64), String> {
-    let circuit = teleportation_entangling_circuit(prep);
-    let mut register = executor.run(&circuit)?;
+    let circuit = full_teleportation_circuit(prep);
+    let (register, clbits) = executor.run(&circuit)?;
 
-    // Alice's genuinely random Born-rule measurement -- real
-    // `thread_rng`-backed collapse, not a simulated/deferred stand-in.
-    let m0 = register.measure_single_qubit(0)?;
-    let m1 = register.measure_single_qubit(1)?;
+    // Genuinely random Born-rule outcomes -- real `thread_rng`-backed
+    // collapse inside `Measure`'s execution, not a simulated/deferred
+    // stand-in -- read back out of the classical bits the compiled
+    // circuit's own `Gate::Measure`s wrote, exactly the way real
+    // hardware reads a classical register after a job runs.
+    let m0 = clbits[0];
+    let m1 = clbits[1];
 
-    // Bob's classically-conditioned correction. Derivation: tracking
-    // the state algebraically through the CNOT+H above shows q2 ends
-    // up as X^m1 Z^m0 |psi> before correction, so applying X (if
-    // m1=1) then Z (if m0=1) inverts exactly that -- same convention
-    // `sirraya_qutub::examples::teleportation` uses.
-    if m1 == 1 {
-        register.apply_pauli_x(2)?;
-    }
-    if m0 == 1 {
-        register.apply_pauli_z(2)?;
-    }
-
+    // Bob's correction has already been applied *inside* `executor.run`,
+    // by the circuit's own `Gate::If`s -- nothing left to do here but
+    // read qubit 2 back out and verify it.
     let bob = register.to_density_matrix()?.partial_trace(&[2])?;
     let fidelity_dm = bob.fidelity(target)?;
 
@@ -489,10 +547,11 @@ fn main() -> Result<(), String> {
     println!("  {:?} ZNE-mitigated fidelity:        {:.2}%", best_backend, mitigated * 100.0);
     println!(
         "\nEntanglement resource: 1 Bell pair. Classical communication: 2 bits.\n\
-         Corrections applied via genuine mid-circuit measurement + classical\n\
-         conditioning against the real simulator register -- not a deferred-\n\
-         measurement approximation -- on top of this crate's real routing,\n\
-         backend-lowering, and fidelity-estimation pipeline."
+         Corrections compiled as real Gate::If classical control, executed via\n\
+         genuine mid-circuit measurement + classical conditioning inside the\n\
+         circuit itself -- not a deferred-measurement approximation, and not\n\
+         applied by hand outside the circuit -- on top of this crate's real\n\
+         routing, backend-lowering, and fidelity-estimation pipeline."
     );
     println!("{}", "=".repeat(78));
 

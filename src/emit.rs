@@ -44,6 +44,14 @@ pub fn apply_to(circuit: &NativeCircuit, reg: &mut QuantumRegister) -> Result<()
                         .to_string(),
                 );
             }
+            NativeGate::If(..) => {
+                return Err(
+                    "NativeGate::If is not supported by emit::apply_to -- it must read a \
+                     classical bit that no earlier gate in this entry point has anywhere to \
+                     write; use apply_to_with_measurement (or run_with_measurement) instead"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(())
@@ -76,24 +84,84 @@ pub fn apply_to_with_measurement(
     clbits: &mut [u8],
 ) -> Result<(), String> {
     for gate in &circuit.gates {
-        match *gate {
-            NativeGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
-            NativeGate::Ry(q, angle) => reg.apply_ry(q, angle)?,
-            NativeGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
-            NativeGate::Measure(q, c) => {
-                let outcome = reg.measure_single_qubit(q)?;
-                let num_clbits = clbits.len();
-                let slot = clbits.get_mut(c).ok_or_else(|| {
-                    format!(
-                        "Measure writes classical bit {} but only {} were provided",
-                        c, num_clbits
-                    )
-                })?;
-                *slot = outcome;
+        apply_native_gate_with_measurement(gate, reg, clbits)?;
+    }
+    Ok(())
+}
+
+/// The actual per-gate execution [`apply_to_with_measurement`] and
+/// [`NativeGate::If`]'s own conditional branch below both need --
+/// factored out so `If`'s recursion into its `inner` doesn't need a
+/// second copy of the `Rz`/`Ry`/`Rzz`/`Measure` dispatch.
+fn apply_native_gate_with_measurement(
+    gate: &NativeGate,
+    reg: &mut QuantumRegister,
+    clbits: &mut [u8],
+) -> Result<(), String> {
+    match *gate {
+        NativeGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
+        NativeGate::Ry(q, angle) => reg.apply_ry(q, angle)?,
+        NativeGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
+        NativeGate::Measure(q, c) => {
+            let outcome = reg.measure_single_qubit(q)?;
+            let num_clbits = clbits.len();
+            let slot = clbits.get_mut(c).ok_or_else(|| {
+                format!(
+                    "Measure writes classical bit {} but only {} were provided",
+                    c, num_clbits
+                )
+            })?;
+            *slot = outcome;
+        }
+        NativeGate::If(clbit, value, ref inner) => {
+            // This is the real thing `examples/quantum_teleportation.rs`
+            // used to do by hand, directly against the `QuantumRegister`
+            // after `emit::run` returned -- see that example's updated
+            // doc comment for the before/after. `inner` is always a
+            // bare Rz/Ry/Rzz (never Measure or another If -- see
+            // `NativeGate::If`'s own doc comment), so this recursion
+            // bottoms out in exactly one more call.
+            let num_clbits = clbits.len();
+            let outcome = *clbits.get(clbit).ok_or_else(|| {
+                format!("If reads classical bit {} but only {} were provided", clbit, num_clbits)
+            })?;
+            if (outcome != 0) == value {
+                apply_native_gate_with_measurement(inner, reg, clbits)?;
             }
         }
     }
     Ok(())
+}
+
+/// One native gate's statement text (no trailing `;`/newline), shared
+/// by [`to_qasm`]/[`to_qasm3`] so the `rz`/`ry`/`rzz` spelling and the
+/// `If`-prefix logic live in exactly one place. `measure_stmt` renders
+/// `Measure`'s own dialect-specific spelling (arrow-style for 2.0,
+/// assignment-style for 3.0 -- the one real difference between the two
+/// emitters); everything else, including `If`, is identical between
+/// them.
+///
+/// The `if (c[N]==0|1) <stmt>` syntax this emits for `NativeGate::If`
+/// is this crate's own dialect extension, the same kind of deliberate,
+/// documented departure from the standard `qasm.rs`'s module doc
+/// already notes for `rzz`/`ryy` -- real OPENQASM 2.0's `if` conditions
+/// on a whole `creg`'s *integer value*, not one indexed bit, and QASM
+/// 3.0 has no single-statement (non-block) `if` at all. `qasm::parse`'s
+/// `parse_if_condition` is the matching reader, so this still
+/// round-trips exactly the way every other statement here does.
+fn native_gate_stmt(gate: &NativeGate, measure_stmt: &dyn Fn(usize, usize) -> String) -> String {
+    match *gate {
+        NativeGate::Rz(q, angle) => format!("rz({}) q[{}]", angle, q),
+        NativeGate::Ry(q, angle) => format!("ry({}) q[{}]", angle, q),
+        NativeGate::Rzz(a, b, angle) => format!("rzz({}) q[{}], q[{}]", angle, a, b),
+        NativeGate::Measure(q, c) => measure_stmt(q, c),
+        NativeGate::If(clbit, value, ref inner) => format!(
+            "if (c[{}]=={}) {}",
+            clbit,
+            value as u8,
+            native_gate_stmt(inner, measure_stmt)
+        ),
+    }
 }
 
 /// `sirraya_qutub`-dialect OPENQASM 2.0 text for the native circuit,
@@ -114,20 +182,12 @@ pub fn to_qasm(circuit: &NativeCircuit, circuit_name: &str) -> String {
     // Measure whose clbit index is >= num_qubits.
     out.push_str(&format!("creg c[{}];\n", circuit.num_clbits));
     out.push_str(&format!(
-        "// Circuit: {} (native gate set: rz, ry, rzz, measure)\n",
+        "// Circuit: {} (native gate set: rz, ry, rzz, measure, if)\n",
         circuit_name
     ));
     for gate in &circuit.gates {
-        match *gate {
-            NativeGate::Rz(q, angle) => out.push_str(&format!("rz({}) q[{}];\n", angle, q)),
-            NativeGate::Ry(q, angle) => out.push_str(&format!("ry({}) q[{}];\n", angle, q)),
-            NativeGate::Rzz(a, b, angle) => {
-                out.push_str(&format!("rzz({}) q[{}], q[{}];\n", angle, a, b))
-            }
-            NativeGate::Measure(q, c) => {
-                out.push_str(&format!("measure q[{}] -> c[{}];\n", q, c))
-            }
-        }
+        out.push_str(&native_gate_stmt(gate, &|q, c| format!("measure q[{}] -> c[{}]", q, c)));
+        out.push_str(";\n");
     }
     out
 }
@@ -151,20 +211,12 @@ pub fn to_qasm3(circuit: &NativeCircuit, circuit_name: &str) -> String {
     // circuit.num_qubits -- same reasoning applies here.
     out.push_str(&format!("bit[{}] c;\n", circuit.num_clbits));
     out.push_str(&format!(
-        "// Circuit: {} (native gate set: rz, ry, rzz, measure)\n",
+        "// Circuit: {} (native gate set: rz, ry, rzz, measure, if)\n",
         circuit_name
     ));
     for gate in &circuit.gates {
-        match *gate {
-            NativeGate::Rz(q, angle) => out.push_str(&format!("rz({}) q[{}];\n", angle, q)),
-            NativeGate::Ry(q, angle) => out.push_str(&format!("ry({}) q[{}];\n", angle, q)),
-            NativeGate::Rzz(a, b, angle) => {
-                out.push_str(&format!("rzz({}) q[{}], q[{}];\n", angle, a, b))
-            }
-            NativeGate::Measure(q, c) => {
-                out.push_str(&format!("c[{}] = measure q[{}];\n", c, q))
-            }
-        }
+        out.push_str(&native_gate_stmt(gate, &|q, c| format!("c[{}] = measure q[{}]", c, q)));
+        out.push_str(";\n");
     }
     out
 }
@@ -214,6 +266,15 @@ pub fn apply_backend_to(circuit: &BackendCircuit, reg: &mut QuantumRegister) -> 
                         .to_string(),
                 );
             }
+            BackendGate::If(..) => {
+                return Err(
+                    "BackendGate::If is not supported by emit::apply_backend_to -- it must \
+                     read a classical bit that no earlier gate in this entry point has \
+                     anywhere to write; use apply_backend_to_with_measurement (or \
+                     run_backend_with_measurement) instead"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(())
@@ -238,25 +299,50 @@ pub fn apply_backend_to_with_measurement(
     clbits: &mut [u8],
 ) -> Result<(), String> {
     for gate in &circuit.gates {
-        match *gate {
-            BackendGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
-            BackendGate::Rot(q, angle) => match circuit.backend.rot_axis() {
-                RotAxis::Ry => reg.apply_ry(q, angle)?,
-                RotAxis::Rx => reg.apply_rx(q, angle)?,
-            },
-            BackendGate::Cx(a, b) => reg.apply_cnot(a, b)?,
-            BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
-            BackendGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
-            BackendGate::Measure(q, c) => {
-                let outcome = reg.measure_single_qubit(q)?;
-                let num_clbits = clbits.len();
-                let slot = clbits.get_mut(c).ok_or_else(|| {
-                    format!(
-                        "Measure writes classical bit {} but only {} were provided",
-                        c, num_clbits
-                    )
-                })?;
-                *slot = outcome;
+        apply_backend_gate_with_measurement(circuit, gate, reg, clbits)?;
+    }
+    Ok(())
+}
+
+/// The actual per-gate execution [`apply_backend_to_with_measurement`]
+/// and `BackendGate::If`'s own conditional branch below both need --
+/// same factoring-out as [`apply_native_gate_with_measurement`], one
+/// level up the pipeline. `circuit` is only needed for
+/// `circuit.backend.rot_axis()` (which `BackendGate::Rot` alone can't
+/// tell you -- see this module's doc comment on that variant).
+fn apply_backend_gate_with_measurement(
+    circuit: &BackendCircuit,
+    gate: &BackendGate,
+    reg: &mut QuantumRegister,
+    clbits: &mut [u8],
+) -> Result<(), String> {
+    match *gate {
+        BackendGate::Rz(q, angle) => reg.apply_rz(q, angle)?,
+        BackendGate::Rot(q, angle) => match circuit.backend.rot_axis() {
+            RotAxis::Ry => reg.apply_ry(q, angle)?,
+            RotAxis::Rx => reg.apply_rx(q, angle)?,
+        },
+        BackendGate::Cx(a, b) => reg.apply_cnot(a, b)?,
+        BackendGate::Cz(a, b) => reg.apply_controlled_z(a, b)?,
+        BackendGate::Rzz(a, b, angle) => reg.apply_rzz(a, b, angle)?,
+        BackendGate::Measure(q, c) => {
+            let outcome = reg.measure_single_qubit(q)?;
+            let num_clbits = clbits.len();
+            let slot = clbits.get_mut(c).ok_or_else(|| {
+                format!(
+                    "Measure writes classical bit {} but only {} were provided",
+                    c, num_clbits
+                )
+            })?;
+            *slot = outcome;
+        }
+        BackendGate::If(clbit, value, ref inner) => {
+            let num_clbits = clbits.len();
+            let outcome = *clbits.get(clbit).ok_or_else(|| {
+                format!("If reads classical bit {} but only {} were provided", clbit, num_clbits)
+            })?;
+            if (outcome != 0) == value {
+                apply_backend_gate_with_measurement(circuit, inner, reg, clbits)?;
             }
         }
     }
@@ -316,5 +402,42 @@ mod qasm3_emit_tests {
         assert!(text.contains("c[0] = measure q[0];"));
         assert!(!text.contains("qreg"));
         assert!(!text.contains("->"));
+    }
+
+    fn conditioned_circuit() -> NativeCircuit {
+        // The teleportation shape in miniature: measure, then a
+        // conditioned correction.
+        let mut nc = NativeCircuit::new(2);
+        nc.num_clbits = 1;
+        nc.push(NativeGate::Measure(0, 0));
+        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(1, 0.5))));
+        nc
+    }
+
+    #[test]
+    fn to_qasm_emits_the_if_extension_syntax() {
+        let text = to_qasm(&conditioned_circuit(), "cond");
+        assert!(text.contains("if (c[0]==1) rz(0.5) q[1];"));
+    }
+
+    #[test]
+    fn if_round_trips_through_qasm_parse() {
+        let nc = conditioned_circuit();
+        let circuit = crate::qasm::parse(&to_qasm(&nc, "cond")).unwrap();
+        assert_eq!(
+            circuit.gates,
+            vec![
+                crate::ir::Gate::Measure(0, 0),
+                crate::ir::Gate::If(0, true, Box::new(crate::ir::Gate::Rz(1, 0.5))),
+            ]
+        );
+    }
+
+    #[test]
+    fn if_round_trips_through_qasm3_parse_identically_to_qasm2() {
+        let nc = conditioned_circuit();
+        let c2 = crate::qasm::parse(&to_qasm(&nc, "cond")).unwrap();
+        let c3 = crate::qasm::parse(&to_qasm3(&nc, "cond")).unwrap();
+        assert_eq!(c2.gates, c3.gates);
     }
 }

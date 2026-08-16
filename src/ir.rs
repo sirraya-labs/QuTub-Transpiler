@@ -93,11 +93,43 @@ pub enum Gate {
     /// `ir_optimize::disjoint` special-cases `Measure` to never commute
     /// past anything.
     Measure(usize, usize),
+    /// Applies `inner` iff classical bit `clbit` currently holds
+    /// `value` -- real, per-shot classical feed-forward control, not a
+    /// stand-in for it. This is the piece `examples/quantum_teleportation.rs`
+    /// used to work around by applying Bob's correction directly
+    /// against the `QuantumRegister` after `emit::run`, specifically
+    /// because this variant didn't exist yet -- see that example's own
+    /// doc comment (now updated) for the before/after.
+    ///
+    /// `inner` is always a single, concrete gate application, and
+    /// `Circuit::validate` enforces two shape restrictions on it:
+    /// - **Never `Measure`.** A measurement's whole job is to *produce*
+    ///   a classical bit; conditioning one on a classical bit has no
+    ///   physical meaning.
+    /// - **Never another `If`.** This stays a flat, one-level wrapper
+    ///   rather than an arbitrarily-recursive one -- every real use
+    ///   this crate has (teleportation's Bob-side correction, and any
+    ///   single conditioned gate a QASM `if` statement can express) is
+    ///   one condition on one gate.
+    ///
+    /// `native::decompose_gate` distributes the condition across every
+    /// native gate `inner` decomposes to (e.g. a conditioned `H` becomes
+    /// a conditioned `Rz`/`Ry`/`Rz` triple, each wrapped in its own
+    /// `NativeGate::If` with the same `clbit`/`value`), so a caller
+    /// never needs to build a nested `If` even for a multi-gate `inner`.
+    If(usize, bool, Box<Gate>),
 }
 
 impl Gate {
     /// Qubit indices this gate touches, in the order they appear in the
     /// gate's own argument list (control(s) before target, as written).
+    /// For `If`, this is simply `inner`'s own qubits -- an `If` occupies
+    /// exactly the wires its conditioned gate does, nothing more, so
+    /// routing (`route.rs`) and source-level reordering (`ir_optimize.rs`)
+    /// both already do the right thing by calling this generically,
+    /// with no `Gate::If`-specific case of their own needed for qubit
+    /// placement (only for whether they're allowed to *reorder* it --
+    /// see `ir_optimize::disjoint`).
     pub fn qubits(&self) -> Vec<usize> {
         use Gate::*;
         match *self {
@@ -105,6 +137,7 @@ impl Gate {
             | Rz(q, _) | Measure(q, _) => vec![q],
             Cx(a, b) | Cz(a, b) | Swap(a, b) | Rxx(a, b, _) | Ryy(a, b, _) | Rzz(a, b, _)
             | Cp(a, b, _) => vec![a, b],
+            If(_, _, ref inner) => inner.qubits(),
         }
     }
 }
@@ -159,6 +192,7 @@ impl Circuit {
                 Rzz(..) => "rzz",
                 Cp(..) => "cp",
                 Measure(..) => "measure",
+                If(..) => "if",
             };
             *counts.entry(name).or_insert(0) += 1;
         }
@@ -199,44 +233,87 @@ impl Circuit {
     /// arity mismatch a compile error, not a runtime one -- there is
     /// no way to construct an ill-formed `Gate` in the first
     /// place, so a runtime check would only ever be dead code.
+    /// 5. **`If`'s own shape.** Its classical bit index is `< self.num_clbits`,
+    ///    and its `inner` gate is neither `Measure` (see `Gate::If`'s
+    ///    doc comment on why that has no meaning) nor another `If`
+    ///    (this stays a flat, one-level wrapper). `inner` itself is
+    ///    then checked against every rule above, recursively -- so a
+    ///    conditioned `Cx(0, 0)` or a conditioned `NaN` angle is caught
+    ///    exactly as it would be unconditioned.
     pub fn validate(&self) -> Result<(), String> {
         for (i, gate) in self.gates.iter().enumerate() {
-            for q in gate.qubits() {
-                if q >= self.num_qubits {
-                    return Err(format!(
-                        "gate {} ({:?}): qubit index {} out of range for {} qubit(s)",
-                        i, gate, q, self.num_qubits
-                    ));
-                }
-            }
-            if let Gate::Measure(_, c) = *gate {
-                if c >= self.num_clbits {
-                    return Err(format!(
-                        "gate {} ({:?}): classical bit index {} out of range for {} clbit(s)",
-                        i, gate, c, self.num_clbits
-                    ));
-                }
-            }
-            let qs = gate.qubits();
-            if qs.len() == 2 && qs[0] == qs[1] {
+            self.validate_gate(i, gate)?;
+        }
+        Ok(())
+    }
+
+    /// The per-gate half of [`validate`], factored out so it can be
+    /// called recursively on the `inner` gate an `If` wraps -- see
+    /// `validate`'s point 5. `i` is always the *top-level* gate index
+    /// (an `If`'s `inner` isn't a separate entry in `self.gates`), so
+    /// every error message -- including one about a bad `inner` -- names
+    /// the `If` statement a caller actually sees in their source.
+    fn validate_gate(&self, i: usize, gate: &Gate) -> Result<(), String> {
+        for q in gate.qubits() {
+            if q >= self.num_qubits {
                 return Err(format!(
-                    "gate {} ({:?}): a two-qubit gate's arguments must be distinct, both are {}",
-                    i, gate, qs[0]
+                    "gate {} ({:?}): qubit index {} out of range for {} qubit(s)",
+                    i, gate, q, self.num_qubits
                 ));
             }
-            let angle = match *gate {
-                Gate::Rx(_, a) | Gate::Ry(_, a) | Gate::Rz(_, a) => Some(a),
-                Gate::Rxx(_, _, a) | Gate::Ryy(_, _, a) | Gate::Rzz(_, _, a) => Some(a),
-                Gate::Cp(_, _, a) => Some(a),
-                _ => None,
-            };
-            if let Some(a) = angle {
-                if !a.is_finite() {
+        }
+        if let Gate::Measure(_, c) = *gate {
+            if c >= self.num_clbits {
+                return Err(format!(
+                    "gate {} ({:?}): classical bit index {} out of range for {} clbit(s)",
+                    i, gate, c, self.num_clbits
+                ));
+            }
+        }
+        let qs = gate.qubits();
+        if qs.len() == 2 && qs[0] == qs[1] {
+            return Err(format!(
+                "gate {} ({:?}): a two-qubit gate's arguments must be distinct, both are {}",
+                i, gate, qs[0]
+            ));
+        }
+        let angle = match *gate {
+            Gate::Rx(_, a) | Gate::Ry(_, a) | Gate::Rz(_, a) => Some(a),
+            Gate::Rxx(_, _, a) | Gate::Ryy(_, _, a) | Gate::Rzz(_, _, a) => Some(a),
+            Gate::Cp(_, _, a) => Some(a),
+            _ => None,
+        };
+        if let Some(a) = angle {
+            if !a.is_finite() {
+                return Err(format!(
+                    "gate {} ({:?}): parameter {} is not finite (NaN or infinite)",
+                    i, gate, a
+                ));
+            }
+        }
+        if let Gate::If(clbit, _, ref inner) = *gate {
+            if clbit >= self.num_clbits {
+                return Err(format!(
+                    "gate {} ({:?}): If's classical bit index {} out of range for {} clbit(s)",
+                    i, gate, clbit, self.num_clbits
+                ));
+            }
+            match inner.as_ref() {
+                Gate::Measure(..) => {
                     return Err(format!(
-                        "gate {} ({:?}): parameter {} is not finite (NaN or infinite)",
-                        i, gate, a
+                        "gate {} ({:?}): If cannot condition a Measure -- a measurement \
+                         produces a classical bit, it doesn't consume one",
+                        i, gate
                     ));
                 }
+                Gate::If(..) => {
+                    return Err(format!(
+                        "gate {} ({:?}): If cannot condition another If -- nested classical \
+                         conditions aren't supported here, flatten to a single condition",
+                        i, gate
+                    ));
+                }
+                _ => self.validate_gate(i, inner)?,
             }
         }
         Ok(())
@@ -353,5 +430,82 @@ mod tests {
         assert_eq!(Gate::Measure(2, 0).qubits(), vec![2]);
         assert_eq!(Gate::Cx(0, 1).qubits(), vec![0, 1]);
         assert_eq!(Gate::Rzz(4, 5, 0.1).qubits(), vec![4, 5]);
+    }
+
+    #[test]
+    fn if_qubits_delegates_to_inner() {
+        // A single-qubit inner...
+        assert_eq!(Gate::If(0, true, Box::new(Gate::X(2))).qubits(), vec![2]);
+        // ...and a two-qubit inner, unchanged from what `route.rs`/
+        // `ir_optimize.rs` need to place/reorder it correctly with no
+        // `Gate::If`-specific case of their own (see `qubits`'s doc
+        // comment).
+        assert_eq!(Gate::If(0, true, Box::new(Gate::Cx(1, 3))).qubits(), vec![1, 3]);
+    }
+
+    #[test]
+    fn accepts_well_formed_if() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::Measure(0, 0)).push(Gate::If(0, true, Box::new(Gate::X(1))));
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_if_clbit_out_of_range() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::If(5, true, Box::new(Gate::X(1))));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_if_conditioning_a_measure() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::If(0, true, Box::new(Gate::Measure(1, 0))));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_nested_if() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::If(0, true, Box::new(Gate::If(0, false, Box::new(Gate::X(1))))));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_if_wrapping_a_qubit_out_of_range() {
+        // The inner gate's own qubit-range check must still fire
+        // through the wrapper.
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::If(0, true, Box::new(Gate::X(9))));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_if_wrapping_a_nan_angle() {
+        let mut c = Circuit::new(1);
+        c.num_clbits = 1;
+        c.push(Gate::If(0, true, Box::new(Gate::Rz(0, f64::NAN))));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_if_wrapping_a_self_targeting_two_qubit_gate() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::If(0, true, Box::new(Gate::Cx(0, 0))));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn if_counts_under_its_own_mnemonic() {
+        let mut c = Circuit::new(1);
+        c.num_clbits = 1;
+        c.push(Gate::If(0, true, Box::new(Gate::X(0))));
+        assert_eq!(c.gate_counts().get("if"), Some(&1));
     }
 }

@@ -94,7 +94,16 @@ fn disjoint(a: &Gate, b: &Gate) -> bool {
     // in either direction. Conservative on purpose: this crate does
     // not yet track classical-bit dependencies precisely enough to
     // reorder Measures safely (see `ir::Gate::Measure`'s doc comment).
-    if matches!(a, Gate::Measure(..)) || matches!(b, Gate::Measure(..)) {
+    //
+    // `If(clbit, ..)` gets the same treatment, for the same reason: it
+    // *reads* a classical bit some earlier `Measure` wrote, and reads
+    // conflict with writes exactly the way two writes to the same bit
+    // do -- reordering it past the `Measure` that produced the value
+    // it's conditioned on (or past another `If` reading the same bit)
+    // could change what it observes, even though its own *qubit* set
+    // may be disjoint from either. Same conservative call as `Measure`:
+    // never a commute candidate, in either direction.
+    if matches!(a, Gate::Measure(..) | Gate::If(..)) || matches!(b, Gate::Measure(..) | Gate::If(..)) {
         return false;
     }
     let qa: HashSet<usize> = qubits_of(a).into_iter().collect();
@@ -385,6 +394,12 @@ mod tests {
                  No test in this file exercises Measure; this arm exists only to satisfy \
                  exhaustiveness."
             ),
+            Gate::If(..) => panic!(
+                "apply_gate: If has no fidelity-based test yet, for the same reason as \
+                 Measure above -- it reads a classical bit this direct-simulation comparison \
+                 has nowhere to produce. No test in this file exercises If; this arm exists \
+                 only to satisfy exhaustiveness."
+            ),
         }
     }
 
@@ -483,6 +498,35 @@ mod tests {
         c.push(Gate::Measure(0, 0)).push(Gate::Measure(1, 0));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::Measure(0, 0), Gate::Measure(1, 0)]);
+    }
+
+    #[test]
+    fn never_reorders_if_past_a_qubit_disjoint_gate() {
+        // Same story as never_reorders_measure_past_a_qubit_disjoint_gate,
+        // one level up: If(0, true, X(1)) reads clbit 0, and X(2) is on
+        // a different qubit -- qubit-disjoint alone would make this
+        // look swappable, but an If must never be slid past anything.
+        let mut c = Circuit::new(3);
+        c.num_clbits = 1;
+        let if_gate = Gate::If(0, true, Box::new(Gate::X(1)));
+        c.push(if_gate.clone()).push(Gate::X(2));
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![if_gate, Gate::X(2)]);
+    }
+
+    #[test]
+    fn never_reorders_if_past_the_measure_it_depends_on() {
+        // The exact teleportation shape: a Measure whose outcome an If
+        // later reads. Even though If(0, ..) touches a different qubit
+        // than Measure(0, 0), reordering them would let the correction
+        // run before the outcome it's conditioned on has been produced.
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        let measure = Gate::Measure(0, 0);
+        let if_gate = Gate::If(0, true, Box::new(Gate::X(1)));
+        c.push(measure.clone()).push(if_gate.clone());
+        let opt = optimize_ir(&c);
+        assert_eq!(opt.gates, vec![measure, if_gate]);
     }
 
     #[test]

@@ -75,6 +75,46 @@ pub enum DiagramInstr {
     Measure { qubit: usize, clbit: usize },
 }
 
+/// Prefixes an already-built [`DiagramInstr`]'s display label(s) with
+/// `IF c{clbit}=={0|1}: `, for a gate that came from `Gate::If` /
+/// `NativeGate::If` / `BackendGate::If`. This crate's diagram model has
+/// no dedicated "conditional" shape -- the five variants above already
+/// cover every gate at every level (see this module's doc comment) --
+/// so a conditioned gate is drawn as exactly the same box/span/marker
+/// its unconditioned form would be, just labeled with the condition
+/// that gates it. This mirrors how vendor circuit diagrams usually
+/// render classical control in practice: an annotation on the existing
+/// box, not a new shape.
+fn prefix_instr_label(instr: DiagramInstr, clbit: usize, value: bool) -> DiagramInstr {
+    let prefix = format!("IF c{}=={}: ", clbit, value as u8);
+    match instr {
+        DiagramInstr::Single { qubit, label } => {
+            DiagramInstr::Single { qubit, label: format!("{}{}", prefix, label) }
+        }
+        DiagramInstr::Controlled { controls, target, target_label } => DiagramInstr::Controlled {
+            controls,
+            target,
+            target_label: Some(format!("{}{}", prefix, target_label.unwrap_or_default())),
+        },
+        DiagramInstr::Span { qubits, label } => {
+            DiagramInstr::Span { qubits, label: format!("{}{}", prefix, label) }
+        }
+        // `Swap` has no label slot to annotate, and `Gate::If` never
+        // actually wraps one in practice (this crate's own `if`
+        // extension -- see `qasm.rs`'s `parse_if_condition` doc
+        // comment -- always wraps exactly one gate statement, and a
+        // conditioned Swap has no real use here), but this stays a
+        // total function rather than an `unreachable!()` in case that
+        // ever changes -- the condition is silently not drawable
+        // rather than causing a panic.
+        DiagramInstr::Swap { a, b } => DiagramInstr::Swap { a, b },
+        // Never actually reachable -- `Gate::If` can't wrap `Measure`
+        // (see `Circuit::validate`) -- kept exhaustive rather than
+        // `unreachable!()` for the same reason as the `Swap` arm above.
+        DiagramInstr::Measure { qubit, clbit } => DiagramInstr::Measure { qubit, clbit },
+    }
+}
+
 impl DiagramInstr {
     /// The inclusive `(min, max)` wire range this instruction's box or
     /// connecting line visually occupies -- used both for column
@@ -125,37 +165,45 @@ fn fmt_angle(label: &str, angle: f64) -> String {
     format!("{}({:.2})", label, angle)
 }
 
+/// One source-level gate's `DiagramInstr`, factored out of
+/// [`Diagram::from_circuit`] so `Gate::If` can call it recursively on
+/// `inner` and then [`prefix_instr_label`] the result -- the same
+/// pattern `Diagram::from_native`/`from_backend` use via
+/// [`instr_for_native_gate`]/[`instr_for_backend_gate`] below.
+fn instr_for_gate(gate: &Gate) -> DiagramInstr {
+    match *gate {
+        Gate::H(q) => single(q, "H"),
+        Gate::X(q) => single(q, "X"),
+        Gate::Y(q) => single(q, "Y"),
+        Gate::Z(q) => single(q, "Z"),
+        Gate::S(q) => single(q, "S"),
+        Gate::Sdg(q) => single(q, "SDG"),
+        Gate::T(q) => single(q, "T"),
+        Gate::Tdg(q) => single(q, "TDG"),
+        Gate::Rx(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RX", a) },
+        Gate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
+        Gate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
+        Gate::Cx(c, t) => controlled(c, t, Some("X".to_string())),
+        Gate::Cz(a, b) => controlled(a, b, None),
+        Gate::Swap(a, b) => DiagramInstr::Swap { a, b },
+        Gate::Rxx(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RXX", t) },
+        Gate::Ryy(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RYY", t) },
+        Gate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
+        Gate::Cp(c, t, l) => controlled(c, t, Some(fmt_angle("P", l))),
+        Gate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
+        Gate::If(clbit, value, ref inner) => {
+            prefix_instr_label(instr_for_gate(inner), clbit, value)
+        }
+    }
+}
+
 impl Diagram {
     /// Builds a diagram from a source-level [`Circuit`] (logical
     /// qubits, pre-routing) -- the richest of the three gate sets, so
     /// this is the only conversion that needs every [`DiagramInstr`]
     /// variant.
     pub fn from_circuit(circuit: &Circuit) -> Self {
-        let mut instrs = Vec::with_capacity(circuit.gates.len());
-        for gate in &circuit.gates {
-            let instr = match *gate {
-                Gate::H(q) => single(q, "H"),
-                Gate::X(q) => single(q, "X"),
-                Gate::Y(q) => single(q, "Y"),
-                Gate::Z(q) => single(q, "Z"),
-                Gate::S(q) => single(q, "S"),
-                Gate::Sdg(q) => single(q, "SDG"),
-                Gate::T(q) => single(q, "T"),
-                Gate::Tdg(q) => single(q, "TDG"),
-                Gate::Rx(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RX", a) },
-                Gate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
-                Gate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
-                Gate::Cx(c, t) => controlled(c, t, Some("X".to_string())),
-                Gate::Cz(a, b) => controlled(a, b, None),
-                Gate::Swap(a, b) => DiagramInstr::Swap { a, b },
-                Gate::Rxx(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RXX", t) },
-                Gate::Ryy(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RYY", t) },
-                Gate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
-                Gate::Cp(c, t, l) => controlled(c, t, Some(fmt_angle("P", l))),
-                Gate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
-            };
-            instrs.push(instr);
-        }
+        let instrs = circuit.gates.iter().map(instr_for_gate).collect();
         Self {
             num_qubits: circuit.num_qubits,
             num_clbits: circuit.num_clbits,
@@ -168,18 +216,7 @@ impl Diagram {
     /// `{Rz, Ry, Rzz}` gate set) -- three gate kinds map to exactly
     /// three [`DiagramInstr`] shapes.
     pub fn from_native(circuit: &NativeCircuit) -> Self {
-        let mut instrs = Vec::with_capacity(circuit.gates.len());
-        for gate in &circuit.gates {
-            let instr = match *gate {
-                NativeGate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
-                NativeGate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
-                NativeGate::Rzz(a, b, t) => {
-                    DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) }
-                }
-                NativeGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
-            };
-            instrs.push(instr);
-        }
+        let instrs = circuit.gates.iter().map(instr_for_native_gate).collect();
         Self {
             num_qubits: circuit.num_qubits,
             num_clbits: circuit.num_clbits,
@@ -201,22 +238,11 @@ impl Diagram {
             RotAxis::Ry => "RY",
             RotAxis::Rx => "RX",
         };
-        let mut instrs = Vec::with_capacity(circuit.gates.len());
-        for gate in &circuit.gates {
-            let instr = match *gate {
-                BackendGate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
-                BackendGate::Rot(q, a) => {
-                    DiagramInstr::Single { qubit: q, label: fmt_angle(rot_axis, a) }
-                }
-                BackendGate::Cx(a, b) => controlled(a, b, Some("X".to_string())),
-                BackendGate::Cz(a, b) => controlled(a, b, None),
-                BackendGate::Rzz(a, b, t) => {
-                    DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) }
-                }
-                BackendGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
-            };
-            instrs.push(instr);
-        }
+        let instrs = circuit
+            .gates
+            .iter()
+            .map(|g| instr_for_backend_gate(g, rot_axis))
+            .collect();
         Self {
             num_qubits: circuit.num_qubits,
             num_clbits: circuit.num_clbits,
@@ -235,6 +261,39 @@ impl Diagram {
     /// to a `.svg` file or embed inline).
     pub fn to_svg(&self) -> String {
         crate::diagram::svg::render(self)
+    }
+}
+
+/// One [`NativeCircuit`] gate's `DiagramInstr` -- see [`instr_for_gate`]
+/// for why this is factored out (the same `If`-recursion reason).
+fn instr_for_native_gate(gate: &NativeGate) -> DiagramInstr {
+    match *gate {
+        NativeGate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
+        NativeGate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
+        NativeGate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
+        NativeGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
+        NativeGate::If(clbit, value, ref inner) => {
+            prefix_instr_label(instr_for_native_gate(inner), clbit, value)
+        }
+    }
+}
+
+/// One [`BackendCircuit`] gate's `DiagramInstr` -- see
+/// [`instr_for_gate`] for why this is factored out. `rot_axis` is
+/// `from_backend`'s own already-resolved `"RY"`/`"RX"` label (see that
+/// function's doc comment on why `BackendGate::Rot` alone can't tell
+/// you which).
+fn instr_for_backend_gate(gate: &BackendGate, rot_axis: &str) -> DiagramInstr {
+    match *gate {
+        BackendGate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
+        BackendGate::Rot(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle(rot_axis, a) },
+        BackendGate::Cx(a, b) => controlled(a, b, Some("X".to_string())),
+        BackendGate::Cz(a, b) => controlled(a, b, None),
+        BackendGate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
+        BackendGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
+        BackendGate::If(clbit, value, ref inner) => {
+            prefix_instr_label(instr_for_backend_gate(inner, rot_axis), clbit, value)
+        }
     }
 }
 
