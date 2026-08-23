@@ -106,26 +106,7 @@ This is an actively developed research and engineering project, not a finished p
 
 * See [Contributing](contributing.md) for the development workflow and good first areas to work on
 
-* See the [Contributors Hall of Fame](docs/CONTRIBUTORS_HALL_OF_FAME.md) to recognize the people who have made meaningful contributions to QuTub Transpiler.
-
-### Contributors & Recognition
-
-The contributor documentation follows this structure:
-
-```text
-README.md
-   |
-   +--> CONTRIBUTORS.md
-            |
-            +--> Contributors Hall of Fame
-                     |
-                     +--> docs/CONTRIBUTORS_HALL_OF_FAME.md
-```
-
-* [`CONTRIBUTORS.md`](CONTRIBUTORS.md) — How to contribute to QuTub Transpiler.
-* [`Contributors Hall of Fame`](docs/CONTRIBUTORS_HALL_OF_FAME.md) — Recognized contributors, contribution categories, recognition levels, and contribution-credit criteria.
-
-The **Contributors Hall of Fame** is the single source of truth for recognized contributors.
+* See the [Contributors Hall of Fame](CONTRIBUTORS_HALL_OF_FAME.md) to recognize the people who have made meaningful contributions to QuTub Transpiler.
 
 
 ## License
