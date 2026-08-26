@@ -76,17 +76,23 @@ pub enum DiagramInstr {
 }
 
 /// Prefixes an already-built [`DiagramInstr`]'s display label(s) with
-/// `IF c{clbit}=={0|1}: `, for a gate that came from `Gate::If` /
-/// `NativeGate::If` / `BackendGate::If`. This crate's diagram model has
-/// no dedicated "conditional" shape -- the five variants above already
-/// cover every gate at every level (see this module's doc comment) --
-/// so a conditioned gate is drawn as exactly the same box/span/marker
-/// its unconditioned form would be, just labeled with the condition
-/// that gates it. This mirrors how vendor circuit diagrams usually
+/// `IF c0==0 && c1==1: ` (one `c{clbit}=={0|1}` per condition, joined
+/// with `&&`), for a gate that came from `Gate::If` / `NativeGate::If`
+/// / `BackendGate::If`. This crate's diagram model has no dedicated
+/// "conditional" shape -- the five variants above already cover every
+/// gate at every level (see this module's doc comment) -- so a
+/// conditioned gate is drawn as exactly the same box/span/marker its
+/// unconditioned form would be, just labeled with the condition(s)
+/// that gate it. This mirrors how vendor circuit diagrams usually
 /// render classical control in practice: an annotation on the existing
 /// box, not a new shape.
-fn prefix_instr_label(instr: DiagramInstr, clbit: usize, value: bool) -> DiagramInstr {
-    let prefix = format!("IF c{}=={}: ", clbit, value as u8);
+fn prefix_instr_label(instr: DiagramInstr, conditions: &[(usize, bool)]) -> DiagramInstr {
+    let condition_text = conditions
+        .iter()
+        .map(|&(clbit, value)| format!("c{}=={}", clbit, value as u8))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let prefix = format!("IF {}: ", condition_text);
     match instr {
         DiagramInstr::Single { qubit, label } => {
             DiagramInstr::Single { qubit, label: format!("{}{}", prefix, label) }
@@ -191,8 +197,8 @@ fn instr_for_gate(gate: &Gate) -> DiagramInstr {
         Gate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
         Gate::Cp(c, t, l) => controlled(c, t, Some(fmt_angle("P", l))),
         Gate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
-        Gate::If(clbit, value, ref inner) => {
-            prefix_instr_label(instr_for_gate(inner), clbit, value)
+        Gate::If(ref conditions, ref inner) => {
+            prefix_instr_label(instr_for_gate(inner), conditions)
         }
     }
 }
@@ -272,8 +278,8 @@ fn instr_for_native_gate(gate: &NativeGate) -> DiagramInstr {
         NativeGate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
         NativeGate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
         NativeGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
-        NativeGate::If(clbit, value, ref inner) => {
-            prefix_instr_label(instr_for_native_gate(inner), clbit, value)
+        NativeGate::If(ref conditions, ref inner) => {
+            prefix_instr_label(instr_for_native_gate(inner), conditions)
         }
     }
 }
@@ -291,8 +297,8 @@ fn instr_for_backend_gate(gate: &BackendGate, rot_axis: &str) -> DiagramInstr {
         BackendGate::Cz(a, b) => controlled(a, b, None),
         BackendGate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
         BackendGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
-        BackendGate::If(clbit, value, ref inner) => {
-            prefix_instr_label(instr_for_backend_gate(inner, rot_axis), clbit, value)
+        BackendGate::If(ref conditions, ref inner) => {
+            prefix_instr_label(instr_for_backend_gate(inner, rot_axis), conditions)
         }
     }
 }

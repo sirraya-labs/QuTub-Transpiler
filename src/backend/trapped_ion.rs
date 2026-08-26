@@ -37,4 +37,8 @@ impl BackendSpec for TrappedIonSpec {
     fn is_native_decompose_target(&self) -> bool {
         true
     }
+
+    fn native_two_qubit_gate(&self) -> crate::backend::spec::NativeTwoQubitGate {
+        crate::backend::spec::NativeTwoQubitGate::ContinuousRzz
+    }
 }

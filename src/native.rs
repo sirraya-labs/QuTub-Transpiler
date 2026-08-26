@@ -33,20 +33,20 @@ pub enum NativeGate {
     /// side of any decomposition identity in this module.
     Measure(usize, usize),
     /// The native-level counterpart of `ir::Gate::If`: applies `inner`
-    /// iff classical bit `clbit` holds `value`. Produced by
-    /// `decompose_gate` distributing a source-level `If`'s condition
-    /// across every native gate its `inner` decomposes to -- so a
-    /// conditioned `H`, for instance, becomes a conditioned
+    /// iff every `(clbit, value)` pair in `conditions` holds. Produced
+    /// by `decompose_gate` distributing a source-level `If`'s whole
+    /// condition list across every native gate its `inner` decomposes
+    /// to -- so a conditioned `H`, for instance, becomes a conditioned
     /// `Rz`/`Ry`/`Rz` triple (three separate `NativeGate::If`s, same
-    /// `clbit`/`value` on each), not one `If` wrapping all three. That
+    /// `conditions` on each), not one `If` wrapping all three. That
     /// shape is what `emit.rs` actually needs to execute correctly: a
     /// physical pulse either fires or it doesn't, one at a time, and
-    /// each one independently depends on the same classical bit.
+    /// each one independently depends on the same classical bits.
     /// `inner` is always a bare `Rz`/`Ry`/`Rzz` -- never `Measure` or
     /// another `If`, same restriction as `ir::Gate::If` (enforced there
     /// by `Circuit::validate`, before decomposition ever runs, so it
     /// isn't re-checked here).
-    If(usize, bool, Box<NativeGate>),
+    If(Vec<(usize, bool)>, Box<NativeGate>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -101,7 +101,7 @@ fn count_gate(g: &NativeGate, single: &mut usize, two: &mut usize) {
         NativeGate::Rz(..) | NativeGate::Ry(..) => *single += 1,
         NativeGate::Rzz(..) => *two += 1,
         NativeGate::Measure(..) => {}
-        NativeGate::If(_, _, inner) => count_gate(inner, single, two),
+        NativeGate::If(_, inner) => count_gate(inner, single, two),
     }
 }
 
@@ -306,13 +306,13 @@ pub fn decompose(circuit: &Circuit) -> NativeCircuit {
 pub(crate) fn decompose_gate(nc: &mut NativeCircuit, gate: &Gate) {
     match *gate {
         Gate::Measure(q, c) => nc.push(NativeGate::Measure(q, c)),
-        Gate::If(clbit, value, ref inner) => {
+        Gate::If(ref conditions, ref inner) => {
             // `inner` is decomposed on its own into a fresh scratch
             // circuit first (never Measure or another If -- see
             // `ir::Gate::If`'s doc comment and `Circuit::validate`,
             // which rejects both before this ever runs), then every
             // native gate that decomposition produced is wrapped in the
-            // same condition. A single source-level `If(H)` becoming
+            // same condition list. A single source-level `If(H)` becoming
             // three separately-conditioned native gates (Rz/Ry/Rz, one
             // `NativeGate::If` each) rather than one `If` wrapping all
             // three is deliberate -- see `NativeGate::If`'s own doc
@@ -320,7 +320,7 @@ pub(crate) fn decompose_gate(nc: &mut NativeCircuit, gate: &Gate) {
             let mut tmp = NativeCircuit::new(nc.num_qubits);
             decompose_gate(&mut tmp, inner);
             for g in tmp.gates {
-                nc.push(NativeGate::If(clbit, value, Box::new(g)));
+                nc.push(NativeGate::If(conditions.clone(), Box::new(g)));
             }
         }
         Gate::H(q) => push_single(nc, q, m_h()),
@@ -444,30 +444,46 @@ mod if_decompose_tests {
     fn decomposes_a_conditioned_single_native_gate_into_one_wrapped_if() {
         let mut c = Circuit::new(1);
         c.num_clbits = 1;
-        c.push(Gate::If(0, true, Box::new(Gate::Rz(0, 0.5))));
+        c.push(Gate::If(vec![(0, true)], Box::new(Gate::Rz(0, 0.5))));
         let nc = decompose(&c);
         assert_eq!(
             nc.gates,
-            vec![NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.5)))]
+            vec![NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.5)))]
         );
     }
 
     #[test]
     fn decomposes_a_conditioned_multi_gate_source_gate_into_one_wrapped_if_per_native_gate() {
         // H decomposes to an Rz/Ry/Rz triple (see push_single) -- every
-        // one of those three must carry the *same* condition, not just
-        // the first (see NativeGate::If's doc comment).
+        // one of those three must carry the *same* condition list, not
+        // just the first (see NativeGate::If's doc comment).
         let mut c = Circuit::new(1);
         c.num_clbits = 1;
-        c.push(Gate::If(2, false, Box::new(Gate::H(0))));
+        c.push(Gate::If(vec![(2, false)], Box::new(Gate::H(0))));
         let nc = decompose(&c);
         assert!(!nc.gates.is_empty());
         for g in &nc.gates {
             match g {
-                NativeGate::If(clbit, value, inner) => {
-                    assert_eq!(*clbit, 2);
-                    assert_eq!(*value, false);
+                NativeGate::If(conditions, inner) => {
+                    assert_eq!(conditions.as_slice(), &[(2, false)]);
                     assert!(matches!(inner.as_ref(), NativeGate::Rz(..) | NativeGate::Ry(..)));
+                }
+                other => panic!("expected every native gate to be If-wrapped, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn decomposes_a_multi_condition_if_preserving_every_condition_on_every_native_gate() {
+        let mut c = Circuit::new(1);
+        c.num_clbits = 2;
+        c.push(Gate::If(vec![(0, true), (1, false)], Box::new(Gate::H(0))));
+        let nc = decompose(&c);
+        assert!(!nc.gates.is_empty());
+        for g in &nc.gates {
+            match g {
+                NativeGate::If(conditions, _) => {
+                    assert_eq!(conditions.as_slice(), &[(0, true), (1, false)]);
                 }
                 other => panic!("expected every native gate to be If-wrapped, got {:?}", other),
             }
@@ -477,7 +493,7 @@ mod if_decompose_tests {
     #[test]
     fn gate_counts_prices_a_conditioned_rotation_the_same_as_an_unconditioned_one() {
         let mut conditioned = NativeCircuit::new(1);
-        conditioned.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.1))));
+        conditioned.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.1))));
         let mut plain = NativeCircuit::new(1);
         plain.push(NativeGate::Rz(0, 0.1));
         assert_eq!(conditioned.gate_counts(), plain.gate_counts());
@@ -487,7 +503,7 @@ mod if_decompose_tests {
     #[test]
     fn gate_counts_prices_a_conditioned_two_qubit_gate_as_two_qubit() {
         let mut nc = NativeCircuit::new(2);
-        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rzz(0, 1, 0.2))));
+        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rzz(0, 1, 0.2))));
         assert_eq!(nc.gate_counts(), (0, 1));
     }
 }

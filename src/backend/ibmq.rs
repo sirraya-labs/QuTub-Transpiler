@@ -53,4 +53,8 @@ impl BackendSpec for IbmQSpec {
     fn push_native_cx(&self, bc: &mut BackendCircuit, control: usize, target: usize) {
         bc.push(BackendGate::Cx(control, target));
     }
+
+    fn native_two_qubit_gate(&self) -> crate::backend::spec::NativeTwoQubitGate {
+        crate::backend::spec::NativeTwoQubitGate::FixedCx
+    }
 }

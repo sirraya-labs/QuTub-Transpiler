@@ -94,7 +94,7 @@ mod rigetti;
 mod spec;
 mod trapped_ion;
 
-pub use spec::{Backend, BackendSpec, RotAxis};
+pub use spec::{Backend, BackendSpec, NativeTwoQubitGate, RotAxis};
 
 // NOTE: no longer `Copy` -- see `NativeGate`'s identical note; `If`'s
 // `Box<BackendGate>` field is the same kind of heap allocation that
@@ -122,22 +122,23 @@ pub enum BackendGate {
     /// identity in this module ever targets it.
     Measure(usize, usize),
     /// The backend-lowered counterpart of `ir::Gate::If` /
-    /// `native::NativeGate::If`: applies `inner` iff classical bit
-    /// `clbit` holds `value`. `lower`/`lower_with_coupling` produce it
-    /// by re-expressing a conditioned native gate exactly the way an
-    /// unconditioned one would be (via `push_ry`/`push_two_qubit_zz`/
-    /// direct `Rz`), then wrapping *every* `BackendGate` that
-    /// re-expansion emitted in the same condition -- so e.g. a
-    /// conditioned `Ry` lowered to an `Rx`-native backend becomes three
-    /// separately-conditioned `BackendGate`s (`Rot(pi/2)`,
-    /// `Rz(theta)`, `Rot(-pi/2)`, see [`push_ry_via_rx`]), not one `If`
-    /// wrapping all three -- the same reasoning `NativeGate::If`'s doc
-    /// comment gives for why that's the shape execution needs.
-    /// `inner` can be either 1- or 2-qubit-shaped depending on what got
-    /// re-expressed (e.g. an `Rx`-native backend's `push_two_qubit_zz`
-    /// identity for a conditioned `Rzz` produces conditioned `Cx`s, not
-    /// conditioned `Rzz`s) -- see [`BackendGate::qubits`].
-    If(usize, bool, Box<BackendGate>),
+    /// `native::NativeGate::If`: applies `inner` iff every
+    /// `(clbit, value)` pair in `conditions` holds. `lower`/
+    /// `lower_with_coupling` produce it by re-expressing a conditioned
+    /// native gate exactly the way an unconditioned one would be (via
+    /// `push_ry`/`push_two_qubit_zz`/direct `Rz`), then wrapping
+    /// *every* `BackendGate` that re-expansion emitted in the same
+    /// condition list -- so e.g. a conditioned `Ry` lowered to an
+    /// `Rx`-native backend becomes three separately-conditioned
+    /// `BackendGate`s (`Rot(pi/2)`, `Rz(theta)`, `Rot(-pi/2)`, see
+    /// [`push_ry_via_rx`]), not one `If` wrapping all three -- the same
+    /// reasoning `NativeGate::If`'s doc comment gives for why that's
+    /// the shape execution needs. `inner` can be either 1- or
+    /// 2-qubit-shaped depending on what got re-expressed (e.g. an
+    /// `Rx`-native backend's `push_two_qubit_zz` identity for a
+    /// conditioned `Rzz` produces conditioned `Cx`s, not conditioned
+    /// `Rzz`s) -- see [`BackendGate::qubits`].
+    If(Vec<(usize, bool)>, Box<BackendGate>),
 }
 
 impl BackendGate {
@@ -152,7 +153,7 @@ impl BackendGate {
             BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => {
                 vec![a, b]
             }
-            BackendGate::If(_, _, ref inner) => inner.qubits(),
+            BackendGate::If(_, ref inner) => inner.qubits(),
         }
     }
 }
@@ -200,7 +201,7 @@ fn count_backend_gate(g: &BackendGate, single: &mut usize, two: &mut usize) {
         BackendGate::Rz(..) | BackendGate::Rot(..) => *single += 1,
         BackendGate::Cx(..) | BackendGate::Cz(..) | BackendGate::Rzz(..) => *two += 1,
         BackendGate::Measure(..) => {}
-        BackendGate::If(_, _, inner) => count_backend_gate(inner, single, two),
+        BackendGate::If(_, inner) => count_backend_gate(inner, single, two),
     }
 }
 
@@ -320,8 +321,8 @@ fn relabel_native_to_trapped_ion(g: &crate::native::NativeGate) -> BackendGate {
         NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
         NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
         NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
-        NativeGate::If(clbit, value, ref inner) => {
-            BackendGate::If(clbit, value, Box::new(relabel_native_to_trapped_ion(inner)))
+        NativeGate::If(ref conditions, ref inner) => {
+            BackendGate::If(conditions.clone(), Box::new(relabel_native_to_trapped_ion(inner)))
         }
     }
 }
@@ -348,12 +349,12 @@ fn push_native_gate_reexpressed(
         NativeGate::Ry(q, a) => push_ry(bc, axis, q, a),
         NativeGate::Rzz(a, b, t) => backend.push_two_qubit_zz(bc, a, b, t),
         NativeGate::Measure(q, c) => bc.push(BackendGate::Measure(q, c)),
-        NativeGate::If(clbit, value, ref inner) => {
+        NativeGate::If(ref conditions, ref inner) => {
             let before = bc.gates.len();
             push_native_gate_reexpressed(bc, backend, axis, inner);
             let produced: Vec<BackendGate> = bc.gates.split_off(before);
             for produced_gate in produced {
-                bc.push(BackendGate::If(clbit, value, Box::new(produced_gate)));
+                bc.push(BackendGate::If(conditions.clone(), Box::new(produced_gate)));
             }
         }
     }
@@ -601,7 +602,7 @@ pub fn resynthesize(bc: &mut BackendCircuit) {
                 flush(q, &mut acc, &mut out, axis);
                 out.push(g);
             }
-            BackendGate::If(_, _, ref inner) => {
+            BackendGate::If(_, ref inner) => {
                 // Same treatment as Measure just above, generalized to
                 // every wire the conditioned gate touches (one or two,
                 // depending on what `inner` is -- see
@@ -876,7 +877,7 @@ pub fn optimize(bc: &mut BackendCircuit) {
                 invalidate_pairs_touching(&mut last_2q, q);
                 out.push(Some(g));
             }
-            BackendGate::If(_, _, ref inner) => {
+            BackendGate::If(_, ref inner) => {
                 // Same barrier treatment as Measure just above, over
                 // every wire `inner` touches (one or two -- see
                 // `BackendGate::qubits`): a conditioned gate is a real
@@ -1062,7 +1063,7 @@ mod tests {
                     // BackendGate::If's doc comment) still needs its
                     // adjacency checked, exactly as much as an
                     // unconditioned one would.
-                    BackendGate::If(_, _, ref inner) => match inner.as_ref() {
+                    BackendGate::If(_, ref inner) => match inner.as_ref() {
                         BackendGate::Cx(a, b) | BackendGate::Cz(a, b) => Some((*a, *b)),
                         BackendGate::Rzz(a, b, _) => Some((*a, *b)),
                         _ => None,

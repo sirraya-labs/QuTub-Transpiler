@@ -54,6 +54,35 @@ pub enum RotAxis {
     Rx,
 }
 
+/// Which fixed physical interaction a `Channel::Control` pulse on this
+/// backend actually represents -- needed to invert a compiled
+/// [`crate::sequencer::Program`] back to the gate action it came from
+/// (see [`crate::sequencer::execute`]), since
+/// [`crate::pulse::PulseCalibration`]'s `two_qubit` table doesn't
+/// itself distinguish `Cx` from `Cz` -- both use the exact same fixed
+/// pulse shape in this crate's calibration model (see `pulse.rs`'s
+/// `push_leaf_pulse`, whose `Cx`/`Cz` match arm is shared). A required
+/// method, not a default, deliberately: a new `BackendSpec`
+/// implementation has to say which shape its native two-qubit
+/// interaction actually has rather than silently inheriting a wrong
+/// guess -- the same "no convenient default that could be wrong"
+/// judgment call [`BackendSpec::push_two_qubit_zz`] already makes by
+/// having no default at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTwoQubitGate {
+    /// Continuously parameterized -- `TrappedIon`'s `Rzz`. A
+    /// `Channel::Control` pulse's amplitude directly encodes the
+    /// rotation angle (see this backend's `push_two_qubit_zz`).
+    ContinuousRzz,
+    /// A fixed-angle native `Cx` -- `IbmQ`. Every `Channel::Control`
+    /// pulse this backend emits is the same fixed gate, regardless of
+    /// amplitude (the amplitude field is present but uninformative --
+    /// see `pulse.rs`'s `push_leaf_pulse`).
+    FixedCx,
+    /// A fixed-angle native `Cz` -- `Rigetti`/`Google`.
+    FixedCz,
+}
+
 /// One physical backend's native gate set, connectivity, and
 /// calibration data. Implement this once per backend, in its own file,
 /// to add a new target for [`crate::backend::lower`] -- see this
@@ -155,6 +184,14 @@ pub trait BackendSpec: Send + Sync {
     fn is_native_decompose_target(&self) -> bool {
         false
     }
+
+    /// Which fixed physical interaction this backend's `Channel::Control`
+    /// pulses represent -- see [`NativeTwoQubitGate`]'s doc comment.
+    /// No default: every backend must say which of the three shapes
+    /// applies, since guessing wrong here would make
+    /// [`crate::sequencer::execute`] apply the wrong two-qubit gate
+    /// silently rather than erroring.
+    fn native_two_qubit_gate(&self) -> NativeTwoQubitGate;
 }
 
 /// A handle to one backend's [`BackendSpec`] implementation. `Copy`,
@@ -212,6 +249,9 @@ impl Backend {
     }
     pub(crate) fn is_native_decompose_target(self) -> bool {
         self.0.is_native_decompose_target()
+    }
+    pub fn native_two_qubit_gate(self) -> NativeTwoQubitGate {
+        self.0.native_two_qubit_gate()
     }
 }
 

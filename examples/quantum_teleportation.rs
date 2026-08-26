@@ -196,8 +196,8 @@ fn full_teleportation_circuit(prep: fn(&mut Circuit, usize)) -> Circuit {
     c.num_clbits = 2;
     c.push(Gate::Measure(0, 0)); // m0
     c.push(Gate::Measure(1, 1)); // m1
-    c.push(Gate::If(1, true, Box::new(Gate::X(2)))); // X iff m1 == 1
-    c.push(Gate::If(0, true, Box::new(Gate::Z(2)))); // Z iff m0 == 1
+    c.push(Gate::If(vec![(1, true)], Box::new(Gate::X(2)))); // X iff m1 == 1
+    c.push(Gate::If(vec![(0, true)], Box::new(Gate::Z(2)))); // Z iff m0 == 1
     c
 }
 

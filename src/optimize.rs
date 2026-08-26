@@ -101,16 +101,16 @@ fn drop_zero_pass(gates: &[NativeGate]) -> Vec<NativeGate> {
             // effect the caller depends on.
             NativeGate::Measure(..) => true,
             // Drop iff the *wrapped* gate would be dropped on its own --
-            // an If(clbit, value, Rz(q, ~0)) is a no-op regardless of
-            // clbit's value, exactly as much as a bare Rz(q, ~0) would
-            // be, so this recurses into the same rule rather than
+            // an If(conditions, Rz(q, ~0)) is a no-op regardless of the
+            // conditions' values, exactly as much as a bare Rz(q, ~0)
+            // would be, so this recurses into the same rule rather than
             // keeping every If unconditionally (which would leave
             // genuinely-zero conditioned rotations behind forever).
             // Measure/If can't actually appear as `inner` here (see
             // NativeGate::If's doc comment), but are matched
             // conservatively (never dropped) rather than left
             // unreachable, so this stays a total function.
-            NativeGate::If(_, _, inner) => match inner.as_ref() {
+            NativeGate::If(_, inner) => match inner.as_ref() {
                 NativeGate::Rz(_, a) | NativeGate::Ry(_, a) => a.abs() > EPS,
                 NativeGate::Rzz(_, _, a) => a.abs() > EPS,
                 NativeGate::Measure(..) | NativeGate::If(..) => true,
@@ -163,9 +163,9 @@ mod tests {
     #[test]
     fn keeps_a_conditioned_nonzero_rotation() {
         let mut nc = NativeCircuit::new(1);
-        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.5))));
+        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.5))));
         let opt = optimize(&nc);
-        assert_eq!(opt.gates, vec![NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.5)))]);
+        assert_eq!(opt.gates, vec![NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.5)))]);
     }
 
     #[test]
@@ -173,7 +173,7 @@ mod tests {
         // If(clbit, value, Rz(q, ~0)) is a no-op no matter what clbit
         // holds -- same as an unconditioned zero-angle Rz.
         let mut nc = NativeCircuit::new(1);
-        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.0))));
+        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.0))));
         let opt = optimize(&nc);
         assert!(opt.gates.is_empty());
     }
@@ -187,8 +187,8 @@ mod tests {
         // currently check -- see this module's doc comment for the
         // scope this pass covers.)
         let mut nc = NativeCircuit::new(1);
-        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.2))));
-        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(0, 0.3))));
+        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.2))));
+        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.3))));
         let opt = optimize(&nc);
         assert_eq!(opt.gates.len(), 2, "conditioned rotations should not be fused by this pass");
     }
