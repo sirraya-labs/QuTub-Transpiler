@@ -374,7 +374,7 @@ fn backend_gate_qubits(gate: &BackendGate) -> Vec<usize> {
     match gate {
         BackendGate::Rz(q, _) | BackendGate::Rot(q, _) | BackendGate::Measure(q, _) => vec![*q],
         BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => vec![*a, *b],
-        BackendGate::If(_, _, inner) => backend_gate_qubits(inner),
+        BackendGate::If(_, inner) => backend_gate_qubits(inner),
     }
 }
 

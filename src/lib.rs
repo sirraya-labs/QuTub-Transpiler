@@ -38,6 +38,59 @@
 //! relative to the rest of the pipeline, nothing above it needs to
 //! change, or even know it exists.
 //!
+//! [`sequencer::compile`] sits below `pulse` a different way: rather
+//! than going deeper into single-pulse physics the way `waveform_sim`
+//! does, it goes sideways into real-time *control flow* -- turning an
+//! already-lowered [`BackendCircuit`] (containing a
+//! [`BackendGate::If`]) into a branching [`sequencer::Program`] with
+//! real registers and real jumps, the layer `pulse::Schedule`'s own
+//! flat, unconditional instruction list deliberately doesn't attempt
+//! (see `pulse.rs`'s own `BackendGate::If` handling, and
+//! `sequencer.rs`'s module doc for the full rationale). This is the
+//! layer a real control-electronics backend (Quantum Machines, Zurich
+//! Instruments, Keysight, or a lab's own custom stack) would target;
+//! [`sequencer::HardwareTarget`] is the open extension point for one,
+//! mirroring [`backend::BackendSpec`]'s one-trait-per-vendor pattern --
+//! no implementation ships in this crate yet, since guessing at a
+//! specific vendor's real instruction set isn't something this crate
+//! does (see that module's doc comment).
+//!
+//! [`readout`] is a different kind of noise from anything else above:
+//! not a gate-error or pulse-fidelity budget, but the classical
+//! confusion between a qubit's true, exactly-collapsed measurement
+//! outcome and what a real (imperfect) readout chain actually reports.
+//! [`sequencer::execute_with_readout_noise`] is where it plugs in --
+//! applied to exactly the classical bit `Gate::If`/`SeqInstr::JumpIfEqual`
+//! branch on, so a corrupted readout can make a conditioned correction
+//! fire (or not) based on the wrong bit, even though the underlying
+//! quantum collapse stayed exact. See `readout.rs`'s own doc comment
+//! for why this is modeled as an independent, purely classical layer
+//! rather than folded into any other noise source in this crate.
+//!
+//! [`noise`] is the gate-error counterpart: real, per-gate depolarizing
+//! noise sampled from [`fidelity::PublishedCalibration`]'s existing
+//! cited numbers (the same ones `fidelity::estimate_circuit_fidelity`
+//! already uses for its own aggregate survival-probability estimate,
+//! now made sampleable rather than only summarized). Every example in
+//! this crate that needed a genuinely noisy run used to hand-roll its
+//! own ad hoc version of this at the example level -- see `noise.rs`'s
+//! own doc comment for why that stopped being the right call once
+//! `sequencer::execute_with_noise` needed the same thing in the
+//! library itself, combined with [`readout`] noise in one place.
+//!
+//! [`resource_estimate`] is a separate, additive concern from
+//! everything above: it never touches `sirraya_qutub` at all (it's
+//! pure counting over an [`ir::Circuit`], via [`native::decompose`] +
+//! [`optimize::optimize`]), and estimates a *fault-tolerant* resource
+//! budget (T-count, T-depth) rather than [`fidelity`]'s NISQ-era
+//! depolarizing-error budget. It exists because "how many T gates does
+//! this circuit need" is the number a fault-tolerant target actually
+//! gets designed and rejected against, the way `fidelity`'s estimate
+//! already serves that role for NISQ backends -- see its own module
+//! doc for what it does and deliberately does not estimate (physical
+//! qubit count and code distance are real, separate, hardware-specific
+//! follow-on work).
+//!
 //! [`backend::Backend`] is an open extension point, not a fixed list:
 //! it's a handle onto a [`backend::BackendSpec`] implementation,
 //! and each of the three backends shipped today
@@ -65,10 +118,14 @@ pub mod ibm_export;
 pub mod ir;
 pub mod ir_optimize;
 pub mod native;
+pub mod noise;
 pub mod optimize;
 pub mod pulse;
 pub mod qasm;
+pub mod readout;
+pub mod resource_estimate;
 pub mod route;
+pub mod sequencer;
 pub mod waveform_sim;
 
 pub use backend::{lower, lower_with_coupling, lower_no_restore, lower_with_coupling_no_restore, Backend, BackendCircuit, BackendGate, BackendSpec, RotAxis};
@@ -84,9 +141,16 @@ pub use pulse::{
     PulseInstruction, Schedule, SingleQubitPulseCalibration, TwoQubitContinuousPulseCalibration,
     TwoQubitPulseCalibration,
 };
+pub use sequencer::{compile as compile_sequencer, execute as execute_sequencer, HardwareTarget, Program, SeqInstr};
+pub use readout::{corrupt_readout, ReadoutCalibration};
+pub use noise::{apply_pauli_error, sample_depolarizing_error, PauliError};
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
 pub use route::{route, route_lookahead, route_sabre, route_best, route_best_no_restore, route_qft, restoration_swap_count};
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, validate_cx_native_basis, IbmInstr};
 pub use waveform_sim::{
     integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,
+};
+pub use resource_estimate::{
+    estimate_circuit_resources, estimate_circuit_resources_with_epsilon, ResourceBudget,
+    RotationSynthesis, DEFAULT_ROTATION_EPSILON,
 };

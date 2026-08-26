@@ -122,7 +122,7 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
             continue;
         }
         // This crate's own classical-control extension:
-        // `if (c[N]==0|1) <gate-stmt>;` -- see this module's doc
+        // `if (c[N]==0|1 && ...) <gate-stmt>;` -- see this module's doc
         // comment and `parse_if_condition`'s own doc comment for what
         // this is (and isn't) standard for.
         if let Some(rest) = stmt.strip_prefix("if") {
@@ -132,12 +132,15 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
             let c_count = num_clbits.ok_or_else(|| {
                 format!("line {}: `if` before a classical register declaration: `{}`", lineno, stmt)
             })?;
-            let (clbit, value, inner_stmt) = parse_if_condition(rest, lineno)?;
-            if clbit >= c_count {
-                return Err(format!(
-                    "line {}: classical bit index {} out of range for a {}-bit register: `{}`",
-                    lineno, clbit, c_count, stmt
-                ));
+            let (conditions, inner_stmt) = parse_if_condition(rest, lineno)?;
+            for &(clbit, _) in &conditions {
+                if clbit >= c_count {
+                    return Err(format!(
+                        "line {}: classical bit index {} out of range for a {}-bit register: \
+                         `{}`",
+                        lineno, clbit, c_count, stmt
+                    ));
+                }
             }
             let inner_trimmed = inner_stmt.trim();
             if inner_trimmed.starts_with("measure") {
@@ -163,7 +166,7 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
                     ));
                 }
             }
-            circuit.gates.push(Gate::If(clbit, value, Box::new(inner_gate)));
+            circuit.gates.push(Gate::If(conditions, Box::new(inner_gate)));
             continue;
         }
         // QASM 3.0's assignment-style measure: `c[0] = measure q[0];`
@@ -479,15 +482,18 @@ fn parse_measure_statement(rest: &str, lineno: usize) -> Result<(usize, usize), 
 }
 
 /// Parses this crate's own classical-control extension --
-/// `if (c[N]==0|1) <gate-stmt>` -- after the leading `if` keyword has
-/// already been stripped. Not standard OPENQASM (see this module's doc
-/// comment) -- `emit.rs::to_qasm`/`to_qasm3`'s own dialect for a
-/// single classically-conditioned gate. Returns `(clbit, value,
+/// `if (c[N]==0|1 && c[M]==0|1 && ...) <gate-stmt>` -- after the
+/// leading `if` keyword has already been stripped. Not standard
+/// OPENQASM (see this module's doc comment) -- `emit.rs::to_qasm`/
+/// `to_qasm3`'s own dialect for a single classically-conditioned gate,
+/// generalized to a `&&`-joined list of bit-equality clauses so it can
+/// express a real multi-bit joint condition (`ir::Gate::If`'s AND
+/// semantics), not just a single one. Returns `(conditions,
 /// remaining_statement_text)`; the caller is responsible for rejecting
 /// a `measure`/`if` as the remaining statement (see `Circuit::validate`'s
 /// matching rule) and then parsing whatever's left with the ordinary
 /// [`parse_gate_statement`].
-fn parse_if_condition(rest: &str, lineno: usize) -> Result<(usize, bool, &str), String> {
+fn parse_if_condition(rest: &str, lineno: usize) -> Result<(Vec<(usize, bool)>, &str), String> {
     let rest = rest.trim_start();
     let open = rest
         .strip_prefix('(')
@@ -496,25 +502,34 @@ fn parse_if_condition(rest: &str, lineno: usize) -> Result<(usize, bool, &str), 
         .find(')')
         .ok_or_else(|| format!("line {}: `if` missing closing `)`: `if{}`", lineno, rest))?;
     let condition = &open[..close];
-    let eq = condition.find("==").ok_or_else(|| {
-        format!(
-            "line {}: `if` condition must be `c[N]==0` or `c[N]==1`: `if({})`",
-            lineno, condition
-        )
-    })?;
-    let clbit = parse_index_ref(&condition[..eq], lineno)?;
-    let rhs = condition[eq + 2..].trim();
-    let value = match rhs {
-        "0" => false,
-        "1" => true,
-        other => {
-            return Err(format!(
-                "line {}: `if` condition value must be `0` or `1`, got `{}`: `if({})`",
-                lineno, other, condition
-            ))
-        }
-    };
-    Ok((clbit, value, &open[close + 1..]))
+    let mut conditions = Vec::new();
+    for clause in condition.split("&&") {
+        let clause = clause.trim();
+        let eq = clause.find("==").ok_or_else(|| {
+            format!(
+                "line {}: `if` condition must be one or more `c[N]==0`/`c[N]==1` clauses \
+                 joined by `&&`: `if({})`",
+                lineno, condition
+            )
+        })?;
+        let clbit = parse_index_ref(&clause[..eq], lineno)?;
+        let rhs = clause[eq + 2..].trim();
+        let value = match rhs {
+            "0" => false,
+            "1" => true,
+            other => {
+                return Err(format!(
+                    "line {}: `if` condition value must be `0` or `1`, got `{}`: `if({})`",
+                    lineno, other, condition
+                ))
+            }
+        };
+        conditions.push((clbit, value));
+    }
+    if conditions.is_empty() {
+        return Err(format!("line {}: `if` condition is empty: `if({})`", lineno, condition));
+    }
+    Ok((conditions, &open[close + 1..]))
 }
 
 #[cfg(test)]
@@ -641,7 +656,7 @@ mod if_tests {
         let circuit = parse(src).unwrap();
         assert_eq!(
             circuit.gates,
-            vec![Gate::Measure(0, 0), Gate::If(0, true, Box::new(Gate::X(1)))]
+            vec![Gate::Measure(0, 0), Gate::If(vec![(0, true)], Box::new(Gate::X(1)))]
         );
     }
 
@@ -649,14 +664,14 @@ mod if_tests {
     fn parses_a_conditioned_gate_with_a_parameter() {
         let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[1];\nif (c[0]==0) rz(0.5) q[1];\n";
         let circuit = parse(src).unwrap();
-        assert_eq!(circuit.gates, vec![Gate::If(0, false, Box::new(Gate::Rz(1, 0.5)))]);
+        assert_eq!(circuit.gates, vec![Gate::If(vec![(0, false)], Box::new(Gate::Rz(1, 0.5)))]);
     }
 
     #[test]
     fn parses_a_conditioned_two_qubit_gate() {
         let src = "OPENQASM 2.0;\nqreg q[3];\ncreg c[1];\nif (c[0]==1) cx q[1], q[2];\n";
         let circuit = parse(src).unwrap();
-        assert_eq!(circuit.gates, vec![Gate::If(0, true, Box::new(Gate::Cx(1, 2)))]);
+        assert_eq!(circuit.gates, vec![Gate::If(vec![(0, true)], Box::new(Gate::Cx(1, 2)))]);
     }
 
     #[test]
@@ -699,6 +714,6 @@ mod if_tests {
     fn if_works_identically_under_qasm3_declarations() {
         let src = "OPENQASM 3.0;\nqubit[2] q;\nbit[1] c;\nif (c[0]==1) x q[1];\n";
         let circuit = parse(src).unwrap();
-        assert_eq!(circuit.gates, vec![Gate::If(0, true, Box::new(Gate::X(1)))]);
+        assert_eq!(circuit.gates, vec![Gate::If(vec![(0, true)], Box::new(Gate::X(1)))]);
     }
 }

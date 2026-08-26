@@ -153,16 +153,16 @@ pub fn lower_ibm_native(circuit: &BackendCircuit) -> Result<Vec<IbmInstr>, Strin
                     gate
                 ));
             }
-            BackendGate::If(clbit, ..) => {
+            BackendGate::If(ref conditions, ..) => {
                 return Err(format!(
-                    "lower_ibm_native: classically-conditioned gates (clbit {}) aren't \
+                    "lower_ibm_native: classically-conditioned gates (clbits {:?}) aren't \
                      supported yet -- real OPENQASM 2.0's `if` conditions on a whole creg's \
-                     integer value, not one indexed bit the way this crate's own qasm.rs \
-                     dialect extension does (see that module's `parse_if_condition` doc \
-                     comment); correctly expressing a single-bit condition in IBM's real \
-                     basis needs a convention this module doesn't have yet -- see this \
+                     integer value, not a list of indexed-bit equalities the way this crate's \
+                     own qasm.rs dialect extension does (see that module's \
+                     `parse_if_condition` doc comment); correctly expressing this in IBM's \
+                     real basis needs a convention this module doesn't have yet -- see this \
                      module's own doc comment.",
-                    clbit
+                    conditions.iter().map(|&(c, _)| c).collect::<Vec<_>>()
                 ));
             }
         }

@@ -103,4 +103,8 @@ impl BackendSpec for GoogleSpec {
         bc.push(BackendGate::Cz(control, target));
         push_h(bc, RotAxis::Rx, target);
     }
+
+    fn native_two_qubit_gate(&self) -> crate::backend::spec::NativeTwoQubitGate {
+        crate::backend::spec::NativeTwoQubitGate::FixedCz
+    }
 }

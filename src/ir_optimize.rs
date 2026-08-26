@@ -508,7 +508,7 @@ mod tests {
         // look swappable, but an If must never be slid past anything.
         let mut c = Circuit::new(3);
         c.num_clbits = 1;
-        let if_gate = Gate::If(0, true, Box::new(Gate::X(1)));
+        let if_gate = Gate::If(vec![(0, true)], Box::new(Gate::X(1)));
         c.push(if_gate.clone()).push(Gate::X(2));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![if_gate, Gate::X(2)]);
@@ -523,7 +523,7 @@ mod tests {
         let mut c = Circuit::new(2);
         c.num_clbits = 1;
         let measure = Gate::Measure(0, 0);
-        let if_gate = Gate::If(0, true, Box::new(Gate::X(1)));
+        let if_gate = Gate::If(vec![(0, true)], Box::new(Gate::X(1)));
         c.push(measure.clone()).push(if_gate.clone());
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![measure, if_gate]);

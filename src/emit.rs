@@ -113,19 +113,31 @@ fn apply_native_gate_with_measurement(
             })?;
             *slot = outcome;
         }
-        NativeGate::If(clbit, value, ref inner) => {
+        NativeGate::If(ref conditions, ref inner) => {
             // This is the real thing `examples/quantum_teleportation.rs`
             // used to do by hand, directly against the `QuantumRegister`
             // after `emit::run` returned -- see that example's updated
             // doc comment for the before/after. `inner` is always a
             // bare Rz/Ry/Rzz (never Measure or another If -- see
             // `NativeGate::If`'s own doc comment), so this recursion
-            // bottoms out in exactly one more call.
+            // bottoms out in exactly one more call. Every condition in
+            // the list must hold (AND semantics -- see `ir::Gate::If`'s
+            // doc comment) for `inner` to fire.
             let num_clbits = clbits.len();
-            let outcome = *clbits.get(clbit).ok_or_else(|| {
-                format!("If reads classical bit {} but only {} were provided", clbit, num_clbits)
-            })?;
-            if (outcome != 0) == value {
+            let mut all_hold = true;
+            for &(clbit, value) in conditions {
+                let outcome = *clbits.get(clbit).ok_or_else(|| {
+                    format!(
+                        "If reads classical bit {} but only {} were provided",
+                        clbit, num_clbits
+                    )
+                })?;
+                if (outcome != 0) != value {
+                    all_hold = false;
+                    break;
+                }
+            }
+            if all_hold {
                 apply_native_gate_with_measurement(inner, reg, clbits)?;
             }
         }
@@ -141,12 +153,13 @@ fn apply_native_gate_with_measurement(
 /// emitters); everything else, including `If`, is identical between
 /// them.
 ///
-/// The `if (c[N]==0|1) <stmt>` syntax this emits for `NativeGate::If`
-/// is this crate's own dialect extension, the same kind of deliberate,
-/// documented departure from the standard `qasm.rs`'s module doc
-/// already notes for `rzz`/`ryy` -- real OPENQASM 2.0's `if` conditions
-/// on a whole `creg`'s *integer value*, not one indexed bit, and QASM
-/// 3.0 has no single-statement (non-block) `if` at all. `qasm::parse`'s
+/// The `if (c[N]==0|1 && c[M]==0|1 && ...) <stmt>` syntax this emits
+/// for `NativeGate::If` is this crate's own dialect extension, the
+/// same kind of deliberate, documented departure from the standard
+/// `qasm.rs`'s module doc already notes for `rzz`/`ryy` -- real
+/// OPENQASM 2.0's `if` conditions on a whole `creg`'s *integer value*,
+/// not a `&&`-joined list of indexed-bit equalities, and QASM 3.0 has
+/// no single-statement (non-block) `if` at all. `qasm::parse`'s
 /// `parse_if_condition` is the matching reader, so this still
 /// round-trips exactly the way every other statement here does.
 fn native_gate_stmt(gate: &NativeGate, measure_stmt: &dyn Fn(usize, usize) -> String) -> String {
@@ -155,12 +168,14 @@ fn native_gate_stmt(gate: &NativeGate, measure_stmt: &dyn Fn(usize, usize) -> St
         NativeGate::Ry(q, angle) => format!("ry({}) q[{}]", angle, q),
         NativeGate::Rzz(a, b, angle) => format!("rzz({}) q[{}], q[{}]", angle, a, b),
         NativeGate::Measure(q, c) => measure_stmt(q, c),
-        NativeGate::If(clbit, value, ref inner) => format!(
-            "if (c[{}]=={}) {}",
-            clbit,
-            value as u8,
-            native_gate_stmt(inner, measure_stmt)
-        ),
+        NativeGate::If(ref conditions, ref inner) => {
+            let condition_text = conditions
+                .iter()
+                .map(|&(clbit, value)| format!("c[{}]=={}", clbit, value as u8))
+                .collect::<Vec<_>>()
+                .join(" && ");
+            format!("if ({}) {}", condition_text, native_gate_stmt(inner, measure_stmt))
+        }
     }
 }
 
@@ -336,12 +351,22 @@ fn apply_backend_gate_with_measurement(
             })?;
             *slot = outcome;
         }
-        BackendGate::If(clbit, value, ref inner) => {
+        BackendGate::If(ref conditions, ref inner) => {
             let num_clbits = clbits.len();
-            let outcome = *clbits.get(clbit).ok_or_else(|| {
-                format!("If reads classical bit {} but only {} were provided", clbit, num_clbits)
-            })?;
-            if (outcome != 0) == value {
+            let mut all_hold = true;
+            for &(clbit, value) in conditions {
+                let outcome = *clbits.get(clbit).ok_or_else(|| {
+                    format!(
+                        "If reads classical bit {} but only {} were provided",
+                        clbit, num_clbits
+                    )
+                })?;
+                if (outcome != 0) != value {
+                    all_hold = false;
+                    break;
+                }
+            }
+            if all_hold {
                 apply_backend_gate_with_measurement(circuit, inner, reg, clbits)?;
             }
         }
@@ -410,7 +435,7 @@ mod qasm3_emit_tests {
         let mut nc = NativeCircuit::new(2);
         nc.num_clbits = 1;
         nc.push(NativeGate::Measure(0, 0));
-        nc.push(NativeGate::If(0, true, Box::new(NativeGate::Rz(1, 0.5))));
+        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(1, 0.5))));
         nc
     }
 
@@ -428,7 +453,7 @@ mod qasm3_emit_tests {
             circuit.gates,
             vec![
                 crate::ir::Gate::Measure(0, 0),
-                crate::ir::Gate::If(0, true, Box::new(crate::ir::Gate::Rz(1, 0.5))),
+                crate::ir::Gate::If(vec![(0, true)], Box::new(crate::ir::Gate::Rz(1, 0.5))),
             ]
         );
     }

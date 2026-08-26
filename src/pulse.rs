@@ -423,10 +423,42 @@ fn schedule_one(
     busy_until: &mut HashMap<usize, f64>,
     instructions: &mut Vec<PulseInstruction>,
 ) -> Result<(), String> {
-    fn qubit_time(q: usize, busy_until: &HashMap<usize, f64>) -> f64 {
-        *busy_until.get(&q).unwrap_or(&0.0)
+    match *g {
+        BackendGate::If(_, ref inner) => {
+            // Scheduled exactly as `inner` would be on its own --
+            // *this* static `Schedule` only ever describes which
+            // pulses exist and when, never whether one actually fires
+            // at runtime. See [`crate::sequencer`] for the layer that
+            // actually represents the branch -- this function
+            // deliberately stays a flat, unconditional pulse list; it
+            // is not where real-time control-flow belongs.
+            schedule_one(inner, cal, busy_until, instructions)
+        }
+        _ => push_leaf_pulse(g, cal, busy_until, instructions),
     }
+}
 
+fn qubit_time(q: usize, busy_until: &HashMap<usize, f64>) -> f64 {
+    *busy_until.get(&q).unwrap_or(&0.0)
+}
+
+/// Appends the pulse(s) for one *leaf* `BackendGate` -- everything
+/// except `If`, which has no pulse of its own (only its `inner` does).
+/// This is the actual physical-pulse-construction logic; both
+/// [`schedule_one`] (the static, unconditional `Schedule` this module
+/// builds) and [`crate::sequencer::compile`] (the real branching
+/// program one layer below it) call this for the same leaf gate, so
+/// the two never have two different opinions about what pulse a given
+/// gate produces -- only about whether/when it's allowed to fire.
+///
+/// `pub(crate)` rather than private specifically so `sequencer.rs` can
+/// reuse it; every other function in this module stays private.
+pub(crate) fn push_leaf_pulse(
+    g: &BackendGate,
+    cal: &PulseCalibration,
+    busy_until: &mut HashMap<usize, f64>,
+    instructions: &mut Vec<PulseInstruction>,
+) -> Result<(), String> {
     match *g {
         BackendGate::Rz(q, theta) => {
             let t = qubit_time(q, busy_until);
@@ -507,24 +539,10 @@ fn schedule_one(
             });
             busy_until.insert(q, t + duration);
         }
-        BackendGate::If(_, _, ref inner) => {
-            // Scheduled exactly as `inner` would be on its own --
-            // *this* static `Schedule` only ever describes which
-            // pulses exist and when, never whether one actually fires
-            // at runtime (see `emit.rs`'s execution of this variant,
-            // which is what makes that call). That split mirrors how
-            // this crate already treats the analogous case one layer
-            // up: `backend::lower`'s `If` handling compiles the pulse
-            // unconditionally into the schedule; the real-time
-            // classical feed-forward decision belongs to control
-            // electronics this static model doesn't represent, not to
-            // schedule construction. A genuine dynamic-circuits
-            // scheduler -- one that can express "wait for the
-            // classical result, then branch, with real feed-forward
-            // latency" -- is real, separate follow-on work this
-            // function doesn't attempt.
-            schedule_one(inner, cal, busy_until, instructions)?;
-        }
+        BackendGate::If(..) => unreachable!(
+            "push_leaf_pulse called on If -- If has no pulse of its own, only its inner \
+             does; callers must unwrap it first (schedule_one does; sequencer::compile does)"
+        ),
     }
     Ok(())
 }
@@ -855,7 +873,7 @@ mod tests {
         // private outside backend.rs -- push is pub(crate), so the
         // gates themselves can still be added directly.
         let mut conditioned = backend::lower(&Circuit::new(1), Backend::TrappedIon);
-        conditioned.push(BackendGate::If(0, true, Box::new(BackendGate::Rot(0, PI))));
+        conditioned.push(BackendGate::If(vec![(0, true)], Box::new(BackendGate::Rot(0, PI))));
         let mut plain = backend::lower(&Circuit::new(1), Backend::TrappedIon);
         plain.push(BackendGate::Rot(0, PI));
 
@@ -871,7 +889,7 @@ mod tests {
         // early -- same overlap-freedom guarantee as an unconditioned
         // two-qubit gate.
         let mut bc = backend::lower(&Circuit::new(2), Backend::TrappedIon);
-        bc.push(BackendGate::If(0, true, Box::new(BackendGate::Rzz(0, 1, PI / 2.0))));
+        bc.push(BackendGate::If(vec![(0, true)], Box::new(BackendGate::Rzz(0, 1, PI / 2.0))));
         bc.push(BackendGate::Rot(0, PI));
         let sched = schedule(&bc, &trapped_ion_pulse_calibration()).unwrap();
         assert!(
