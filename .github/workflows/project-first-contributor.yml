@@ -1,0 +1,80 @@
+name: Project / First-Time Contributor
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  welcome-first-time-contributor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check whether this is the contributor's first PR
+        id: first_pr
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const author = context.payload.pull_request.user.login;
+
+            const { data: pulls } = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'all',
+              head: `${owner}:${author}`,
+              per_page: 100
+            });
+
+            const authoredPRs = pulls.filter(
+              pr => pr.user.login === author
+            );
+
+            core.setOutput(
+              'is_first',
+              authoredPRs.length === 1 ? 'true' : 'false'
+            );
+
+      - name: Label first-time contributor
+        if: steps.first_pr.outputs.is_first == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['first-time-contributor']
+            });
+
+      - name: Welcome contributor
+        if: steps.first_pr.outputs.is_first == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const author = context.payload.pull_request.user.login;
+
+            const body = `👋 Hi @${author}, and welcome to **Sirraya QuTub**!
+
+            Thank you for opening your first contribution to the project. 🎉
+
+            A few things to know while your PR is being reviewed:
+
+            - Automated checks will validate formatting, tests, and compiler behavior.
+            - A maintainer will review the changes and may leave questions or suggestions.
+            - If a CI check fails and you're unsure what it means, feel free to ask directly in this PR.
+            - Don't worry if revisions are requested — iteration is a normal part of contributing.
+
+            We're building QuTub in the open, and contributions from students, researchers, engineers, and curious builders are all welcome.
+
+            Thanks for being part of the project. 🚀`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
