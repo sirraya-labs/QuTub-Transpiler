@@ -201,6 +201,89 @@ impl PublishedCalibration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{Backend, BackendCircuit, BackendGate};
+    use crate::native::NativeGate;
+
+    fn half_survival_calibration() -> PublishedCalibration {
+        PublishedCalibration {
+            name: "test calibration",
+            // For one qubit, p = (1 - 0.75) * 2 = 0.5.
+            single_qubit_fidelity: 0.75,
+            // For two qubits, p = (1 - 0.625) * 4 / 3 = 0.5.
+            two_qubit_fidelity: 0.625,
+        }
+    }
+
+    #[test]
+    fn native_estimate_compounds_gate_survival_and_ignores_measurement() {
+        let mut circuit = NativeCircuit::new(2);
+        circuit.num_clbits = 1;
+        circuit.extend([
+            NativeGate::Rz(0, 0.1),
+            NativeGate::Ry(1, 0.2),
+            NativeGate::Rzz(0, 1, 0.3),
+            NativeGate::Measure(0, 0),
+        ]);
+
+        assert_eq!(
+            estimate_circuit_fidelity(&circuit, &half_survival_calibration()),
+            0.125
+        );
+    }
+
+    #[test]
+    fn backend_estimate_compounds_gate_survival_and_ignores_measurement() {
+        let circuit = BackendCircuit {
+            backend: Backend::IbmQ,
+            num_qubits: 2,
+            num_clbits: 1,
+            gates: vec![
+                BackendGate::Rz(0, 0.1),
+                BackendGate::Cx(0, 1),
+                BackendGate::Cz(0, 1),
+                BackendGate::Measure(0, 0),
+            ],
+        };
+
+        assert_eq!(
+            estimate_backend_circuit_fidelity(&circuit, &half_survival_calibration()),
+            0.125
+        );
+    }
+
+    #[test]
+    fn empty_and_measurement_only_circuits_have_unit_fidelity_estimates() {
+        let calibration = half_survival_calibration();
+        let empty = NativeCircuit::new(1);
+        let mut measurement_only = NativeCircuit::new(1);
+        measurement_only.num_clbits = 1;
+        measurement_only.push(NativeGate::Measure(0, 0));
+
+        assert_eq!(estimate_circuit_fidelity(&empty, &calibration), 1.0);
+        assert_eq!(
+            estimate_circuit_fidelity(&measurement_only, &calibration),
+            1.0
+        );
+    }
+
+    #[test]
+    fn estimates_respect_clamped_calibration_boundaries() {
+        let mut circuit = NativeCircuit::new(1);
+        circuit.push(NativeGate::Rz(0, 0.1));
+        let perfect_or_better = PublishedCalibration {
+            name: "perfect",
+            single_qubit_fidelity: 1.5,
+            two_qubit_fidelity: 1.5,
+        };
+        let zero_or_worse = PublishedCalibration {
+            name: "zero",
+            single_qubit_fidelity: -1.0,
+            two_qubit_fidelity: -1.0,
+        };
+
+        assert_eq!(estimate_circuit_fidelity(&circuit, &perfect_or_better), 1.0);
+        assert_eq!(estimate_circuit_fidelity(&circuit, &zero_or_worse), 0.0);
+    }
 
     #[test]
     fn quantinuum_wrapper_matches_the_real_hardware_calibration_exactly() {
