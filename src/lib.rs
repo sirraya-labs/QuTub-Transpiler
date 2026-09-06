@@ -78,6 +78,19 @@
 //! `sequencer::execute_with_noise` needed the same thing in the
 //! library itself, combined with [`readout`] noise in one place.
 //!
+//! [`qec`] is where the classical-control stack above (`Gate::If`,
+//! `sequencer::execute`, `readout`/`noise`) actually gets used for what
+//! it was ultimately for: real quantum error correction.
+//! [`qec::StabilizerCode`] is the extension point (one trait, one file
+//! per code, mirroring [`backend::BackendSpec`]'s own pattern) for
+//! encode/syndrome-extract/`Gate::If`-conditioned-correct/decode. Two
+//! real, textbook-standard codes ship today
+//! ([`qec::bit_flip::ThreeQubitBitFlipCode`],
+//! [`qec::phase_flip::ThreeQubitPhaseFlipCode`]) -- see that module's
+//! own doc comment for exactly what's covered and, honestly, what a
+//! real next code (anything needing an actual external decoding
+//! algorithm, not a static branch table) would still require.
+//!
 //! [`resource_estimate`] is a separate, additive concern from
 //! everything above: it never touches `sirraya_qutub` at all (it's
 //! pure counting over an [`ir::Circuit`], via [`native::decompose`] +
@@ -122,6 +135,7 @@ pub mod noise;
 pub mod optimize;
 pub mod pulse;
 pub mod qasm;
+pub mod qec;
 pub mod readout;
 pub mod resource_estimate;
 pub mod route;
@@ -144,6 +158,7 @@ pub use pulse::{
 pub use sequencer::{compile as compile_sequencer, execute as execute_sequencer, HardwareTarget, Program, SeqInstr};
 pub use readout::{corrupt_readout, ReadoutCalibration};
 pub use noise::{apply_pauli_error, sample_depolarizing_error, PauliError};
+pub use qec::{bit_flip::ThreeQubitBitFlipCode, phase_flip::ThreeQubitPhaseFlipCode, StabilizerCode};
 pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
 pub use route::{route, route_lookahead, route_sabre, route_best, route_best_no_restore, route_qft, restoration_swap_count};
 pub use ibm_export::{to_ibm_qasm, lower_ibm_native, validate_cx_native_basis, IbmInstr};
