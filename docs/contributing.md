@@ -1,6 +1,6 @@
 # Contributing to `sirraya-qutub-transpiler`
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Good First Issues](https://img.shields.io/github/issues/sirraya-labs/QuTub-Transpiler/good%20first%20issue)](https://github.com/sirraya-labs/QuTub-Transpiler/labels/good%20first%20issue)
 [![Discussions](https://img.shields.io/badge/Discussions-join-blue)](https://github.com/sirraya-labs/QuTub-Transpiler/discussions)
 
@@ -810,7 +810,7 @@ For something security-related or otherwise inappropriate for a public issue, co
 
 # License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](../LICENSE).
 
 By submitting a pull request, you agree that your contribution is licensed under the same terms.
 
