@@ -1,3 +1,9 @@
+//! Quantum Teleportation Example
+//!
+//! Demonstrates the quantum teleportation protocol using the QuTub transpiler.
+
+// Allow complex types in test state arrays (not production code)
+#![allow(clippy::type_complexity)]
 //! Quantum teleportation, run through this crate's real compiler
 //! pipeline -- same [`CircuitExecutor`] / `NoisyBackendExecutor` /
 //! `zero_noise_extrapolate` machinery as `trotter_ising_dynamics.rs`

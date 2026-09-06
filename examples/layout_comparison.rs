@@ -1,3 +1,10 @@
+//! Layout Comparison Example
+//!
+//! Compares different routing/placement strategies for quantum circuits.
+
+// Allow dead code in examples (these are for demonstration, not production)
+#![allow(dead_code)]
+
 //! Isolates *why* `qiskit_benchmark.rs`'s numbers lagged Qiskit's
 //! `transpile()` on nearest-neighbor-structured circuits even once
 //! both sides were routing against the identical heavy-hex coupling
