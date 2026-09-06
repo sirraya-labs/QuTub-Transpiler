@@ -1,6 +1,6 @@
 ---
 source: tests/ir_snapshots.rs
-expression: source
+expression: source_str
 ---
 Circuit {
     num_qubits: 2,

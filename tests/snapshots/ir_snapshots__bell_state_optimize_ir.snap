@@ -1,6 +1,6 @@
 ---
 source: tests/ir_snapshots.rs
-expression: ir_opt
+expression: ir_opt_str
 ---
 Circuit {
     num_qubits: 2,

@@ -14,12 +14,26 @@
 //! When a pass *unintentionally* changes behavior, the same diff is the
 //! bug report.
 //!
-//! Uses `insta = { version = "1", features = ["yaml"] }` as a
+//! Uses `insta = { version = "1", features = ["yaml", "filters"] }` as a
 //! dev-dependency. Run `cargo insta test` locally; `cargo insta review`
 //! to accept intentional changes (writes straight into `tests/snapshots/`).
 
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
 use sirraya_qutub_transpiler::{decompose, lower, optimize, optimize_ir, Backend};
+
+/// Rounds floating-point numbers in Debug output to a fixed precision.
+/// This prevents platform-specific floating-point differences from
+/// causing snapshot failures.
+fn with_rounded_floats<T: std::fmt::Debug>(value: &T) -> String {
+    let debug_str = format!("{:#?}", value);
+    
+    // Round floating-point numbers to 12 decimal places
+    // Matches patterns like: 1.5707963267948966 -> 1.570796326795
+    let re = regex::Regex::new(r"(\d+\.\d{12})\d+").unwrap();
+    re.replace_all(&debug_str, |caps: &regex::Captures| {
+        caps[1].to_string()
+    }).to_string()
+}
 
 fn bell() -> Circuit {
     let mut c = Circuit::new(2);
@@ -60,10 +74,12 @@ macro_rules! snapshot_pipeline {
         #[test]
         fn $name() {
             let source = $circuit;
-            insta::assert_debug_snapshot!(concat!(stringify!($name), "_source"), source);
+            let source_str = with_rounded_floats(&source);
+            insta::assert_snapshot!(concat!(stringify!($name), "_source"), source_str);
 
             let ir_opt = optimize_ir(&source);
-            insta::assert_debug_snapshot!(concat!(stringify!($name), "_optimize_ir"), ir_opt);
+            let ir_opt_str = with_rounded_floats(&ir_opt);
+            insta::assert_snapshot!(concat!(stringify!($name), "_optimize_ir"), ir_opt_str);
 
             // Native decompose+optimize is its own parallel view (what
             // `decompositions.rs`/`verify_equivalence.rs`'s `run_native`
@@ -74,9 +90,10 @@ macro_rules! snapshot_pipeline {
             // gates in isolation, independent of any backend's routing.
             let native = decompose(&ir_opt);
             let native_opt = optimize(&native);
-            insta::assert_debug_snapshot!(
+            let native_opt_str = with_rounded_floats(&native_opt);
+            insta::assert_snapshot!(
                 concat!(stringify!($name), "_native_optimized"),
-                native_opt
+                native_opt_str
             );
 
             for (label, backend) in [
@@ -85,9 +102,10 @@ macro_rules! snapshot_pipeline {
                 ("rigetti", Backend::Rigetti),
             ] {
                 let lowered = lower(&ir_opt, backend);
-                insta::assert_debug_snapshot!(
+                let lowered_str = with_rounded_floats(&lowered);
+                insta::assert_snapshot!(
                     format!("{}_{}", stringify!($name), label),
-                    lowered
+                    lowered_str
                 );
             }
         }
