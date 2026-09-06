@@ -1,0 +1,67 @@
+---
+source: tests/ir_snapshots.rs
+expression: lowered
+---
+BackendCircuit {
+    backend: IbmQ,
+    num_qubits: 4,
+    num_clbits: 0,
+    gates: [
+        Rz(
+            0,
+            1.5707963267948966,
+        ),
+        Rot(
+            0,
+            1.5707963267948966,
+        ),
+        Rz(
+            0,
+            1.5707963267948966,
+        ),
+        Cx(
+            1,
+            0,
+        ),
+        Cx(
+            0,
+            1,
+        ),
+        Cx(
+            2,
+            1,
+        ),
+        Cx(
+            1,
+            2,
+        ),
+        Cx(
+            2,
+            3,
+        ),
+        Cx(
+            2,
+            1,
+        ),
+        Cx(
+            1,
+            2,
+        ),
+        Cx(
+            2,
+            1,
+        ),
+        Cx(
+            1,
+            0,
+        ),
+        Cx(
+            0,
+            1,
+        ),
+        Cx(
+            1,
+            0,
+        ),
+    ],
+}

@@ -93,6 +93,18 @@ pub struct CouplingMap {
 
 impl CouplingMap {
     /// A nearest-neighbor chain: qubit `q` is adjacent to `q + 1` only.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(4);
+    /// assert_eq!(map.num_qubits(), 4);
+    /// // Each qubit is only ever adjacent to its immediate neighbor.
+    /// assert!(map.is_adjacent(0, 1));
+    /// assert!(!map.is_adjacent(0, 2));
+    /// ```
     pub fn linear(num_qubits: usize) -> Self {
         let mut edges = HashSet::new();
         for q in 0..num_qubits.saturating_sub(1) {
@@ -101,6 +113,16 @@ impl CouplingMap {
         Self { num_qubits, edges }
     }
 
+    /// The number of physical qubits in this coupling map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(5);
+    /// assert_eq!(map.num_qubits(), 5);
+    /// ```
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
@@ -126,6 +148,26 @@ impl CouplingMap {
     /// whatever produced the list (e.g. a stale qubit-count) instead of
     /// surfacing it at load time, before it can cause a confusing
     /// routing failure downstream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // A small "plus"-shaped topology on 5 qubits: 0-1, 0-2, 0-3, 0-4.
+    /// let map = CouplingMap::from_edges(5, [(0, 1), (0, 2), (0, 3), (0, 4)]).unwrap();
+    /// assert_eq!(map.num_qubits(), 5);
+    /// assert!(map.is_adjacent(0, 3));
+    /// assert!(!map.is_adjacent(1, 2));
+    ///
+    /// // Edge direction and repetition are normalized away.
+    /// let same = CouplingMap::from_edges(5, [(1, 0), (0, 2), (2, 0), (0, 3), (3, 0), (0, 4)]).unwrap();
+    /// assert_eq!(map.neighbors(0), same.neighbors(0));
+    ///
+    /// // Malformed edges are rejected rather than silently dropped.
+    /// assert!(CouplingMap::from_edges(3, [(0, 0)]).is_err());
+    /// assert!(CouplingMap::from_edges(3, [(0, 3)]).is_err());
+    /// ```
     pub fn from_edges(
         num_qubits: usize,
         edges: impl IntoIterator<Item = (usize, usize)>,
@@ -293,6 +335,19 @@ impl CouplingMap {
         }
     }
 
+    /// Whether two physical qubits are directly coupling-adjacent.
+    /// Adjacency is symmetric: `is_adjacent(a, b)` equals `is_adjacent(b, a)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(4);
+    /// assert!(map.is_adjacent(1, 2));
+    /// assert!(map.is_adjacent(2, 1));
+    /// assert!(!map.is_adjacent(1, 3));
+    /// ```
     pub fn is_adjacent(&self, a: usize, b: usize) -> bool {
         let key = if a < b { (a, b) } else { (b, a) };
         self.edges.contains(&key)
@@ -305,6 +360,18 @@ impl CouplingMap {
     /// (point-to-point), this is the building block for algorithms that
     /// need the graph's actual adjacency structure, e.g. any non-linear
     /// map like [`CouplingMap::heavy_hex_for`]/[`CouplingMap::heavy_hex_grid`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(4);
+    /// // Qubit 1 sits between qubits 0 and 2 on a chain.
+    /// assert_eq!(map.neighbors(1), vec![0, 2]);
+    /// // Endpoints of the chain have a single neighbor.
+    /// assert_eq!(map.neighbors(0), vec![1]);
+    /// ```
     pub fn neighbors(&self, q: usize) -> Vec<usize> {
         let mut out = Vec::new();
         for &(a, b) in &self.edges {
@@ -324,6 +391,20 @@ impl CouplingMap {
     /// happens for [`CouplingMap::linear`], but a routing pass built on
     /// top of a future non-linear map should still handle it rather
     /// than panic on a caller's behalf).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// let map = CouplingMap::linear(5);
+    /// assert_eq!(map.shortest_path(0, 3), Some(vec![0, 1, 2, 3]));
+    /// assert_eq!(map.shortest_path(2, 2), Some(vec![2]));
+    ///
+    /// // Disconnected maps return None between separate components.
+    /// let disconnected = CouplingMap::from_edges(4, [(0, 1), (2, 3)]).unwrap();
+    /// assert_eq!(disconnected.shortest_path(0, 3), None);
+    /// ```
     pub fn shortest_path(&self, start: usize, goal: usize) -> Option<Vec<usize>> {
         if start == goal {
             return Some(vec![start]);

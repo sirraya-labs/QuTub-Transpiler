@@ -1,0 +1,65 @@
+name: Guardrails / Equivalence (required)
+
+# Phase 1 of the QuTub guardrails rollout.
+# This job is intentionally cheap and BLOCKING: it only runs work that
+# already exists in the repo (examples/verify_equivalence.rs,
+# tests/decompositions.rs, tests/measurement.rs) and simply makes it a
+# required check. There is no new risk surface here — if this job is red,
+# `cargo run --example verify_equivalence` was already failing locally.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: equivalence-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Unit + decomposition + measurement tests
+        run: cargo test --verbose
+
+      # This is the actual correctness guardrail: every optimize_ir /
+      # native decomposition / per-backend lower() rewrite is checked
+      # against a real QuantumRegister simulation. It already
+      # `std::process::exit(1)`s on any fidelity < 1e-9, so wiring it in
+      # is a one-line addition, not new engineering.
+      - name: Randomized equivalence oracle (source -> IR -> native -> backend)
+        run: cargo run --release --example verify_equivalence
+
+      - name: Upload equivalence report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: equivalence-report-${{ github.sha }}
+          path: |
+            *.log
+          if-no-files-found: ignore

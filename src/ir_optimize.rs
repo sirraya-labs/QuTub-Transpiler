@@ -52,13 +52,64 @@
 //! silently produces a wrong circuit rather than a missed optimization.
 //! Disjoint-support commutativity needs no such proof.
 //!
+//! [`gate_count_diff`] is an additive inspection helper for this stage:
+//! it compares source-level gate counts before and after a pass without
+//! changing either circuit or participating in optimization itself.
+//!
 //! The `tests` submodule below checks every pass end to end against the
 //! real simulator (same methodology as `tests/decompositions.rs`): run
 //! the original circuit and the optimized one from the same random
 //! state, compare via `QuantumRegister::fidelity`.
 
 use crate::ir::{Circuit, Gate};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+
+/// Formats the changed source-level gate counts between two circuits.
+///
+/// Gate kinds are sorted by mnemonic for deterministic output. Unchanged
+/// kinds are omitted; if every count is unchanged, this returns an empty
+/// string. A gate kind present on only one side is shown with a zero count on
+/// the other side.
+///
+/// ```
+/// use sirraya_qutub_transpiler::ir::{Circuit, Gate};
+/// use sirraya_qutub_transpiler::ir_optimize::gate_count_diff;
+///
+/// let mut before = Circuit::new(2);
+/// before.push(Gate::Cx(0, 1)).push(Gate::Cx(0, 1));
+/// let mut after = Circuit::new(2);
+/// after.push(Gate::Cx(0, 1));
+///
+/// assert_eq!(gate_count_diff(&before, &after), "cx: 2 -> 1   (-1)");
+/// ```
+pub fn gate_count_diff(before: &Circuit, after: &Circuit) -> String {
+    let before_counts = before.gate_counts();
+    let after_counts = after.gate_counts();
+    let kinds: BTreeSet<_> = before_counts
+        .keys()
+        .chain(after_counts.keys())
+        .copied()
+        .collect();
+
+    kinds
+        .into_iter()
+        .filter_map(|kind| {
+            let before = before_counts.get(kind).copied().unwrap_or(0);
+            let after = after_counts.get(kind).copied().unwrap_or(0);
+            if before == after {
+                return None;
+            }
+
+            let delta = if after > before {
+                format!("(+{})", after - before)
+            } else {
+                format!("(-{})", before - after)
+            };
+            Some(format!("{kind}: {before} -> {after}   {delta}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Runs the cancel/reorder passes to a fixed point.
 pub fn optimize(circuit: &Circuit) -> Circuit {
@@ -350,12 +401,46 @@ mod tests {
     // `sirraya_qutub::core::QuantumRegister`, same methodology as
     // `tests/decompositions.rs`.
 
+    use crate::ir::{Circuit, Gate};
+    use crate::ir_optimize::{gate_count_diff, optimize as optimize_ir};
     use rand::Rng;
     use sirraya_qutub::core::QuantumRegister;
-    use crate::ir::{Circuit, Gate};
-    use crate::ir_optimize::optimize as optimize_ir;
 
     const TOL: f64 = 1e-9;
+
+    #[test]
+    fn gate_count_diff_reports_changed_added_and_removed_kinds_in_order() {
+        let mut before = Circuit::new(3);
+        before
+            .push(Gate::H(0))
+            .push(Gate::H(1))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Cx(1, 2))
+            .push(Gate::Z(2));
+
+        let mut after = Circuit::new(3);
+        after
+            .push(Gate::H(0))
+            .push(Gate::H(1))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rz(2, 0.5));
+
+        assert_eq!(
+            gate_count_diff(&before, &after),
+            "cx: 2 -> 1   (-1)\nrz: 0 -> 1   (+1)\nz: 1 -> 0   (-1)"
+        );
+    }
+
+    #[test]
+    fn gate_count_diff_is_empty_when_counts_are_unchanged() {
+        let mut before = Circuit::new(2);
+        before.push(Gate::H(0)).push(Gate::Cx(0, 1));
+
+        let mut reordered = Circuit::new(2);
+        reordered.push(Gate::Cx(0, 1)).push(Gate::H(0));
+
+        assert_eq!(gate_count_diff(&before, &reordered), "");
+    }
 
     fn randomized_register(num_qubits: usize) -> QuantumRegister {
         let mut reg = QuantumRegister::new(num_qubits).unwrap();

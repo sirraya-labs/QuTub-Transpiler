@@ -1,0 +1,43 @@
+name: Guardrails / Provenance (advisory)
+
+# Phase 3. Runs the provenance manifest generator against every merge to
+# main, uploads the manifests as a build artifact (auditable evidence:
+# commit -> input circuit -> passes -> output circuit -> metrics, per
+# Roadmap.txt's own schema), and diffs metrics against a committed
+# baseline. Advisory only — a >10% gate-count/depth swing is surfaced as
+# a job-summary note, not a failure, until the threshold has been tuned
+# against real history (see GUARDRAILS.md).
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate manifests + compare to baseline
+        run: |
+          cargo run --release --example provenance_manifest -- --compare benchmarks/baseline/ \
+            | tee provenance-summary.txt
+
+      - name: Post drift summary
+        if: always()
+        run: cat provenance-summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: provenance-manifests-${{ github.sha }}
+          path: provenance/*.json
+
+      # Once metric-drift thresholds are trusted (see GUARDRAILS.md
+      # promotion policy), replace the two steps above with a version of
+      # provenance_manifest.rs that exits non-zero on drift, and this
+      # job becomes a required check the same way guardrails-equivalence
+      # already is. Also: on that day, `benchmarks/baseline/` should be
+      # refreshed from this job's own output in the same PR that raises
+      # the threshold, not silently — a stale baseline makes every
+      # future PR's diff meaningless.

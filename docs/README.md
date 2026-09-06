@@ -101,8 +101,13 @@ This is an actively developed research and engineering project, not a finished p
 ## Community
 
 * Open a GitHub Issue for bugs or feature requests
+
 * Start a GitHub Discussion for questions or design conversations
+
 * See [Contributing](contributing.md) for the development workflow and good first areas to work on
+
+* See the [Contributors Hall of Fame](CONTRIBUTORS_HALL_OF_FAME.md) to recognize the people who have made meaningful contributions to QuTub Transpiler.
+
 
 ## License
 

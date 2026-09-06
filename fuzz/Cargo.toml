@@ -1,0 +1,39 @@
+[package]
+name = "qutub-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.sirraya-qutub-transpiler]
+path = ".."
+
+[dependencies.sirraya-qutub]
+version = "0.1.13"
+
+# Fuzz targets are debug-assertions-on, opt-level tuned for throughput,
+# per cargo-fuzz convention — do not hand-edit unless you know why.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "qasm_parse"
+path = "fuzz_targets/qasm_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ir_pipeline_no_panic"
+path = "fuzz_targets/ir_pipeline_no_panic.rs"
+test = false
+doc = false
+bench = false

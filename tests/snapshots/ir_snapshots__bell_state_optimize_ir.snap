@@ -1,0 +1,25 @@
+---
+source: tests/ir_snapshots.rs
+expression: ir_opt
+---
+Circuit {
+    num_qubits: 2,
+    num_clbits: 2,
+    gates: [
+        H(
+            0,
+        ),
+        Cx(
+            0,
+            1,
+        ),
+        Measure(
+            0,
+            0,
+        ),
+        Measure(
+            1,
+            1,
+        ),
+    ],
+}
