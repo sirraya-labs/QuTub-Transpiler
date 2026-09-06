@@ -365,6 +365,13 @@ fn parse_register_size(rest: &str, lineno: usize) -> Result<usize, String> {
             lineno, rest
         )
     })?;
+    // Validate that '[' comes before ']'
+    if open >= close {
+        return Err(format!(
+            "line {}: malformed register declaration, closing bracket before opening in `{}`",
+            lineno, rest
+        ));
+    }
     // Ensure the size is a valid number
     let size_str = rest[open + 1..close].trim();
     if size_str.is_empty() {
@@ -561,8 +568,32 @@ fn parse_index_ref(tok: &str, lineno: usize) -> Result<usize, String> {
     let close = tok
         .find(']')
         .ok_or_else(|| format!("line {}: expected `name[N]`, got `{}`", lineno, tok))?;
-    tok[open + 1..close]
-        .trim()
+
+    // Validate that '[' comes before ']'
+    if open >= close {
+        return Err(format!(
+            "line {}: malformed index reference `{}` (closing bracket before opening)",
+            lineno, tok
+        ));
+    }
+
+    // Ensure there's at least one character between brackets
+    if open + 1 == close {
+        return Err(format!(
+            "line {}: empty index in reference `{}`",
+            lineno, tok
+        ));
+    }
+
+    let idx_str = tok[open + 1..close].trim();
+    if idx_str.is_empty() {
+        return Err(format!(
+            "line {}: empty index in reference `{}`",
+            lineno, tok
+        ));
+    }
+
+    idx_str
         .parse::<usize>()
         .map_err(|_| format!("line {}: bad index in `{}`", lineno, tok))
 }
