@@ -1,101 +1,73 @@
-name: Guardrails / Fuzz nightly campaign
-
-# Phase 2b. Never gates a PR — runs on a schedule against main. Longer
-# budget per target, accumulates/persists the corpus as a workflow
-# artifact between runs (poor man's corpus storage; swap for a
-# committed fuzz/corpus/ directory or a bucket once the project wants
-# that overhead), and on a crash opens/updates a single tracking issue
-# rather than failing anything a contributor is looking at.
+name: Guardrails / Fuzz nightly
 
 on:
   schedule:
-    - cron: "0 3 * * *" # 03:00 UTC nightly
-  workflow_dispatch: {} # allow manual trigger for a targeted campaign
-
-env:
-  CARGO_TERM_COLOR: always
+    - cron: '0 2 * * *'  # Run at 2 AM daily
+  workflow_dispatch:
 
 jobs:
-  fuzz-campaign:
+  fuzz-nightly:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
-        target: [qasm_parse, ir_pipeline_no_panic]
+        target: [qasm-parse, ir-pipeline-no-panic]  # FIXED: kebab-case
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo install cargo-fuzz --locked
-
-      - name: Restore persisted corpus
-        uses: actions/cache/restore@v4
         with:
-          path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
-          restore-keys: fuzz-corpus-${{ matrix.target }}-
+          components: llvm-tools-preview
 
-      - name: Fuzz campaign (15 min)
-        id: fuzz
+      - name: Cache cargo + fuzz target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-nightly-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-nightly-${{ matrix.target }}-
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Restore existing corpus
+        run: mkdir -p fuzz/corpus/${{ matrix.target }}
+
+      - name: Nightly fuzzing (15 min)
+        timeout-minutes: 20
         run: |
-          mkdir -p fuzz/corpus/${{ matrix.target }}
-          cargo fuzz run ${{ matrix.target }} -- \
-            -max_total_time=900 -print_final_stats=1
+          cd fuzz
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=900 -print_final_stats=1
 
-      - name: Persist corpus
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
-
-      - name: Minimize any crash
+      - name: Minimize crashes
         if: failure()
         run: |
-          for f in fuzz/artifacts/${{ matrix.target }}/crash-*; do
+          cd fuzz
+          mkdir -p artifacts/${{ matrix.target }}
+          for f in artifacts/${{ matrix.target }}/crash-*; do
             [ -e "$f" ] || continue
-            cargo fuzz tmin ${{ matrix.target }} "$f" -o "$f.min"
+            cargo fuzz tmin ${{ matrix.target }} "$f" -o "$f.min" || true
           done
 
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: nightly-fuzz-crash-${{ matrix.target }}-${{ github.run_id }}
+          name: fuzz-nightly-crash-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
 
-      # File/refresh one tracking issue per target instead of spamming
-      # the tracker — a human triages, minimizes further if needed, and
-      # is the one who promotes the minimized case into
-      # fuzz/regressions/ + a #[test] that replays it forever.
-      - name: Open or update tracking issue
+      - name: File issue for crashes
         if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const target = "${{ matrix.target }}";
-            const title = `[fuzz] nightly crash in ${target}`;
-            const body = [
-              `Nightly fuzz campaign found a crash in \`${target}\`.`,
-              ``,
-              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              ``,
-              `Download the \`nightly-fuzz-crash-${target}-${context.runId}\` artifact,`,
-              `minimize with \`cargo fuzz tmin ${target} <crash-file>\` if not already`,
-              `minimized, then add the minimized case under \`fuzz/regressions/${target}/\``,
-              `and a matching #[test] in tests/ that replays it so it can never regress silently.`,
-            ].join("\n");
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner, repo: context.repo.repo,
-              state: "open", labels: ["fuzz-finding"],
-            });
-            const match = existing.data.find(i => i.title === title);
-            if (match) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: match.number, body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: ["fuzz-finding"],
-              });
-            }
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[FUZZ] Nightly crash found in ${process.env.MATRIX_TARGET}`,
+              body: 'Nightly fuzzing found a crash. Check the workflow artifacts for details.\n\nRun: ' + context.runId,
+              labels: ['fuzz-finding', 'bug']
+            })

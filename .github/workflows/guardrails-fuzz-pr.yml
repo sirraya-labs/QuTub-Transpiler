@@ -35,11 +35,13 @@ jobs:
     continue-on-error: true # advisory: never blocks merge
     strategy:
       matrix:
-        target: [qasm_parse, ir_pipeline_no_panic]
+        target: [qasm-parse, ir-pipeline-no-panic]  # FIXED: kebab-case
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
 
       - name: Cache cargo + fuzz target
         uses: actions/cache@v4
@@ -49,6 +51,9 @@ jobs:
             ~/.cargo/git
             fuzz/target
           key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-${{ matrix.target }}-
+            ${{ runner.os }}-fuzz-
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -60,14 +65,17 @@ jobs:
       # test to catch obviously-broken changes fast, not a real campaign.
       # The real campaign is the nightly job.
       - name: Fuzz (90s)
+        timeout-minutes: 5  # FIXED: added timeout to prevent hanging
         run: |
+          cd fuzz
           cargo fuzz run ${{ matrix.target }} -- -max_total_time=90 -print_final_stats=1
 
       - name: Minimize + upload any crash found
         if: failure()
         run: |
-          mkdir -p fuzz/artifacts/${{ matrix.target }}
-          for f in fuzz/artifacts/${{ matrix.target }}/crash-*; do
+          cd fuzz
+          mkdir -p artifacts/${{ matrix.target }}
+          for f in artifacts/${{ matrix.target }}/crash-*; do
             [ -e "$f" ] || continue
             cargo fuzz tmin ${{ matrix.target }} "$f" -o "$f.min" || true
           done
