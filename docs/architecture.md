@@ -131,7 +131,7 @@ flowchart TD
 | ---------------- | ------------------------------------------ |
 | `ir.rs`          | Source-level circuit representation        |
 | `qasm.rs`        | OPENQASM 2.0 and 3.0 importer               |
-| `ir_optimize.rs` | Source-level optimization                  |
+| `ir_optimize.rs` | Source-level optimization and deterministic before/after gate-count diffs |
 | `native.rs`      | Trapped-ion-style native decomposition     |
 | `backend.rs`     | Backend-specific lowering and optimization (shared engine; see `backend/` below for the per-backend plugins) |
 | `coupling.rs`    | Physical connectivity models               |
