@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! Trotterized time evolution of an N-qubit transverse-field Ising
 //! chain, run through this crate's real compiler pipeline -- same
 //! shape as `vqe_h2_ground_state.rs`, same [`CircuitExecutor`] /

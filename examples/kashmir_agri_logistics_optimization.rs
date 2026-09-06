@@ -1,3 +1,10 @@
+#![allow(
+    dead_code,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::format_in_format_args
+)]
+
 //! Quantum agricultural-logistics assignment via QAOA, run end-to-end
 //! through this crate's real compiler pipeline -- structurally the
 //! *same* pipeline as `qaoa_portfolio_optimization.rs`: problem ->
