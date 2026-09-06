@@ -308,13 +308,17 @@ mod tests {
                 let ours = PublishedCalibration::fidelity_to_depolarizing_probability(
                     fidelity, num_qubits,
                 );
-                let theirs = sirraya_qutub::xeb::HardwareCalibration::fidelity_to_depolarizing_probability(
-                    fidelity, num_qubits,
-                );
+                let theirs =
+                    sirraya_qutub::xeb::HardwareCalibration::fidelity_to_depolarizing_probability(
+                        fidelity, num_qubits,
+                    );
                 assert!(
                     (ours - theirs).abs() < 1e-15,
                     "fidelity {} num_qubits {}: ours {} vs theirs {}",
-                    fidelity, num_qubits, ours, theirs
+                    fidelity,
+                    num_qubits,
+                    ours,
+                    theirs
                 );
             }
         }

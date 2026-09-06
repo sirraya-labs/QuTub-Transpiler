@@ -78,7 +78,10 @@ fn main() -> Result<(), String> {
         cal.name, fidelity_estimate
     );
 
-    println!("\nNative QASM:\n{}", emit::to_qasm(&native, "full_pipeline_demo"));
+    println!(
+        "\nNative QASM:\n{}",
+        emit::to_qasm(&native, "full_pipeline_demo")
+    );
 
     let reg = emit::run(&native)?;
     println!("Final state probability distribution (TrappedIon native path):");

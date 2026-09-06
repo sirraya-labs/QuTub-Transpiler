@@ -283,28 +283,44 @@ fn rotation_t_cost(theta: f64, epsilon: f64) -> RotationCost {
     let wrapped = theta.rem_euclid(TAU);
     let near_zero = wrapped < EPS_ANGLE || (TAU - wrapped) < EPS_ANGLE;
     if near_zero {
-        return RotationCost { synthesis: RotationSynthesis::Identity, t_count: 0 };
+        return RotationCost {
+            synthesis: RotationSynthesis::Identity,
+            t_count: 0,
+        };
     }
 
     let quarter_turns = wrapped / (PI / 2.0);
     if (quarter_turns - quarter_turns.round()).abs() < EPS_ANGLE {
-        return RotationCost { synthesis: RotationSynthesis::Clifford, t_count: 0 };
+        return RotationCost {
+            synthesis: RotationSynthesis::Clifford,
+            t_count: 0,
+        };
     }
 
     let eighth_turns = wrapped / (PI / 4.0);
     if (eighth_turns - eighth_turns.round()).abs() < EPS_ANGLE {
         // Already excluded exact pi/2 multiples above, so surviving
         // here means this is specifically an *odd* multiple of pi/4.
-        return RotationCost { synthesis: RotationSynthesis::ExactT, t_count: 1 };
+        return RotationCost {
+            synthesis: RotationSynthesis::ExactT,
+            t_count: 1,
+        };
     }
 
     // Ross-Selinger asymptotic optimal count: ~3*log2(1/epsilon).
     // `epsilon` must be in (0, 1) for this to mean anything as a
     // precision target; callers passing an invalid epsilon get a
     // saturating fallback rather than a NaN/negative T-count.
-    let safe_epsilon = if epsilon > 0.0 && epsilon < 1.0 { epsilon } else { DEFAULT_ROTATION_EPSILON };
+    let safe_epsilon = if epsilon > 0.0 && epsilon < 1.0 {
+        epsilon
+    } else {
+        DEFAULT_ROTATION_EPSILON
+    };
     let t_count = (3.0 * (1.0 / safe_epsilon).log2()).ceil().max(1.0) as usize;
-    RotationCost { synthesis: RotationSynthesis::Approximate, t_count }
+    RotationCost {
+        synthesis: RotationSynthesis::Approximate,
+        t_count,
+    }
 }
 
 #[cfg(test)]
@@ -443,7 +459,10 @@ mod tests {
         // from -- see the note below -- so this test has to actually
         // prevent that fusion to test what it means to test).
         let mut sequential = Circuit::new(2);
-        sequential.push(Gate::T(0)).push(Gate::X(1)).push(Gate::T(0));
+        sequential
+            .push(Gate::T(0))
+            .push(Gate::X(1))
+            .push(Gate::T(0));
         let seq_budget = estimate_circuit_resources(&sequential);
         assert_eq!(seq_budget.t_count, 2);
         assert_eq!(seq_budget.t_depth, 2);
@@ -470,7 +489,10 @@ mod tests {
         let mut c = Circuit::new(1);
         c.push(Gate::T(0)).push(Gate::T(0));
         let budget = estimate_circuit_resources(&c);
-        assert_eq!(budget.t_count, 0, "adjacent T.T should fuse to S (Clifford) before costing");
+        assert_eq!(
+            budget.t_count, 0,
+            "adjacent T.T should fuse to S (Clifford) before costing"
+        );
     }
 
     #[test]

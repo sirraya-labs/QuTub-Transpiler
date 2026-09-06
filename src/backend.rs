@@ -231,7 +231,11 @@ pub(crate) const EPS: f64 = 1e-9;
 /// performance -- and every SWAP saved is 3 fewer native two-qubit
 /// gates once lowered below (Rzz/Cx/Cz).
 pub fn lower(circuit: &Circuit, backend: Backend) -> BackendCircuit {
-    lower_with_coupling(circuit, backend, backend.coupling_map(circuit.num_qubits).as_ref())
+    lower_with_coupling(
+        circuit,
+        backend,
+        backend.coupling_map(circuit.num_qubits).as_ref(),
+    )
 }
 
 /// As [`lower`], but routes against `coupling` (if given) instead of
@@ -291,7 +295,11 @@ pub fn lower_with_coupling(
 /// restored-identity guarantee and would silently get a wrong result
 /// if that guarantee were dropped out from under it.
 pub fn lower_no_restore(circuit: &Circuit, backend: Backend) -> BackendCircuit {
-    lower_with_coupling_no_restore(circuit, backend, backend.coupling_map(circuit.num_qubits).as_ref())
+    lower_with_coupling_no_restore(
+        circuit,
+        backend,
+        backend.coupling_map(circuit.num_qubits).as_ref(),
+    )
 }
 
 /// [`lower_with_coupling`], but routes via
@@ -303,7 +311,12 @@ pub fn lower_with_coupling_no_restore(
     backend: Backend,
     coupling: Option<&crate::coupling::CouplingMap>,
 ) -> BackendCircuit {
-    lower_with_coupling_impl(circuit, backend, coupling, crate::route::route_best_no_restore)
+    lower_with_coupling_impl(
+        circuit,
+        backend,
+        coupling,
+        crate::route::route_best_no_restore,
+    )
 }
 
 /// Relabels one already-native (`{Rz, Ry, Rzz, Measure}`) gate straight
@@ -321,9 +334,10 @@ fn relabel_native_to_trapped_ion(g: &crate::native::NativeGate) -> BackendGate {
         NativeGate::Ry(q, a) => BackendGate::Rot(q, a),
         NativeGate::Rzz(a, b, t) => BackendGate::Rzz(a, b, t),
         NativeGate::Measure(q, c) => BackendGate::Measure(q, c),
-        NativeGate::If(ref conditions, ref inner) => {
-            BackendGate::If(conditions.clone(), Box::new(relabel_native_to_trapped_ion(inner)))
-        }
+        NativeGate::If(ref conditions, ref inner) => BackendGate::If(
+            conditions.clone(),
+            Box::new(relabel_native_to_trapped_ion(inner)),
+        ),
     }
 }
 
@@ -714,7 +728,11 @@ pub fn optimize(bc: &mut BackendCircuit) {
     let mut out: Vec<Option<BackendGate>> = Vec::with_capacity(bc.gates.len());
 
     fn pair_key(a: usize, b: usize) -> (usize, usize) {
-        if a < b { (a, b) } else { (b, a) }
+        if a < b {
+            (a, b)
+        } else {
+            (b, a)
+        }
     }
 
     // A gate that isn't itself part of a same-pair two-qubit
@@ -943,9 +961,12 @@ mod tests {
         let mut reg = QuantumRegister::new(num_qubits).unwrap();
         let mut rng = rand::thread_rng();
         for q in 0..num_qubits {
-            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
-            reg.apply_ry(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
-            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
+            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
+            reg.apply_ry(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
+            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
         }
         reg
     }
@@ -1095,11 +1116,8 @@ mod tests {
         // dropped from the middle -- nothing like heavy_hex_for(5) or
         // square_grid_for(5) -- exactly the kind of real-device-style
         // topology `from_edges` exists for.
-        let coupling = crate::coupling::CouplingMap::from_edges(
-            5,
-            [(0, 1), (1, 2), (2, 4)],
-        )
-        .unwrap();
+        let coupling =
+            crate::coupling::CouplingMap::from_edges(5, [(0, 1), (1, 2), (2, 4)]).unwrap();
 
         let mut c = Circuit::new(5);
         c.push(Gate::H(0)).push(Gate::Cx(0, 4));
@@ -1174,7 +1192,11 @@ mod tests {
             c.num_clbits = 1;
             c.push(Gate::H(0)).push(Gate::Measure(0, 0));
             let bc = lower(&c, backend);
-            assert_eq!(bc.num_clbits, 1, "backend {:?}: num_clbits must survive lowering", backend);
+            assert_eq!(
+                bc.num_clbits, 1,
+                "backend {:?}: num_clbits must survive lowering",
+                backend
+            );
             assert!(
                 matches!(bc.gates.last(), Some(BackendGate::Measure(0, 0))),
                 "backend {:?}: Measure must survive lowering as the last gate, got {:?}",
@@ -1190,7 +1212,11 @@ mod tests {
         c.num_clbits = 1;
         c.push(Gate::Measure(0, 0));
         let bc = lower(&c, Backend::IbmQ);
-        assert_eq!(bc.gate_counts(), (0, 0), "Measure must not be priced as a unitary gate");
+        assert_eq!(
+            bc.gate_counts(),
+            (0, 0),
+            "Measure must not be priced as a unitary gate"
+        );
     }
 
     #[test]
@@ -1240,7 +1266,11 @@ mod tests {
         let mut c = Circuit::new(2);
         c.push(Gate::Rzz(0, 1, 0.5));
         let bc = lower(&c, Backend::IbmQ);
-        let cx_count = bc.gates.iter().filter(|g| matches!(g, BackendGate::Cx(..))).count();
+        let cx_count = bc
+            .gates
+            .iter()
+            .filter(|g| matches!(g, BackendGate::Cx(..)))
+            .count();
         assert_eq!(cx_count, 2, "Rzz should lower to exactly 2 Cx on IbmQ");
     }
 
@@ -1322,11 +1352,16 @@ mod tests {
         let mut c = Circuit::new(2);
         c.push(Gate::Rzz(0, 1, 0.5));
         let rigetti_single = lower(&c, Backend::Rigetti).gate_counts().0;
-        let one_h_cost = lower(&{
-            let mut hc = Circuit::new(1);
-            hc.push(Gate::H(0));
-            hc
-        }, Backend::Rigetti).gate_counts().0;
+        let one_h_cost = lower(
+            &{
+                let mut hc = Circuit::new(1);
+                hc.push(Gate::H(0));
+                hc
+            },
+            Backend::Rigetti,
+        )
+        .gate_counts()
+        .0;
 
         // Exactly 2 H's-worth of single-qubit overhead, plus the 1
         // Rot(theta) in the middle -- not 4 H's-worth.
@@ -1589,7 +1624,11 @@ mod tests {
         bc.push(BackendGate::Cz(0, 1));
         bc.push(BackendGate::Cz(0, 1));
         optimize(&mut bc);
-        assert!(bc.gates.is_empty(), "Cz(0,1).Cz(0,1) == I, got {:?}", bc.gates);
+        assert!(
+            bc.gates.is_empty(),
+            "Cz(0,1).Cz(0,1) == I, got {:?}",
+            bc.gates
+        );
     }
 
     #[test]

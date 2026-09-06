@@ -151,9 +151,24 @@ impl Gate {
     pub fn qubits(&self) -> Vec<usize> {
         use Gate::*;
         match *self {
-            H(q) | X(q) | Y(q) | Z(q) | S(q) | Sdg(q) | T(q) | Tdg(q) | Rx(q, _) | Ry(q, _)
-            | Rz(q, _) | Measure(q, _) => vec![q],
-            Cx(a, b) | Cz(a, b) | Swap(a, b) | Rxx(a, b, _) | Ryy(a, b, _) | Rzz(a, b, _)
+            H(q)
+            | X(q)
+            | Y(q)
+            | Z(q)
+            | S(q)
+            | Sdg(q)
+            | T(q)
+            | Tdg(q)
+            | Rx(q, _)
+            | Ry(q, _)
+            | Rz(q, _)
+            | Measure(q, _) => vec![q],
+            Cx(a, b)
+            | Cz(a, b)
+            | Swap(a, b)
+            | Rxx(a, b, _)
+            | Ryy(a, b, _)
+            | Rzz(a, b, _)
             | Cp(a, b, _) => vec![a, b],
             If(_, ref inner) => inner.qubits(),
         }
@@ -373,7 +388,10 @@ mod tests {
     fn well_formed_circuit_is_valid() {
         let mut c = Circuit::new(2);
         c.num_clbits = 2;
-        c.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Measure(0, 0)).push(Gate::Measure(1, 1));
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Measure(0, 0))
+            .push(Gate::Measure(1, 1));
         assert!(c.validate().is_ok());
     }
 
@@ -408,7 +426,10 @@ mod tests {
         // true for the default-zero case.
         let mut c = Circuit::new(1);
         c.push(Gate::Measure(0, 0));
-        assert!(c.validate().is_err(), "num_clbits is still 0, clbit 0 is out of range");
+        assert!(
+            c.validate().is_err(),
+            "num_clbits is still 0, clbit 0 is out of range"
+        );
     }
 
     #[test]
@@ -458,7 +479,11 @@ mod tests {
         let mut c = Circuit::new(2);
         c.push(Gate::H(0)).push(Gate::H(1)).push(Gate::Cx(0, 12));
         let err = c.validate().unwrap_err();
-        assert!(err.contains("gate 2"), "error should name the offending gate's index: {}", err);
+        assert!(
+            err.contains("gate 2"),
+            "error should name the offending gate's index: {}",
+            err
+        );
     }
 
     #[test]
@@ -474,7 +499,10 @@ mod tests {
     #[test]
     fn if_qubits_delegates_to_inner() {
         // A single-qubit inner...
-        assert_eq!(Gate::If(vec![(0, true)], Box::new(Gate::X(2))).qubits(), vec![2]);
+        assert_eq!(
+            Gate::If(vec![(0, true)], Box::new(Gate::X(2))).qubits(),
+            vec![2]
+        );
         // ...and a two-qubit inner, unchanged from what `route.rs`/
         // `ir_optimize.rs` need to place/reorder it correctly with no
         // `Gate::If`-specific case of their own (see `qubits`'s doc
@@ -495,7 +523,8 @@ mod tests {
     fn accepts_well_formed_if() {
         let mut c = Circuit::new(2);
         c.num_clbits = 1;
-        c.push(Gate::Measure(0, 0)).push(Gate::If(vec![(0, true)], Box::new(Gate::X(1))));
+        c.push(Gate::Measure(0, 0))
+            .push(Gate::If(vec![(0, true)], Box::new(Gate::X(1))));
         assert!(c.validate().is_ok());
     }
 

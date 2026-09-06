@@ -67,15 +67,27 @@ fn main() {
     for n in [2usize, 8, 32] {
         let budget = estimate_circuit_resources(&ghz_circuit(n));
         print_budget(&format!("ghz_{n}"), &budget);
-        assert_eq!(budget.t_count, 0, "a pure-Clifford GHZ circuit must cost 0 T gates");
+        assert_eq!(
+            budget.t_count, 0,
+            "a pure-Clifford GHZ circuit must cost 0 T gates"
+        );
     }
 
     println!("\n=== One rotation at a time, showing each synthesis case ===\n");
     let cases: [(&str, f64); 5] = [
         ("Rz(0)              -- Identity", 0.0),
-        ("Rz(pi/2)           -- Clifford (S)", std::f64::consts::FRAC_PI_2),
-        ("Rz(pi/4)           -- ExactT (T)", std::f64::consts::FRAC_PI_4),
-        ("Rz(3*pi/4)         -- ExactT (Tdg up to Clifford)", 3.0 * std::f64::consts::FRAC_PI_4),
+        (
+            "Rz(pi/2)           -- Clifford (S)",
+            std::f64::consts::FRAC_PI_2,
+        ),
+        (
+            "Rz(pi/4)           -- ExactT (T)",
+            std::f64::consts::FRAC_PI_4,
+        ),
+        (
+            "Rz(3*pi/4)         -- ExactT (Tdg up to Clifford)",
+            3.0 * std::f64::consts::FRAC_PI_4,
+        ),
         ("Rz(0.37)           -- Approximate (generic angle)", 0.37),
     ];
     for (label, angle) in cases {

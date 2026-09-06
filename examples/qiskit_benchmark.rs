@@ -7,7 +7,9 @@
 
 use sirraya_qutub_transpiler::coupling::CouplingMap;
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
-use sirraya_qutub_transpiler::{fidelity, optimize_ir, qasm, lower, Backend, BackendCircuit, BackendGate};
+use sirraya_qutub_transpiler::{
+    fidelity, lower, optimize_ir, qasm, Backend, BackendCircuit, BackendGate,
+};
 use std::fs;
 
 fn ghz(num_qubits: usize) -> Circuit {
@@ -315,7 +317,10 @@ fn long_range_random(num_qubits: usize, num_gates: usize) -> Circuit {
         }
         c.push(Gate::Cx(a, b));
         if i % 3 == 0 {
-            c.push(Gate::Rz((next_u64() as usize) % num_qubits, 0.4 + (i as f64) * 0.017));
+            c.push(Gate::Rz(
+                (next_u64() as usize) % num_qubits,
+                0.4 + (i as f64) * 0.017,
+            ));
         }
     }
     c
@@ -342,8 +347,12 @@ fn circuit_to_portable_qasm(c: &Circuit, name: &str) -> String {
             Gate::Cx(a, b) => out.push_str(&format!("cx q[{}], q[{}];\n", a, b)),
             Gate::Cz(a, b) => out.push_str(&format!("cz q[{}], q[{}];\n", a, b)),
             Gate::Swap(a, b) => out.push_str(&format!("swap q[{}], q[{}];\n", a, b)),
-            Gate::Rzz(a, b, theta) => out.push_str(&format!("rzz({}) q[{}], q[{}];\n", theta, a, b)),
-            Gate::Cp(a, b, lambda) => out.push_str(&format!("cp({}) q[{}], q[{}];\n", lambda, a, b)),
+            Gate::Rzz(a, b, theta) => {
+                out.push_str(&format!("rzz({}) q[{}], q[{}];\n", theta, a, b))
+            }
+            Gate::Cp(a, b, lambda) => {
+                out.push_str(&format!("cp({}) q[{}], q[{}];\n", lambda, a, b))
+            }
             Gate::Measure(q, cbit) => out.push_str(&format!("measure q[{}] -> c[{}];\n", q, cbit)),
             other => panic!("Unsupported gate: {:?}", other),
         }
@@ -397,14 +406,26 @@ fn main() {
         ("ghz_16", ghz(16)),
         ("ansatz_6q_3layer", hardware_efficient_ansatz(6, 3)),
         ("layered_random_8q_4round", layered_random(8, 4)),
-        ("bernstein_vazirani_10", bernstein_vazirani(11, 0b1011010110)),
-        ("qaoa_maxcut_8q_p2", qaoa_maxcut(8, &random_regular_like_graph(8, 12), 2)),
-        ("qaoa_maxcut_12q_p3", qaoa_maxcut(12, &random_regular_like_graph(12, 18), 3)),
+        (
+            "bernstein_vazirani_10",
+            bernstein_vazirani(11, 0b1011010110),
+        ),
+        (
+            "qaoa_maxcut_8q_p2",
+            qaoa_maxcut(8, &random_regular_like_graph(8, 12), 2),
+        ),
+        (
+            "qaoa_maxcut_12q_p3",
+            qaoa_maxcut(12, &random_regular_like_graph(12, 18), 3),
+        ),
         ("trotter_ising_10q_6step", trotterized_ising_chain(10, 6)),
         ("trotter_ising_16q_10step", trotterized_ising_chain(16, 10)),
         ("qpe_6counting", quantum_phase_estimation(6, 5)),
         ("qpe_10counting", quantum_phase_estimation(10, 41)),
-        ("dynamic_midcircuit_measure_10q", ghz_with_midcircuit_measurement(10)),
+        (
+            "dynamic_midcircuit_measure_10q",
+            ghz_with_midcircuit_measurement(10),
+        ),
         ("qft_10", qft(10)),
         ("qft_16", qft(16)),
         ("long_range_random_20q_60gate", long_range_random(20, 60)),
@@ -413,8 +434,10 @@ fn main() {
     fs::create_dir_all("qiskit_benchmark_qasm").expect("failed to create output dir");
 
     println!("\n=== SIRRAYA ROUTING RESULTS (WITH QFT OPTIMIZER) ===");
-    println!("{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>9}  {:>9}",
-        "benchmark", "src gates", "depth (IBM)", "1q (IBM)", "2q (IBM)", "fidelity", "swaps");
+    println!(
+        "{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>9}  {:>9}",
+        "benchmark", "src gates", "depth (IBM)", "1q (IBM)", "2q (IBM)", "fidelity", "swaps"
+    );
     let mut total_routing_swaps = 0usize;
     let mut total_restoration_swaps = 0usize;
     let mut total_no_restore_swaps = 0usize;
@@ -440,25 +463,32 @@ fn main() {
         let path = format!("qiskit_benchmark_qasm/{}.qasm", name);
         fs::write(&path, &qasm_text).expect("failed to write QASM");
         let reparsed = qasm::parse(&qasm_text).expect("QASM must round-trip");
-        assert_eq!(reparsed.gates.len(), circuit.gates.len(), "round-trip lost or gained gates");
+        assert_eq!(
+            reparsed.gates.len(),
+            circuit.gates.len(),
+            "round-trip lost or gained gates"
+        );
 
         // Use route_best for optimized routing
         let coupling = CouplingMap::heavy_hex_for(circuit.num_qubits);
         let routed = sirraya_qutub_transpiler::route::route_best(circuit, &coupling);
-        
+
         // Count swaps in the routed circuit, split into "routing"
         // (mid-circuit, load-bearing) vs "restoration" (trailing
         // identity-restore block) -- see restoration_swap_count's own
         // doc comment. The restoration fraction is the thing Priority
         // 2 (`skip_restore`) would actually eliminate, so it's what
         // decides whether that lever is worth building.
-        let swap_count = routed.gates.iter()
+        let swap_count = routed
+            .gates
+            .iter()
             .filter(|g| matches!(g, Gate::Swap(..)))
             .count();
         let (routing_swaps, restoration_swaps) =
             sirraya_qutub_transpiler::route::restoration_swap_count(&routed);
         debug_assert_eq!(
-            routing_swaps + restoration_swaps, swap_count,
+            routing_swaps + restoration_swaps,
+            swap_count,
             "restoration_swap_count's split must account for every swap route_best emitted"
         );
         total_routing_swaps += routing_swaps;
@@ -478,7 +508,9 @@ fn main() {
         // own footnote below.
         let no_restore_routed =
             sirraya_qutub_transpiler::route::route_best_no_restore(circuit, &coupling);
-        let no_restore_swaps = no_restore_routed.gates.iter()
+        let no_restore_swaps = no_restore_routed
+            .gates
+            .iter()
             .filter(|g| matches!(g, Gate::Swap(..)))
             .count();
         total_no_restore_swaps += no_restore_swaps;
@@ -502,7 +534,10 @@ fn main() {
         let fidelity_delta_pp = (est_fidelity_nr - est_fidelity) * 100.0;
         total_fidelity_delta_pp += fidelity_delta_pp;
 
-        export_coupling_map(&coupling, &format!("qiskit_benchmark_qasm/{}_coupling.txt", name));
+        export_coupling_map(
+            &coupling,
+            &format!("qiskit_benchmark_qasm/{}_coupling.txt", name),
+        );
 
         println!(
             "{:<28}  {:>10}  {:>11}  {:>10}  {:>10}  {:>8.2}%  {:>9}",
@@ -527,8 +562,10 @@ fn main() {
     }
 
     println!("\n=== RESTORATION TAX / route_best_no_restore ===");
-    println!("{:<28}  {:>8}  {:>8}  {:>8}  {:>10}  {:>9}  {:>9}",
-        "benchmark", "routing", "restore", "restore%", "no_restore", "nr fid%", "Δfid(pp)");
+    println!(
+        "{:<28}  {:>8}  {:>8}  {:>8}  {:>10}  {:>9}  {:>9}",
+        "benchmark", "routing", "restore", "restore%", "no_restore", "nr fid%", "Δfid(pp)"
+    );
     for r in &restoration_rows {
         println!(
             "{:<28}  {:>8}  {:>8}  {:>7.2}%  {:>10}  {:>8.2}%  {:>+8.4}",

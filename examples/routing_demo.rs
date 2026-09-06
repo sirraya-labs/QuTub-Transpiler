@@ -29,12 +29,12 @@
 //!
 //! Run with: `cargo run --example routing_demo`
 
+use sirraya_qutub::core::QuantumRegister;
 use sirraya_qutub_transpiler::coupling::CouplingMap;
 use sirraya_qutub_transpiler::diagram::Diagram;
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
 use sirraya_qutub_transpiler::route::route;
 use sirraya_qutub_transpiler::{decompose, emit, lower, optimize, Backend};
-use sirraya_qutub::core::QuantumRegister;
 
 /// An all-to-all-entangling circuit on `num_qubits`: `H` on every
 /// qubit, then a controlled-phase between every distinct pair
@@ -57,7 +57,10 @@ fn all_to_all_circuit(num_qubits: usize) -> Circuit {
 }
 
 fn count_swaps(c: &Circuit) -> usize {
-    c.gates.iter().filter(|g| matches!(g, Gate::Swap(..))).count()
+    c.gates
+        .iter()
+        .filter(|g| matches!(g, Gate::Swap(..)))
+        .count()
 }
 
 /// A rough "critical path length" depth estimate: the longest chain
@@ -94,8 +97,14 @@ fn main() {
 
     let topologies: [(&str, CouplingMap); 3] = [
         ("Linear chain (worst case)", CouplingMap::linear(N)),
-        ("IBM heavy-hex (heavy_hex_for)", CouplingMap::heavy_hex_for(N)),
-        ("Rigetti square grid (square_grid_for)", CouplingMap::square_grid_for(N)),
+        (
+            "IBM heavy-hex (heavy_hex_for)",
+            CouplingMap::heavy_hex_for(N),
+        ),
+        (
+            "Rigetti square grid (square_grid_for)",
+            CouplingMap::square_grid_for(N),
+        ),
     ];
 
     println!(
@@ -124,13 +133,22 @@ fn main() {
     // is shown as what it really costs: extra native two-qubit gates
     // eating into the fidelity estimate. ---
     println!("\nFull pipeline (route -> backend::lower -> fidelity budget):");
-    println!("{:<12}  {:>10}  {:>10}  {:>14}", "backend", "1q gates", "2q gates", "est. fidelity");
+    println!(
+        "{:<12}  {:>10}  {:>10}  {:>14}",
+        "backend", "1q gates", "2q gates", "est. fidelity"
+    );
     for backend in [Backend::IbmQ, Backend::Rigetti] {
         let bc = lower(&source, backend);
         let (single, two) = bc.gate_counts();
         let cal = backend.calibration();
         let est = sirraya_qutub_transpiler::fidelity::estimate_backend_circuit_fidelity(&bc, &cal);
-        println!("{:<12}  {:>10}  {:>10}  {:>13.6}%", format!("{:?}", backend), single, two, est * 100.0);
+        println!(
+            "{:<12}  {:>10}  {:>10}  {:>13.6}%",
+            format!("{:?}", backend),
+            single,
+            two,
+            est * 100.0
+        );
     }
 
     // --- A small (4-qubit) circuit's before/after diagram, so the
@@ -162,7 +180,10 @@ fn main() {
     let source2 = all_to_all_circuit(N2);
     let topologies2: [(&str, CouplingMap); 2] = [
         ("Linear chain (worst case)", CouplingMap::linear(N2)),
-        ("IBM heavy-hex (full unit cell, heavy_hex_grid(1,1))", CouplingMap::heavy_hex_grid(1, 1)),
+        (
+            "IBM heavy-hex (full unit cell, heavy_hex_grid(1,1))",
+            CouplingMap::heavy_hex_grid(1, 1),
+        ),
     ];
     println!("{:<52}  {:>6}  {:>7}", "topology", "swaps", "depth");
     let mut swap_counts = Vec::new();
@@ -173,10 +194,26 @@ fn main() {
         println!("{:<52}  {:>6}  {:>7}", name, swaps, depth(&routed));
     }
 
-    let linear_8 = swaps_at_8.iter().find(|(n, _)| n.starts_with("Linear")).map(|(_, s)| *s).unwrap();
-    let heavy_hex_8 = swaps_at_8.iter().find(|(n, _)| n.starts_with("IBM")).map(|(_, s)| *s).unwrap();
-    let square_8 = swaps_at_8.iter().find(|(n, _)| n.starts_with("Rigetti")).map(|(_, s)| *s).unwrap();
-    let heavy_hex_verdict = if heavy_hex_8 < linear_8 { "better" } else { "worse, not better" };
+    let linear_8 = swaps_at_8
+        .iter()
+        .find(|(n, _)| n.starts_with("Linear"))
+        .map(|(_, s)| *s)
+        .unwrap();
+    let heavy_hex_8 = swaps_at_8
+        .iter()
+        .find(|(n, _)| n.starts_with("IBM"))
+        .map(|(_, s)| *s)
+        .unwrap();
+    let square_8 = swaps_at_8
+        .iter()
+        .find(|(n, _)| n.starts_with("Rigetti"))
+        .map(|(_, s)| *s)
+        .unwrap();
+    let heavy_hex_verdict = if heavy_hex_8 < linear_8 {
+        "better"
+    } else {
+        "worse, not better"
+    };
 
     println!(
         "\n8-qubit result above: heavy_hex_for(8) is a BFS-truncated *fragment* of a heavy-hex \

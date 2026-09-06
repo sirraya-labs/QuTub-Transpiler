@@ -1,8 +1,8 @@
 //! Rigetti-superconducting-style [`BackendSpec`]: native gate set
 //! `{Rz, Rx, Cz}` (`CZ`-native rather than `CNOT`-native).
 
-use crate::backend::{push_h, BackendCircuit, BackendGate, EPS};
 use crate::backend::spec::{BackendSpec, RotAxis};
+use crate::backend::{push_h, BackendCircuit, BackendGate, EPS};
 use crate::coupling::CouplingMap;
 use crate::fidelity::PublishedCalibration;
 

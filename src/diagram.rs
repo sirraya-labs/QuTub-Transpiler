@@ -64,7 +64,10 @@ pub enum DiagramInstr {
     /// A single box spanning both wires with one shared, centered
     /// label -- `Rxx`/`Ryy`/`Rzz`'s conventional rendering, since
     /// neither qubit plays a distinguished "control" or "target" role.
-    Span { qubits: (usize, usize), label: String },
+    Span {
+        qubits: (usize, usize),
+        label: String,
+    },
     /// A `Swap`, drawn as an `X` marker on each of the two wires,
     /// connected by a vertical line.
     Swap { a: usize, b: usize },
@@ -94,17 +97,23 @@ fn prefix_instr_label(instr: DiagramInstr, conditions: &[(usize, bool)]) -> Diag
         .join(" && ");
     let prefix = format!("IF {}: ", condition_text);
     match instr {
-        DiagramInstr::Single { qubit, label } => {
-            DiagramInstr::Single { qubit, label: format!("{}{}", prefix, label) }
-        }
-        DiagramInstr::Controlled { controls, target, target_label } => DiagramInstr::Controlled {
+        DiagramInstr::Single { qubit, label } => DiagramInstr::Single {
+            qubit,
+            label: format!("{}{}", prefix, label),
+        },
+        DiagramInstr::Controlled {
+            controls,
+            target,
+            target_label,
+        } => DiagramInstr::Controlled {
             controls,
             target,
             target_label: Some(format!("{}{}", prefix, target_label.unwrap_or_default())),
         },
-        DiagramInstr::Span { qubits, label } => {
-            DiagramInstr::Span { qubits, label: format!("{}{}", prefix, label) }
-        }
+        DiagramInstr::Span { qubits, label } => DiagramInstr::Span {
+            qubits,
+            label: format!("{}{}", prefix, label),
+        },
         // `Swap` has no label slot to annotate, and `Gate::If` never
         // actually wraps one in practice (this crate's own `if`
         // extension -- see `qasm.rs`'s `parse_if_condition` doc
@@ -130,7 +139,9 @@ impl DiagramInstr {
         match self {
             DiagramInstr::Single { qubit, .. } => (*qubit, *qubit),
             DiagramInstr::Measure { qubit, .. } => (*qubit, *qubit),
-            DiagramInstr::Controlled { controls, target, .. } => {
+            DiagramInstr::Controlled {
+                controls, target, ..
+            } => {
                 let mut lo = *target;
                 let mut hi = *target;
                 for &c in controls {
@@ -139,9 +150,7 @@ impl DiagramInstr {
                 }
                 (lo, hi)
             }
-            DiagramInstr::Span { qubits: (a, b), .. } => {
-                (*a.min(b), *a.max(b))
-            }
+            DiagramInstr::Span { qubits: (a, b), .. } => (*a.min(b), *a.max(b)),
             DiagramInstr::Swap { a, b } => (*a.min(b), *a.max(b)),
         }
     }
@@ -186,15 +195,33 @@ fn instr_for_gate(gate: &Gate) -> DiagramInstr {
         Gate::Sdg(q) => single(q, "SDG"),
         Gate::T(q) => single(q, "T"),
         Gate::Tdg(q) => single(q, "TDG"),
-        Gate::Rx(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RX", a) },
-        Gate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
-        Gate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
+        Gate::Rx(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle("RX", a),
+        },
+        Gate::Ry(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle("RY", a),
+        },
+        Gate::Rz(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle("RZ", a),
+        },
         Gate::Cx(c, t) => controlled(c, t, Some("X".to_string())),
         Gate::Cz(a, b) => controlled(a, b, None),
         Gate::Swap(a, b) => DiagramInstr::Swap { a, b },
-        Gate::Rxx(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RXX", t) },
-        Gate::Ryy(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RYY", t) },
-        Gate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
+        Gate::Rxx(a, b, t) => DiagramInstr::Span {
+            qubits: (a, b),
+            label: fmt_angle("RXX", t),
+        },
+        Gate::Ryy(a, b, t) => DiagramInstr::Span {
+            qubits: (a, b),
+            label: fmt_angle("RYY", t),
+        },
+        Gate::Rzz(a, b, t) => DiagramInstr::Span {
+            qubits: (a, b),
+            label: fmt_angle("RZZ", t),
+        },
         Gate::Cp(c, t, l) => controlled(c, t, Some(fmt_angle("P", l))),
         Gate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
         Gate::If(ref conditions, ref inner) => {
@@ -274,9 +301,18 @@ impl Diagram {
 /// for why this is factored out (the same `If`-recursion reason).
 fn instr_for_native_gate(gate: &NativeGate) -> DiagramInstr {
     match *gate {
-        NativeGate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
-        NativeGate::Ry(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RY", a) },
-        NativeGate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
+        NativeGate::Rz(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle("RZ", a),
+        },
+        NativeGate::Ry(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle("RY", a),
+        },
+        NativeGate::Rzz(a, b, t) => DiagramInstr::Span {
+            qubits: (a, b),
+            label: fmt_angle("RZZ", t),
+        },
         NativeGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
         NativeGate::If(ref conditions, ref inner) => {
             prefix_instr_label(instr_for_native_gate(inner), conditions)
@@ -291,11 +327,20 @@ fn instr_for_native_gate(gate: &NativeGate) -> DiagramInstr {
 /// you which).
 fn instr_for_backend_gate(gate: &BackendGate, rot_axis: &str) -> DiagramInstr {
     match *gate {
-        BackendGate::Rz(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle("RZ", a) },
-        BackendGate::Rot(q, a) => DiagramInstr::Single { qubit: q, label: fmt_angle(rot_axis, a) },
+        BackendGate::Rz(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle("RZ", a),
+        },
+        BackendGate::Rot(q, a) => DiagramInstr::Single {
+            qubit: q,
+            label: fmt_angle(rot_axis, a),
+        },
         BackendGate::Cx(a, b) => controlled(a, b, Some("X".to_string())),
         BackendGate::Cz(a, b) => controlled(a, b, None),
-        BackendGate::Rzz(a, b, t) => DiagramInstr::Span { qubits: (a, b), label: fmt_angle("RZZ", t) },
+        BackendGate::Rzz(a, b, t) => DiagramInstr::Span {
+            qubits: (a, b),
+            label: fmt_angle("RZZ", t),
+        },
         BackendGate::Measure(q, c) => DiagramInstr::Measure { qubit: q, clbit: c },
         BackendGate::If(ref conditions, ref inner) => {
             prefix_instr_label(instr_for_backend_gate(inner, rot_axis), conditions)
@@ -304,11 +349,18 @@ fn instr_for_backend_gate(gate: &BackendGate, rot_axis: &str) -> DiagramInstr {
 }
 
 fn single(qubit: usize, label: &str) -> DiagramInstr {
-    DiagramInstr::Single { qubit, label: label.to_string() }
+    DiagramInstr::Single {
+        qubit,
+        label: label.to_string(),
+    }
 }
 
 fn controlled(control: usize, target: usize, target_label: Option<String>) -> DiagramInstr {
-    DiagramInstr::Controlled { controls: vec![control], target, target_label }
+    DiagramInstr::Controlled {
+        controls: vec![control],
+        target,
+        target_label,
+    }
 }
 
 /// Greedily packs `instrs` into as few columns as possible: instruction
@@ -356,13 +408,15 @@ mod ascii {
     /// render that as a plain vertical connector).
     fn cell_content(instr: &DiagramInstr, row: usize) -> Option<String> {
         match instr {
-            DiagramInstr::Single { qubit, label } if *qubit == row => {
-                Some(format!("[{}]", label))
-            }
+            DiagramInstr::Single { qubit, label } if *qubit == row => Some(format!("[{}]", label)),
             DiagramInstr::Measure { qubit, clbit } if *qubit == row => {
                 Some(format!("[M->c{}]", clbit))
             }
-            DiagramInstr::Controlled { controls, target, target_label } => {
+            DiagramInstr::Controlled {
+                controls,
+                target,
+                target_label,
+            } => {
                 if row == *target {
                     Some(match target_label {
                         // Mirrors the SVG renderer's ⊕ symbol for
@@ -379,7 +433,10 @@ mod ascii {
                     None
                 }
             }
-            DiagramInstr::Span { qubits: (a, b), label } => {
+            DiagramInstr::Span {
+                qubits: (a, b),
+                label,
+            } => {
                 if row == *a || row == *b {
                     Some(format!("[{}]", label))
                 } else {
@@ -423,7 +480,12 @@ mod ascii {
 
         // Uniform label gutter width, so every wire row starts at the
         // same horizontal offset regardless of label length.
-        let label_width = diagram.wire_labels.iter().map(|l| l.len()).max().unwrap_or(1);
+        let label_width = diagram
+            .wire_labels
+            .iter()
+            .map(|l| l.len())
+            .max()
+            .unwrap_or(1);
 
         // One content cell per (row, column); `None` means "this row
         // isn't in any instruction's range this column" -> a plain
@@ -444,7 +506,11 @@ mod ascii {
 
         let mut lines = Vec::with_capacity(num_qubits);
         for row in 0..num_qubits {
-            let mut line = format!("{:>width$}: ", diagram.wire_labels[row], width = label_width);
+            let mut line = format!(
+                "{:>width$}: ",
+                diagram.wire_labels[row],
+                width = label_width
+            );
             for c in 0..columns.len() {
                 let width = col_widths[c];
                 let content = cells[row][c].clone().unwrap_or_default();
@@ -496,7 +562,9 @@ mod svg {
     /// label here is built from `fmt_angle`/fixed gate names, so `&`,
     /// `<`, `>` are the only characters that could ever appear.
     fn esc(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
 
     fn draw_box(out: &mut String, x: f64, y: f64, label: &str) {
@@ -558,12 +626,18 @@ mod svg {
         let _ = write!(
             out,
             r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-            x - r, y, x + r, y
+            x - r,
+            y,
+            x + r,
+            y
         );
         let _ = write!(
             out,
             r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-            x, y - r, x, y + r
+            x,
+            y - r,
+            x,
+            y + r
         );
     }
 
@@ -572,12 +646,18 @@ mod svg {
         let _ = write!(
             out,
             r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-            x - r, y - r, x + r, y + r
+            x - r,
+            y - r,
+            x + r,
+            y + r
         );
         let _ = write!(
             out,
             r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-            x - r, y + r, x + r, y - r
+            x - r,
+            y + r,
+            x + r,
+            y - r
         );
     }
 
@@ -640,7 +720,10 @@ mod svg {
             let _ = write!(
                 body,
                 r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-                LEFT_MARGIN, y, width - RIGHT_MARGIN, y,
+                LEFT_MARGIN,
+                y,
+                width - RIGHT_MARGIN,
+                y,
             );
         }
 
@@ -658,12 +741,18 @@ mod svg {
             let _ = write!(
                 body,
                 r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-                LEFT_MARGIN, y - offset, width - RIGHT_MARGIN, y - offset,
+                LEFT_MARGIN,
+                y - offset,
+                width - RIGHT_MARGIN,
+                y - offset,
             );
             let _ = write!(
                 body,
                 r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="black" stroke-width="1.5"/>"#,
-                LEFT_MARGIN, y + offset, width - RIGHT_MARGIN, y + offset,
+                LEFT_MARGIN,
+                y + offset,
+                width - RIGHT_MARGIN,
+                y + offset,
             );
         }
 
@@ -690,7 +779,11 @@ mod svg {
                             draw_box(&mut body, x, row_y(*qubit), &format!("M->c{}", clbit));
                         }
                     }
-                    DiagramInstr::Controlled { controls, target, target_label } => {
+                    DiagramInstr::Controlled {
+                        controls,
+                        target,
+                        target_label,
+                    } => {
                         let (lo, hi) = instr.wire_range();
                         if lo != hi {
                             draw_vline(&mut body, x, row_y(lo), row_y(hi));
@@ -709,7 +802,10 @@ mod svg {
                             None => draw_dot(&mut body, x, row_y(*target)),
                         }
                     }
-                    DiagramInstr::Span { qubits: (a, b), label } => {
+                    DiagramInstr::Span {
+                        qubits: (a, b),
+                        label,
+                    } => {
                         let lo = *a.min(b);
                         let hi = *a.max(b);
                         let _ = write!(
@@ -724,7 +820,9 @@ mod svg {
                         let _ = write!(
                             body,
                             r#"<text x="{:.1}" y="{:.1}" text-anchor="middle" dominant-baseline="middle">{}</text>"#,
-                            x, mid_y, esc(label),
+                            x,
+                            mid_y,
+                            esc(label),
                         );
                     }
                     DiagramInstr::Swap { a, b } => {
@@ -778,7 +876,11 @@ mod tests {
         let ascii = Diagram::from_circuit(&c).to_ascii();
         let lines: Vec<&str> = ascii.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert!(lines[1].contains('|'), "expected a passthrough connector on q1:\n{}", ascii);
+        assert!(
+            lines[1].contains('|'),
+            "expected a passthrough connector on q1:\n{}",
+            ascii
+        );
     }
 
     #[test]
@@ -841,11 +943,19 @@ mod tests {
 
         let ion = lower(&c, Backend::TrappedIon);
         let ion_ascii = Diagram::from_backend(&ion).to_ascii();
-        assert!(ion_ascii.contains("RY"), "TrappedIon should render Rot as RY:\n{}", ion_ascii);
+        assert!(
+            ion_ascii.contains("RY"),
+            "TrappedIon should render Rot as RY:\n{}",
+            ion_ascii
+        );
 
         let ibm = lower(&c, Backend::IbmQ);
         let ibm_ascii = Diagram::from_backend(&ibm).to_ascii();
-        assert!(ibm_ascii.contains("RX"), "IbmQ should render Rot as RX:\n{}", ibm_ascii);
+        assert!(
+            ibm_ascii.contains("RX"),
+            "IbmQ should render Rot as RX:\n{}",
+            ibm_ascii
+        );
     }
 
     #[test]
@@ -861,7 +971,11 @@ mod tests {
         c.num_clbits = 1;
         let ascii = Diagram::from_circuit(&c).to_ascii();
         let lens: Vec<usize> = ascii.lines().map(|l| l.chars().count()).collect();
-        assert!(lens.windows(2).all(|w| w[0] == w[1]), "misaligned rows:\n{}", ascii);
+        assert!(
+            lens.windows(2).all(|w| w[0] == w[1]),
+            "misaligned rows:\n{}",
+            ascii
+        );
     }
 
     #[test]
@@ -900,7 +1014,9 @@ mod tests {
         // that all three levels of the same circuit produce a diagram
         // with the right qubit/instruction counts and don't panic.
         let mut c = Circuit::new(2);
-        c.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Rz(1, 0.3));
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rz(1, 0.3));
 
         let source = Diagram::from_circuit(&c);
         assert_eq!(source.num_qubits, 2);

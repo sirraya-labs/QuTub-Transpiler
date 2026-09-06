@@ -31,9 +31,9 @@
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use sirraya_qutub::core::QuantumRegister;
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
 use sirraya_qutub_transpiler::{decompose, emit, lower, optimize, optimize_ir, Backend};
-use sirraya_qutub::core::QuantumRegister;
 
 /// Below this, two states are considered "the same" -- purely a
 /// floating-point tolerance on an exact-in-theory equality, not a
@@ -49,7 +49,9 @@ fn main() {
 
     println!(
         "Verifying {} randomized circuits ({}-{} qubits) against a real QuantumRegister.\n",
-        circuits.len(), MIN_QUBITS, MAX_QUBITS
+        circuits.len(),
+        MIN_QUBITS,
+        MAX_QUBITS
     );
     println!(
         "{:>4}  {:>3}  {:>5}  {:>12}  {:>10}  {:>10}  {:>10}",
@@ -101,7 +103,10 @@ fn main() {
         );
     }
 
-    println!("\nWorst fidelity observed across every case and every rewrite: {:.12}", worst_fidelity);
+    println!(
+        "\nWorst fidelity observed across every case and every rewrite: {:.12}",
+        worst_fidelity
+    );
     if any_failed {
         println!(
             "\nFAIL: at least one rewrite produced fidelity < {:.0e} against the reference.",

@@ -47,7 +47,11 @@ impl StabilizerCode for ThreeQubitPhaseFlipCode {
     }
 
     fn encode(&self, circuit: &mut Circuit, data_qubits: &[usize]) {
-        assert_eq!(data_qubits.len(), 3, "ThreeQubitPhaseFlipCode needs exactly 3 data qubits");
+        assert_eq!(
+            data_qubits.len(),
+            3,
+            "ThreeQubitPhaseFlipCode needs exactly 3 data qubits"
+        );
         let (q0, q1, q2) = (data_qubits[0], data_qubits[1], data_qubits[2]);
         circuit
             .push(Gate::Cx(q0, q1))
@@ -74,8 +78,16 @@ impl StabilizerCode for ThreeQubitPhaseFlipCode {
         ancilla_qubits: &[usize],
         syndrome_clbits: &[usize],
     ) {
-        assert_eq!(data_qubits.len(), 3, "ThreeQubitPhaseFlipCode needs exactly 3 data qubits");
-        assert_eq!(ancilla_qubits.len(), 2, "ThreeQubitPhaseFlipCode needs exactly 2 ancillas");
+        assert_eq!(
+            data_qubits.len(),
+            3,
+            "ThreeQubitPhaseFlipCode needs exactly 3 data qubits"
+        );
+        assert_eq!(
+            ancilla_qubits.len(),
+            2,
+            "ThreeQubitPhaseFlipCode needs exactly 2 ancillas"
+        );
         assert_eq!(
             syndrome_clbits.len(),
             2,
@@ -107,7 +119,11 @@ impl StabilizerCode for ThreeQubitPhaseFlipCode {
     /// error on `q1` or `q2`. `(1,0)` -> `Z(q0)`, `(1,1)` -> `Z(q1)`,
     /// `(0,1)` -> `Z(q2)`, `(0,0)` -> no correction.
     fn correct(&self, circuit: &mut Circuit, data_qubits: &[usize], syndrome_clbits: &[usize]) {
-        assert_eq!(data_qubits.len(), 3, "ThreeQubitPhaseFlipCode needs exactly 3 data qubits");
+        assert_eq!(
+            data_qubits.len(),
+            3,
+            "ThreeQubitPhaseFlipCode needs exactly 3 data qubits"
+        );
         assert_eq!(
             syndrome_clbits.len(),
             2,
@@ -115,9 +131,18 @@ impl StabilizerCode for ThreeQubitPhaseFlipCode {
         );
         let (q0, q1, q2) = (data_qubits[0], data_qubits[1], data_qubits[2]);
         let (s0, s1) = (syndrome_clbits[0], syndrome_clbits[1]);
-        circuit.push(Gate::If(vec![(s0, true), (s1, false)], Box::new(Gate::Z(q0))));
-        circuit.push(Gate::If(vec![(s0, true), (s1, true)], Box::new(Gate::Z(q1))));
-        circuit.push(Gate::If(vec![(s0, false), (s1, true)], Box::new(Gate::Z(q2))));
+        circuit.push(Gate::If(
+            vec![(s0, true), (s1, false)],
+            Box::new(Gate::Z(q0)),
+        ));
+        circuit.push(Gate::If(
+            vec![(s0, true), (s1, true)],
+            Box::new(Gate::Z(q1)),
+        ));
+        circuit.push(Gate::If(
+            vec![(s0, false), (s1, true)],
+            Box::new(Gate::Z(q2)),
+        ));
     }
 
     /// The exact inverse of [`encode`](Self::encode): undo the `H`s
@@ -125,7 +150,11 @@ impl StabilizerCode for ThreeQubitPhaseFlipCode {
     /// [`ThreeQubitBitFlipCode::decode`](crate::qec::bit_flip::ThreeQubitBitFlipCode::decode)
     /// uses.
     fn decode(&self, circuit: &mut Circuit, data_qubits: &[usize]) {
-        assert_eq!(data_qubits.len(), 3, "ThreeQubitPhaseFlipCode needs exactly 3 data qubits");
+        assert_eq!(
+            data_qubits.len(),
+            3,
+            "ThreeQubitPhaseFlipCode needs exactly 3 data qubits"
+        );
         let (q0, q1, q2) = (data_qubits[0], data_qubits[1], data_qubits[2]);
         circuit
             .push(Gate::H(q0))

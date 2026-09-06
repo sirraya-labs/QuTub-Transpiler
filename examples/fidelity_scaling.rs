@@ -8,7 +8,9 @@
 //! Run with: `cargo run --example fidelity_scaling`
 
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
-use sirraya_qutub_transpiler::{decompose, estimate_circuit_fidelity, optimize, PublishedCalibration};
+use sirraya_qutub_transpiler::{
+    decompose, estimate_circuit_fidelity, optimize, PublishedCalibration,
+};
 
 /// H on qubit 0, then a CNOT ladder out to every other qubit -- the
 /// standard GHZ-state preparation circuit.

@@ -149,7 +149,11 @@ impl PulseInstruction {
     /// construction (see this module's doc comment on virtual-Z).
     pub fn end_time_ns(&self) -> f64 {
         match *self {
-            PulseInstruction::Play { start_time_ns, duration_ns, .. } => start_time_ns + duration_ns,
+            PulseInstruction::Play {
+                start_time_ns,
+                duration_ns,
+                ..
+            } => start_time_ns + duration_ns,
             PulseInstruction::ShiftPhase { start_time_ns, .. } => start_time_ns,
         }
     }
@@ -185,7 +189,13 @@ impl Schedule {
     pub fn has_no_overlaps(&self) -> bool {
         let mut by_channel: HashMap<Channel, Vec<(f64, f64)>> = HashMap::new();
         for instr in &self.instructions {
-            if let PulseInstruction::Play { channel, start_time_ns, duration_ns, .. } = *instr {
+            if let PulseInstruction::Play {
+                channel,
+                start_time_ns,
+                duration_ns,
+                ..
+            } = *instr
+            {
                 by_channel
                     .entry(channel)
                     .or_default()
@@ -410,7 +420,10 @@ pub fn schedule(bc: &BackendCircuit, cal: &PulseCalibration) -> Result<Schedule,
         schedule_one(g, cal, &mut busy_until, &mut instructions)?;
     }
 
-    Ok(Schedule { backend: bc.backend, instructions })
+    Ok(Schedule {
+        backend: bc.backend,
+        instructions,
+    })
 }
 
 /// One gate's contribution to a [`Schedule`] -- the per-gate body
@@ -478,7 +491,10 @@ pub(crate) fn push_leaf_pulse(
                 channel: Channel::Drive(q),
                 start_time_ns: t,
                 duration_ns: cal.rot.duration_ns,
-                envelope: Envelope::Drag { sigma_ns: cal.rot.sigma_ns, beta: cal.rot.drag_beta },
+                envelope: Envelope::Drag {
+                    sigma_ns: cal.rot.sigma_ns,
+                    beta: cal.rot.drag_beta,
+                },
                 amplitude,
             });
             busy_until.insert(q, t + cal.rot.duration_ns);
@@ -585,7 +601,10 @@ mod tests {
             gates: vec![BackendGate::Rzz(0, 1, 0.4)],
         };
         let err = schedule(&bc, &cal()).unwrap_err();
-        assert!(err.contains("Rzz"), "error should name the unsupported gate, got: {err}");
+        assert!(
+            err.contains("Rzz"),
+            "error should name the unsupported gate, got: {err}"
+        );
     }
 
     #[test]
@@ -662,7 +681,15 @@ mod tests {
         let rot = sched
             .instructions
             .iter()
-            .find(|i| matches!(i, PulseInstruction::Play { channel: Channel::Drive(0), .. }))
+            .find(|i| {
+                matches!(
+                    i,
+                    PulseInstruction::Play {
+                        channel: Channel::Drive(0),
+                        ..
+                    }
+                )
+            })
             .unwrap();
         assert_eq!(
             rot.start_time_ns(),
@@ -687,7 +714,10 @@ mod tests {
             .find(|i| i.channel() == Channel::Readout(0))
             .expect("Measure should produce a Readout(0) instruction");
         assert_eq!(readout.start_time_ns(), cal().rot.duration_ns);
-        assert_eq!(sched.duration_ns(), cal().rot.duration_ns + cal().readout_duration_ns);
+        assert_eq!(
+            sched.duration_ns(),
+            cal().rot.duration_ns + cal().readout_duration_ns
+        );
     }
 
     #[test]
@@ -756,11 +786,21 @@ mod tests {
         assert!(sched.has_no_overlaps());
         assert_eq!(sched.instructions.len(), 1);
         match sched.instructions[0] {
-            PulseInstruction::Play { channel, start_time_ns, duration_ns, amplitude, .. } => {
+            PulseInstruction::Play {
+                channel,
+                start_time_ns,
+                duration_ns,
+                amplitude,
+                ..
+            } => {
                 assert_eq!(channel, Channel::Control(0, 1));
                 assert_eq!(start_time_ns, 0.0);
                 assert_eq!(duration_ns, tcal.rzz.unwrap().duration_ns);
-                assert_eq!(amplitude, tcal.rzz.unwrap().pi_amplitude, "Rzz(.., PI) should play at the full calibrated pi-pulse amplitude");
+                assert_eq!(
+                    amplitude,
+                    tcal.rzz.unwrap().pi_amplitude,
+                    "Rzz(.., PI) should play at the full calibrated pi-pulse amplitude"
+                );
             }
             ref other => panic!("expected a Play instruction on Control(0,1), got {other:?}"),
         }
@@ -806,7 +846,15 @@ mod tests {
         let rot = sched
             .instructions
             .iter()
-            .find(|i| matches!(i, PulseInstruction::Play { channel: Channel::Drive(0), .. }))
+            .find(|i| {
+                matches!(
+                    i,
+                    PulseInstruction::Play {
+                        channel: Channel::Drive(0),
+                        ..
+                    }
+                )
+            })
             .unwrap();
         assert_eq!(
             rot.start_time_ns(),
@@ -873,7 +921,10 @@ mod tests {
         // private outside backend.rs -- push is pub(crate), so the
         // gates themselves can still be added directly.
         let mut conditioned = backend::lower(&Circuit::new(1), Backend::TrappedIon);
-        conditioned.push(BackendGate::If(vec![(0, true)], Box::new(BackendGate::Rot(0, PI))));
+        conditioned.push(BackendGate::If(
+            vec![(0, true)],
+            Box::new(BackendGate::Rot(0, PI)),
+        ));
         let mut plain = backend::lower(&Circuit::new(1), Backend::TrappedIon);
         plain.push(BackendGate::Rot(0, PI));
 
@@ -889,7 +940,10 @@ mod tests {
         // early -- same overlap-freedom guarantee as an unconditioned
         // two-qubit gate.
         let mut bc = backend::lower(&Circuit::new(2), Backend::TrappedIon);
-        bc.push(BackendGate::If(vec![(0, true)], Box::new(BackendGate::Rzz(0, 1, PI / 2.0))));
+        bc.push(BackendGate::If(
+            vec![(0, true)],
+            Box::new(BackendGate::Rzz(0, 1, PI / 2.0)),
+        ));
         bc.push(BackendGate::Rot(0, PI));
         let sched = schedule(&bc, &trapped_ion_pulse_calibration()).unwrap();
         assert!(
@@ -897,6 +951,10 @@ mod tests {
             "a conditioned two-qubit gate must still reserve both its wires: {:?}",
             sched.instructions
         );
-        assert_eq!(sched.instructions.len(), 2, "expected exactly the Rzz pulse plus the Rot pulse");
+        assert_eq!(
+            sched.instructions.len(),
+            2,
+            "expected exactly the Rzz pulse plus the Rot pulse"
+        );
     }
 }

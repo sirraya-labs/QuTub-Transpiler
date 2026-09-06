@@ -57,7 +57,12 @@ fn depth(c: &Circuit) -> usize {
     let mut last = vec![0usize; c.num_qubits.max(1)];
     for g in &c.gates {
         let qs = qubits_touched(g);
-        let slot = qs.iter().map(|&q| last.get(q).copied().unwrap_or(0)).max().unwrap_or(0) + 1;
+        let slot = qs
+            .iter()
+            .map(|&q| last.get(q).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            + 1;
         for q in qs {
             if q < last.len() {
                 last[q] = slot;
@@ -70,10 +75,24 @@ fn depth(c: &Circuit) -> usize {
 fn qubits_touched(g: &sirraya_qutub_transpiler::ir::Gate) -> Vec<usize> {
     use sirraya_qutub_transpiler::ir::Gate::*;
     match *g {
-        H(a) | X(a) | Y(a) | Z(a) | S(a) | Sdg(a) | T(a) | Tdg(a)
-        | Rx(a, _) | Ry(a, _) | Rz(a, _) => vec![a],
-        Cx(a, b) | Cz(a, b) | Swap(a, b) | Rxx(a, b, _) | Ryy(a, b, _)
-        | Rzz(a, b, _) | Cp(a, b, _) => vec![a, b],
+        H(a)
+        | X(a)
+        | Y(a)
+        | Z(a)
+        | S(a)
+        | Sdg(a)
+        | T(a)
+        | Tdg(a)
+        | Rx(a, _)
+        | Ry(a, _)
+        | Rz(a, _) => vec![a],
+        Cx(a, b)
+        | Cz(a, b)
+        | Swap(a, b)
+        | Rxx(a, b, _)
+        | Ryy(a, b, _)
+        | Rzz(a, b, _)
+        | Cp(a, b, _) => vec![a, b],
         Measure(a, _) => vec![a],
         _ => vec![],
     }
@@ -95,7 +114,12 @@ fn depth_native(c: &sirraya_qutub_transpiler::native::NativeCircuit) -> usize {
     let mut last = vec![0usize; c.num_qubits.max(1)];
     for g in &c.gates {
         let qs = touched(g);
-        let slot = qs.iter().map(|&q| last.get(q).copied().unwrap_or(0)).max().unwrap_or(0) + 1;
+        let slot = qs
+            .iter()
+            .map(|&q| last.get(q).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            + 1;
         for q in qs {
             if q < last.len() {
                 last[q] = slot;
@@ -160,7 +184,10 @@ fn manifest_for(name: &str, source: &Circuit) -> serde_json::Value {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let compare_dir = args.iter().position(|a| a == "--compare").map(|i| PathBuf::from(&args[i + 1]));
+    let compare_dir = args
+        .iter()
+        .position(|a| a == "--compare")
+        .map(|i| PathBuf::from(&args[i + 1]));
 
     let out_dir = Path::new("provenance");
     fs::create_dir_all(out_dir).expect("create provenance/ output dir");
@@ -193,8 +220,12 @@ fn main() {
             let baseline_path = baseline_dir.join(format!("{name}.json"));
             if let Ok(baseline_text) = fs::read_to_string(&baseline_path) {
                 let baseline: serde_json::Value = serde_json::from_str(&baseline_text).unwrap();
-                let before = baseline["native_optimized"]["gate_count"].as_u64().unwrap_or(0);
-                let after = manifest["native_optimized"]["gate_count"].as_u64().unwrap_or(0);
+                let before = baseline["native_optimized"]["gate_count"]
+                    .as_u64()
+                    .unwrap_or(0);
+                let after = manifest["native_optimized"]["gate_count"]
+                    .as_u64()
+                    .unwrap_or(0);
                 if before > 0 {
                     let delta_pct = 100.0 * (after as f64 - before as f64) / before as f64;
                     if delta_pct.abs() > 10.0 {

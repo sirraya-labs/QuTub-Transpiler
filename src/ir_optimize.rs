@@ -154,7 +154,9 @@ fn disjoint(a: &Gate, b: &Gate) -> bool {
     // could change what it observes, even though its own *qubit* set
     // may be disjoint from either. Same conservative call as `Measure`:
     // never a commute candidate, in either direction.
-    if matches!(a, Gate::Measure(..) | Gate::If(..)) || matches!(b, Gate::Measure(..) | Gate::If(..)) {
+    if matches!(a, Gate::Measure(..) | Gate::If(..))
+        || matches!(b, Gate::Measure(..) | Gate::If(..))
+    {
         return false;
     }
     let qa: HashSet<usize> = qubits_of(a).into_iter().collect();
@@ -446,9 +448,12 @@ mod tests {
         let mut reg = QuantumRegister::new(num_qubits).unwrap();
         let mut rng = rand::thread_rng();
         for q in 0..num_qubits {
-            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
-            reg.apply_ry(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
-            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
+            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
+            reg.apply_ry(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
+            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
         }
         reg
     }
@@ -509,7 +514,10 @@ mod tests {
     #[test]
     fn cancels_adjacent_cnot_pair() {
         let mut c = Circuit::new(2);
-        c.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Cx(0, 1)).push(Gate::X(1));
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::X(1));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::H(0), Gate::X(1)]);
     }
@@ -517,7 +525,9 @@ mod tests {
     #[test]
     fn cancels_adjacent_swap_pair() {
         let mut c = Circuit::new(2);
-        c.push(Gate::H(0)).push(Gate::Swap(0, 1)).push(Gate::Swap(1, 0));
+        c.push(Gate::H(0))
+            .push(Gate::Swap(0, 1))
+            .push(Gate::Swap(1, 0));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::H(0)]);
     }
@@ -542,9 +552,15 @@ mod tests {
     #[test]
     fn does_not_commute_past_overlapping_gate() {
         let mut c = Circuit::new(3);
-        c.push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(0, 1));
+        c.push(Gate::Cx(0, 1))
+            .push(Gate::Cx(1, 2))
+            .push(Gate::Cx(0, 1));
         let opt = optimize_ir(&c);
-        assert_eq!(opt.gates.len(), 3, "no valid cancellation should have been found");
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "no valid cancellation should have been found"
+        );
         assert_same_action(&c, &opt);
     }
 
@@ -620,7 +636,9 @@ mod tests {
         // the gate-specific rule should let the two Rz's commute
         // together across the Cx and cancel, leaving just the Cx.
         let mut c = Circuit::new(2);
-        c.push(Gate::Rz(0, 0.4)).push(Gate::Cx(0, 1)).push(Gate::Rz(0, -0.4));
+        c.push(Gate::Rz(0, 0.4))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rz(0, -0.4));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::Cx(0, 1)]);
         assert_same_action(&c, &opt);
@@ -635,7 +653,9 @@ mod tests {
         // source level: naively cancelling here would silently drop a
         // real dependency, since this sandwich is not the identity.
         let mut c = Circuit::new(2);
-        c.push(Gate::Rz(1, 0.4)).push(Gate::Cx(0, 1)).push(Gate::Rz(1, -0.4));
+        c.push(Gate::Rz(1, 0.4))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rz(1, -0.4));
         let opt = optimize_ir(&c);
         assert_eq!(
             opt.gates.len(),
@@ -692,7 +712,12 @@ mod tests {
             .push(Gate::X(2))
             .push(Gate::Rz(0, -0.4));
         let opt = optimize_ir(&c);
-        assert_eq!(opt.gates.len(), 2, "the two Rz's should have cancelled, got {:?}", opt.gates);
+        assert_eq!(
+            opt.gates.len(),
+            2,
+            "the two Rz's should have cancelled, got {:?}",
+            opt.gates
+        );
         assert_same_action(&c, &opt);
     }
 
@@ -703,7 +728,9 @@ mod tests {
         // two Rz's commute together across the Cz and cancel, leaving
         // just the Cz -- on *either* wire, unlike the Cx-control rule.
         let mut c = Circuit::new(2);
-        c.push(Gate::Rz(1, 0.4)).push(Gate::Cz(0, 1)).push(Gate::Rz(1, -0.4));
+        c.push(Gate::Rz(1, 0.4))
+            .push(Gate::Cz(0, 1))
+            .push(Gate::Rz(1, -0.4));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::Cz(0, 1)]);
         assert_same_action(&c, &opt);
@@ -753,7 +780,12 @@ mod tests {
             .push(Gate::X(2))
             .push(Gate::Rz(1, -0.4));
         let opt = optimize_ir(&c);
-        assert_eq!(opt.gates.len(), 2, "the two Rz's should have cancelled, got {:?}", opt.gates);
+        assert_eq!(
+            opt.gates.len(),
+            2,
+            "the two Rz's should have cancelled, got {:?}",
+            opt.gates
+        );
         assert_same_action(&c, &opt);
     }
 
@@ -808,7 +840,9 @@ mod tests {
         // (rule 1) commute. Mirror image of the test above: confirms
         // the widened rule 3 doesn't leak onto the control wire either.
         let mut c = Circuit::new(2);
-        c.push(Gate::Rx(0, 0.4)).push(Gate::Cx(0, 1)).push(Gate::Rx(0, -0.4));
+        c.push(Gate::Rx(0, 0.4))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rx(0, -0.4));
         let opt = optimize_ir(&c);
         assert_eq!(
             opt.gates.len(),
@@ -822,7 +856,9 @@ mod tests {
     #[test]
     fn commutes_rx_through_cx_target_wire_to_cancel() {
         let mut c = Circuit::new(2);
-        c.push(Gate::Rx(1, 0.5)).push(Gate::Cx(0, 1)).push(Gate::Rx(1, -0.5));
+        c.push(Gate::Rx(1, 0.5))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Rx(1, -0.5));
         let opt = optimize_ir(&c);
         assert_eq!(opt.gates, vec![Gate::Cx(0, 1)]);
         assert_same_action(&c, &opt);

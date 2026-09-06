@@ -81,7 +81,11 @@ pub fn sample_depolarizing_error(p: f64, uniform_sample: f64) -> Option<PauliErr
 /// Applies `err` to qubit `q` of `reg` -- the real, physical
 /// consequence of a [`sample_depolarizing_error`] draw that returned
 /// `Some`.
-pub fn apply_pauli_error(reg: &mut QuantumRegister, q: usize, err: PauliError) -> Result<(), String> {
+pub fn apply_pauli_error(
+    reg: &mut QuantumRegister,
+    q: usize,
+    err: PauliError,
+) -> Result<(), String> {
     match err {
         PauliError::X => reg.apply_pauli_x(q),
         PauliError::Y => reg.apply_pauli_y(q),
@@ -112,10 +116,19 @@ mod tests {
         let p = 0.9;
         // Just inside each third of [0, p).
         assert_eq!(sample_depolarizing_error(p, 0.0), Some(PauliError::X));
-        assert_eq!(sample_depolarizing_error(p, p / 3.0 - 1e-9), Some(PauliError::X));
+        assert_eq!(
+            sample_depolarizing_error(p, p / 3.0 - 1e-9),
+            Some(PauliError::X)
+        );
         assert_eq!(sample_depolarizing_error(p, p / 3.0), Some(PauliError::Y));
-        assert_eq!(sample_depolarizing_error(p, 2.0 * p / 3.0 - 1e-9), Some(PauliError::Y));
-        assert_eq!(sample_depolarizing_error(p, 2.0 * p / 3.0), Some(PauliError::Z));
+        assert_eq!(
+            sample_depolarizing_error(p, 2.0 * p / 3.0 - 1e-9),
+            Some(PauliError::Y)
+        );
+        assert_eq!(
+            sample_depolarizing_error(p, 2.0 * p / 3.0),
+            Some(PauliError::Z)
+        );
         assert_eq!(sample_depolarizing_error(p, p - 1e-9), Some(PauliError::Z));
         // Just past p: no error.
         assert_eq!(sample_depolarizing_error(p, p), None);

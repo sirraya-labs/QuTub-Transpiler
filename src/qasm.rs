@@ -111,10 +111,16 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
         }
         if let Some(rest) = stmt.strip_prefix("measure") {
             let n = num_qubits.ok_or_else(|| {
-                format!("line {}: `measure` before a qubit register declaration: `{}`", lineno, stmt)
+                format!(
+                    "line {}: `measure` before a qubit register declaration: `{}`",
+                    lineno, stmt
+                )
             })?;
             let c_count = num_clbits.ok_or_else(|| {
-                format!("line {}: `measure` before a classical register declaration: `{}`", lineno, stmt)
+                format!(
+                    "line {}: `measure` before a classical register declaration: `{}`",
+                    lineno, stmt
+                )
             })?;
             let (q, c) = parse_measure_statement(rest, lineno)?;
             check_measure_range(q, n, c, c_count, lineno, stmt)?;
@@ -127,10 +133,16 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
         // this is (and isn't) standard for.
         if let Some(rest) = stmt.strip_prefix("if") {
             let n = num_qubits.ok_or_else(|| {
-                format!("line {}: `if` before a qubit register declaration: `{}`", lineno, stmt)
+                format!(
+                    "line {}: `if` before a qubit register declaration: `{}`",
+                    lineno, stmt
+                )
             })?;
             let c_count = num_clbits.ok_or_else(|| {
-                format!("line {}: `if` before a classical register declaration: `{}`", lineno, stmt)
+                format!(
+                    "line {}: `if` before a classical register declaration: `{}`",
+                    lineno, stmt
+                )
             })?;
             let (conditions, inner_stmt) = parse_if_condition(rest, lineno)?;
             for &(clbit, _) in &conditions {
@@ -166,7 +178,9 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
                     ));
                 }
             }
-            circuit.gates.push(Gate::If(conditions, Box::new(inner_gate)));
+            circuit
+                .gates
+                .push(Gate::If(conditions, Box::new(inner_gate)));
             continue;
         }
         // QASM 3.0's assignment-style measure: `c[0] = measure q[0];`
@@ -178,10 +192,16 @@ pub fn parse(source: &str) -> Result<Circuit, String> {
             let rhs = stmt[eq_pos + 1..].trim_start();
             if let Some(rest) = rhs.strip_prefix("measure") {
                 let n = num_qubits.ok_or_else(|| {
-                    format!("line {}: `measure` before a qubit register declaration: `{}`", lineno, stmt)
+                    format!(
+                        "line {}: `measure` before a qubit register declaration: `{}`",
+                        lineno, stmt
+                    )
                 })?;
                 let c_count = num_clbits.ok_or_else(|| {
-                    format!("line {}: `measure` before a classical register declaration: `{}`", lineno, stmt)
+                    format!(
+                        "line {}: `measure` before a classical register declaration: `{}`",
+                        lineno, stmt
+                    )
                 })?;
                 let lhs = stmt[..eq_pos].trim();
                 let c = parse_index_ref(lhs, lineno)?;
@@ -326,9 +346,10 @@ fn parse_gate_statement(stmt: &str, lineno: usize) -> Result<Gate, String> {
         }
     };
     let need_param = |k: usize| -> Result<f64, String> {
-        params.get(k).copied().ok_or_else(|| {
-            format!("line {}: `{}` is missing a numeric parameter", lineno, name)
-        })
+        params
+            .get(k)
+            .copied()
+            .ok_or_else(|| format!("line {}: `{}` is missing a numeric parameter", lineno, name))
     };
 
     match name.as_str() {
@@ -444,7 +465,9 @@ fn split_params(rest: &str, lineno: usize) -> Result<(Vec<f64>, &str), String> {
 
 /// Parses a comma-separated list of `q[N]` references.
 fn parse_qubit_list(rest: &str, lineno: usize) -> Result<Vec<usize>, String> {
-    rest.split(',').map(|tok| parse_index_ref(tok, lineno)).collect()
+    rest.split(',')
+        .map(|tok| parse_index_ref(tok, lineno))
+        .collect()
 }
 
 /// Parses a single `name[N]` reference (e.g. `q[0]` or `c[2]`), returning
@@ -472,7 +495,10 @@ fn parse_index_ref(tok: &str, lineno: usize) -> Result<usize, String> {
 /// range-checked for every other gate statement.
 fn parse_measure_statement(rest: &str, lineno: usize) -> Result<(usize, usize), String> {
     let arrow = rest.find("->").ok_or_else(|| {
-        format!("line {}: `measure` statement missing `->`: `measure{}`", lineno, rest)
+        format!(
+            "line {}: `measure` statement missing `->`: `measure{}`",
+            lineno, rest
+        )
     })?;
     let qubit_part = &rest[..arrow];
     let clbit_part = &rest[arrow + 2..];
@@ -527,7 +553,10 @@ fn parse_if_condition(rest: &str, lineno: usize) -> Result<(Vec<(usize, bool)>, 
         conditions.push((clbit, value));
     }
     if conditions.is_empty() {
-        return Err(format!("line {}: `if` condition is empty: `if({})`", lineno, condition));
+        return Err(format!(
+            "line {}: `if` condition is empty: `if({})`",
+            lineno, condition
+        ));
     }
     Ok((conditions, &open[close + 1..]))
 }
@@ -581,7 +610,12 @@ mod qasm3_tests {
         assert_eq!(circuit.num_clbits, 2);
         assert_eq!(
             circuit.gates,
-            vec![Gate::H(0), Gate::Cx(0, 1), Gate::Measure(0, 0), Gate::Measure(1, 1)]
+            vec![
+                Gate::H(0),
+                Gate::Cx(0, 1),
+                Gate::Measure(0, 0),
+                Gate::Measure(1, 1)
+            ]
         );
     }
 
@@ -637,7 +671,8 @@ mod qasm3_tests {
 
     #[test]
     fn gate_calls_are_unchanged_between_dialects() {
-        let src = "OPENQASM 3.0;\nqubit[3] q;\nbit[3] c;\nh q[0];\nrz(0.5) q[1];\nrzz(1.2) q[0], q[2];\n";
+        let src =
+            "OPENQASM 3.0;\nqubit[3] q;\nbit[3] c;\nh q[0];\nrz(0.5) q[1];\nrzz(1.2) q[0], q[2];\n";
         let circuit = parse(src).unwrap();
         assert_eq!(
             circuit.gates,
@@ -652,11 +687,15 @@ mod if_tests {
 
     #[test]
     fn parses_a_conditioned_gate() {
-        let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[1];\nmeasure q[0] -> c[0];\nif (c[0]==1) x q[1];\n";
+        let src =
+            "OPENQASM 2.0;\nqreg q[2];\ncreg c[1];\nmeasure q[0] -> c[0];\nif (c[0]==1) x q[1];\n";
         let circuit = parse(src).unwrap();
         assert_eq!(
             circuit.gates,
-            vec![Gate::Measure(0, 0), Gate::If(vec![(0, true)], Box::new(Gate::X(1)))]
+            vec![
+                Gate::Measure(0, 0),
+                Gate::If(vec![(0, true)], Box::new(Gate::X(1)))
+            ]
         );
     }
 
@@ -664,14 +703,20 @@ mod if_tests {
     fn parses_a_conditioned_gate_with_a_parameter() {
         let src = "OPENQASM 2.0;\nqreg q[2];\ncreg c[1];\nif (c[0]==0) rz(0.5) q[1];\n";
         let circuit = parse(src).unwrap();
-        assert_eq!(circuit.gates, vec![Gate::If(vec![(0, false)], Box::new(Gate::Rz(1, 0.5)))]);
+        assert_eq!(
+            circuit.gates,
+            vec![Gate::If(vec![(0, false)], Box::new(Gate::Rz(1, 0.5)))]
+        );
     }
 
     #[test]
     fn parses_a_conditioned_two_qubit_gate() {
         let src = "OPENQASM 2.0;\nqreg q[3];\ncreg c[1];\nif (c[0]==1) cx q[1], q[2];\n";
         let circuit = parse(src).unwrap();
-        assert_eq!(circuit.gates, vec![Gate::If(vec![(0, true)], Box::new(Gate::Cx(1, 2)))]);
+        assert_eq!(
+            circuit.gates,
+            vec![Gate::If(vec![(0, true)], Box::new(Gate::Cx(1, 2)))]
+        );
     }
 
     #[test]
@@ -714,6 +759,9 @@ mod if_tests {
     fn if_works_identically_under_qasm3_declarations() {
         let src = "OPENQASM 3.0;\nqubit[2] q;\nbit[1] c;\nif (c[0]==1) x q[1];\n";
         let circuit = parse(src).unwrap();
-        assert_eq!(circuit.gates, vec![Gate::If(vec![(0, true)], Box::new(Gate::X(1)))]);
+        assert_eq!(
+            circuit.gates,
+            vec![Gate::If(vec![(0, true)], Box::new(Gate::X(1)))]
+        );
     }
 }

@@ -29,11 +29,11 @@
 //!
 //! Run with: `cargo run --example layout_comparison`
 
+use sirraya_qutub::core::QuantumRegister;
 use sirraya_qutub_transpiler::coupling::CouplingMap;
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
 use sirraya_qutub_transpiler::route::{route, route_lookahead};
 use sirraya_qutub_transpiler::{decompose, emit, optimize};
-use sirraya_qutub::core::QuantumRegister;
 
 // --- The same three benchmark circuits as qiskit_benchmark.rs -------
 
@@ -134,7 +134,10 @@ fn all_to_all_circuit(num_qubits: usize) -> Circuit {
 }
 
 fn count_swaps(c: &Circuit) -> usize {
-    c.gates.iter().filter(|g| matches!(g, Gate::Swap(..))).count()
+    c.gates
+        .iter()
+        .filter(|g| matches!(g, Gate::Swap(..)))
+        .count()
 }
 
 fn depth(c: &Circuit) -> usize {
@@ -159,12 +162,22 @@ fn main() {
         ("ghz_10", ghz(10)),
         ("ansatz_6q_3layer", hardware_efficient_ansatz(6, 3)),
         ("layered_random_8q_4round", layered_random(8, 4)),
-        ("all_to_all_8q (routing_demo's stress case)", all_to_all_circuit(8)),
+        (
+            "all_to_all_8q (routing_demo's stress case)",
+            all_to_all_circuit(8),
+        ),
     ];
 
     println!(
         "{:<44}  {:>10}  {:>7}  {:>10}  {:>7}  {:>8}  {:>10}  {:>10}",
-        "benchmark", "route()sw", "depth", "lookahead", "depth", "swap cut", "fid(route)", "fid(look)"
+        "benchmark",
+        "route()sw",
+        "depth",
+        "lookahead",
+        "depth",
+        "swap cut",
+        "fid(route)",
+        "fid(look)"
     );
 
     for (name, circuit) in &benchmarks {

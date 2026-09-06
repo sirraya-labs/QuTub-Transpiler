@@ -57,7 +57,10 @@ fn merge_pass(gates: &[NativeGate]) -> Vec<NativeGate> {
         // `If`'s `Box` field can't be), so this clones explicitly
         // rather than leaning on an implicit copy the way this loop
         // used to (`for &g in gates`).
-        let merged = out.last().cloned().and_then(|last| try_merge(last, g.clone()));
+        let merged = out
+            .last()
+            .cloned()
+            .and_then(|last| try_merge(last, g.clone()));
         match merged {
             Some(combined) => {
                 out.pop();
@@ -148,7 +151,11 @@ mod tests {
         nc.push(NativeGate::Rz(1, 0.1));
         nc.push(NativeGate::Rz(0, 0.4));
         let opt = optimize(&nc);
-        assert_eq!(opt.gates.len(), 3, "gates on q0 aren't adjacent, shouldn't merge");
+        assert_eq!(
+            opt.gates.len(),
+            3,
+            "gates on q0 aren't adjacent, shouldn't merge"
+        );
     }
 
     #[test]
@@ -163,9 +170,18 @@ mod tests {
     #[test]
     fn keeps_a_conditioned_nonzero_rotation() {
         let mut nc = NativeCircuit::new(1);
-        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.5))));
+        nc.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rz(0, 0.5)),
+        ));
         let opt = optimize(&nc);
-        assert_eq!(opt.gates, vec![NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.5)))]);
+        assert_eq!(
+            opt.gates,
+            vec![NativeGate::If(
+                vec![(0, true)],
+                Box::new(NativeGate::Rz(0, 0.5))
+            )]
+        );
     }
 
     #[test]
@@ -173,7 +189,10 @@ mod tests {
         // If(clbit, value, Rz(q, ~0)) is a no-op no matter what clbit
         // holds -- same as an unconditioned zero-angle Rz.
         let mut nc = NativeCircuit::new(1);
-        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.0))));
+        nc.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rz(0, 0.0)),
+        ));
         let opt = optimize(&nc);
         assert!(opt.gates.is_empty());
     }
@@ -187,10 +206,20 @@ mod tests {
         // currently check -- see this module's doc comment for the
         // scope this pass covers.)
         let mut nc = NativeCircuit::new(1);
-        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.2))));
-        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.3))));
+        nc.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rz(0, 0.2)),
+        ));
+        nc.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rz(0, 0.3)),
+        ));
         let opt = optimize(&nc);
-        assert_eq!(opt.gates.len(), 2, "conditioned rotations should not be fused by this pass");
+        assert_eq!(
+            opt.gates.len(),
+            2,
+            "conditioned rotations should not be fused by this pass"
+        );
     }
 
     #[test]

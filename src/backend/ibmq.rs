@@ -1,8 +1,8 @@
 //! IBM-superconducting-style [`BackendSpec`]: native gate set
 //! `{Rz, Rx, Cx}` (virtual-Z framing + a native two-qubit `CNOT`).
 
-use crate::backend::{BackendCircuit, BackendGate, EPS};
 use crate::backend::spec::{BackendSpec, RotAxis};
+use crate::backend::{BackendCircuit, BackendGate, EPS};
 use crate::coupling::CouplingMap;
 use crate::fidelity::PublishedCalibration;
 

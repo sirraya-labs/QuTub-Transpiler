@@ -139,7 +139,12 @@ use sirraya_qutub_transpiler::{decompose, emit, ir_optimize};
 use std::time::{Duration, Instant};
 
 /// Every backend currently supported by the crate.
-const BACKENDS: [Backend; 4] = [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti, Backend::Google];
+const BACKENDS: [Backend; 4] = [
+    Backend::TrappedIon,
+    Backend::IbmQ,
+    Backend::Rigetti,
+    Backend::Google,
+];
 
 fn calibration_for(backend: Backend) -> PublishedCalibration {
     // `Backend` is a `Copy`/`PartialEq` handle onto a `&'static dyn
@@ -155,7 +160,10 @@ fn calibration_for(backend: Backend) -> PublishedCalibration {
     } else if backend == Backend::Google {
         PublishedCalibration::google_willow_2024()
     } else {
-        panic!("no published calibration registered for backend {:?}", backend);
+        panic!(
+            "no published calibration registered for backend {:?}",
+            backend
+        );
     }
 }
 
@@ -259,16 +267,44 @@ struct LogisticsInstance {
 /// of the numbers this file couldn't find a published figure for.
 fn kashmir_apple_instance() -> LogisticsInstance {
     let centers = vec![
-        Center { name: "Sopore (Baramulla)", quantity_tonnes: 148_240.5 }, // 494,135 t x 0.30
-        Center { name: "Shopian", quantity_tonnes: 79_103.1 },             // 263,677 t x 0.30
-        Center { name: "Pulwama", quantity_tonnes: 63_504.0 },             // ~211,680 t x 0.30 (derived)
-        Center { name: "Anantnag", quantity_tonnes: 78_589.2 },            // 261,964 t x 0.30
+        Center {
+            name: "Sopore (Baramulla)",
+            quantity_tonnes: 148_240.5,
+        }, // 494,135 t x 0.30
+        Center {
+            name: "Shopian",
+            quantity_tonnes: 79_103.1,
+        }, // 263,677 t x 0.30
+        Center {
+            name: "Pulwama",
+            quantity_tonnes: 63_504.0,
+        }, // ~211,680 t x 0.30 (derived)
+        Center {
+            name: "Anantnag",
+            quantity_tonnes: 78_589.2,
+        }, // 261,964 t x 0.30
     ];
     let facilities = vec![
-        Facility { name: "Lassipora CA Estate (Pulwama)", capacity_tonnes: 200_000.0, distress_discount_per_tonne: None },
-        Facility { name: "Aglar CA Estate (Shopian)", capacity_tonnes: 45_000.0, distress_discount_per_tonne: None },
-        Facility { name: "Anantnag CA Store", capacity_tonnes: 12_000.0, distress_discount_per_tonne: None },
-        Facility { name: "No CA storage (fresh/distress sale)", capacity_tonnes: 1.0e7, distress_discount_per_tonne: Some(400.0) },
+        Facility {
+            name: "Lassipora CA Estate (Pulwama)",
+            capacity_tonnes: 200_000.0,
+            distress_discount_per_tonne: None,
+        },
+        Facility {
+            name: "Aglar CA Estate (Shopian)",
+            capacity_tonnes: 45_000.0,
+            distress_discount_per_tonne: None,
+        },
+        Facility {
+            name: "Anantnag CA Store",
+            capacity_tonnes: 12_000.0,
+            distress_discount_per_tonne: None,
+        },
+        Facility {
+            name: "No CA storage (fresh/distress sale)",
+            capacity_tonnes: 1.0e7,
+            distress_discount_per_tonne: Some(400.0),
+        },
     ];
     // distance_km[center][facility] -- placeholder approximate road
     // distances (not GPS-routed); the last column (virtual facility)
@@ -279,7 +315,11 @@ fn kashmir_apple_instance() -> LogisticsInstance {
         vec![8.0, 20.0, 30.0, 0.0],  // Pulwama
         vec![30.0, 35.0, 5.0, 0.0],  // Anantnag
     ];
-    LogisticsInstance { centers, facilities, distance_km }
+    LogisticsInstance {
+        centers,
+        facilities,
+        distance_km,
+    }
 }
 
 /// Converts each center/facility pair into a per-assignment cost. For a
@@ -291,7 +331,12 @@ fn kashmir_apple_instance() -> LogisticsInstance {
 /// Every term here is linear in `x_{i,j}`, which is why
 /// [`Qubo::from_assignment`]'s cost contribution is a pure `linear[]`
 /// term with no quadratic part.
-fn assignment_cost(instance: &LogisticsInstance, cost_per_tonne_km: f64, spoilage_per_tonne_hour: f64, avg_speed_kmph: f64) -> Vec<Vec<f64>> {
+fn assignment_cost(
+    instance: &LogisticsInstance,
+    cost_per_tonne_km: f64,
+    spoilage_per_tonne_hour: f64,
+    avg_speed_kmph: f64,
+) -> Vec<Vec<f64>> {
     instance
         .centers
         .iter()
@@ -383,7 +428,12 @@ impl Qubo {
     /// most of which fold directly into `linear`/`quadratic` -- any
     /// that can't (degree 3+) go in `higher_order_penalties` instead;
     /// see that field's doc comment for why.
-    fn from_assignment(instance: &LogisticsInstance, cost: &[Vec<f64>], one_hot_penalty: f64, capacity_clause_penalty: f64) -> Self {
+    fn from_assignment(
+        instance: &LogisticsInstance,
+        cost: &[Vec<f64>],
+        one_hot_penalty: f64,
+        capacity_clause_penalty: f64,
+    ) -> Self {
         let nc = instance.centers.len();
         let nf = instance.facilities.len();
         let n = nc * nf;
@@ -408,7 +458,14 @@ impl Qubo {
             let members: Vec<usize> = (0..nf).map(|j| Self::idx(nf, i, j)).collect();
             let weights = vec![1.0; nf];
             let target = 1.0;
-            add_weighted_cardinality_penalty(&mut linear, &mut quadratic, &members, &weights, target, one_hot_penalty);
+            add_weighted_cardinality_penalty(
+                &mut linear,
+                &mut quadratic,
+                &members,
+                &weights,
+                target,
+                one_hot_penalty,
+            );
             constant += one_hot_penalty * target * target;
         }
 
@@ -438,7 +495,13 @@ impl Qubo {
             }
         }
 
-        Qubo { n, linear, quadratic, higher_order_penalties, constant }
+        Qubo {
+            n,
+            linear,
+            quadratic,
+            higher_order_penalties,
+            constant,
+        }
     }
 
     /// Exact classical evaluation of the QUBO cost for one bitstring,
@@ -479,7 +542,11 @@ impl Qubo {
                 if j == i {
                     continue;
                 }
-                let q_ij = if i < j { self.quadratic[i][j] } else { self.quadratic[j][i] };
+                let q_ij = if i < j {
+                    self.quadratic[i][j]
+                } else {
+                    self.quadratic[j][i]
+                };
                 coupling_sum += q_ij;
             }
             h[i] = -self.linear[i] / 2.0 - coupling_sum / 4.0;
@@ -523,7 +590,14 @@ impl Qubo {
 /// their own constant themselves; see `Qubo::constant`'s doc comment
 /// for why that matters here. All-`1.0` weights with `target = 1`
 /// recovers the exact unweighted exactly-one-facility constraint.
-fn add_weighted_cardinality_penalty(linear: &mut [f64], quadratic: &mut [Vec<f64>], members: &[usize], weights: &[f64], target: f64, penalty: f64) {
+fn add_weighted_cardinality_penalty(
+    linear: &mut [f64],
+    quadratic: &mut [Vec<f64>],
+    members: &[usize],
+    weights: &[f64],
+    target: f64,
+    penalty: f64,
+) {
     for (idx, &i) in members.iter().enumerate() {
         let w = weights[idx];
         linear[i] += penalty * (w * w - 2.0 * target * w);
@@ -547,14 +621,21 @@ fn add_weighted_cardinality_penalty(linear: &mut [f64], quadratic: &mut [Vec<f64
 fn minimal_violating_subsets(instance: &LogisticsInstance, facility: usize) -> Vec<Vec<usize>> {
     let nc = instance.centers.len();
     let capacity = instance.facilities[facility].capacity_tonnes;
-    let load_of = |mask: u32| -> f64 { (0..nc).filter(|i| (mask >> i) & 1 == 1).map(|i| instance.centers[i].quantity_tonnes).sum() };
+    let load_of = |mask: u32| -> f64 {
+        (0..nc)
+            .filter(|i| (mask >> i) & 1 == 1)
+            .map(|i| instance.centers[i].quantity_tonnes)
+            .sum()
+    };
 
     let mut minimal = Vec::new();
     for mask in 1u32..(1u32 << nc) {
         if load_of(mask) <= capacity + 1e-9 {
             continue;
         }
-        let is_minimal = (1u32..mask).filter(|&sub| sub & mask == sub).all(|sub| load_of(sub) <= capacity + 1e-9);
+        let is_minimal = (1u32..mask)
+            .filter(|&sub| sub & mask == sub)
+            .all(|sub| load_of(sub) <= capacity + 1e-9);
         if is_minimal {
             minimal.push((0..nc).filter(|i| (mask >> i) & 1 == 1).collect());
         }
@@ -576,7 +657,10 @@ fn is_feasible(bits: &[u8], instance: &LogisticsInstance) -> bool {
         }
     }
     for j in 0..nf {
-        let load: f64 = (0..nc).filter(|&i| bits[Qubo::idx(nf, i, j)] == 1).map(|i| instance.centers[i].quantity_tonnes).sum();
+        let load: f64 = (0..nc)
+            .filter(|&i| bits[Qubo::idx(nf, i, j)] == 1)
+            .map(|i| instance.centers[i].quantity_tonnes)
+            .sum();
         if load > instance.facilities[j].capacity_tonnes + 1e-9 {
             return false;
         }
@@ -591,7 +675,10 @@ fn format_assignment(bits: &[u8], instance: &LogisticsInstance) -> String {
         .iter()
         .enumerate()
         .map(|(i, center)| {
-            let assigned: Vec<&str> = (0..nf).filter(|&j| bits[Qubo::idx(nf, i, j)] == 1).map(|j| instance.facilities[j].name).collect();
+            let assigned: Vec<&str> = (0..nf)
+                .filter(|&j| bits[Qubo::idx(nf, i, j)] == 1)
+                .map(|j| instance.facilities[j].name)
+                .collect();
             let label = match assigned.len() {
                 0 => "UNASSIGNED".to_string(),
                 1 => assigned[0].to_string(),
@@ -631,15 +718,26 @@ fn format_assignment(bits: &[u8], instance: &LogisticsInstance) -> String {
 /// `top_bitstrings`, `brute_force_optimal` -- goes through `qubo.cost()`
 /// directly, using the original unscaled penalty terms, so reported
 /// costs stay in real currency units regardless of this rescaling.
-fn normalize_ising(h: &[f64], j_terms: &[(usize, usize, f64)]) -> (Vec<f64>, Vec<(usize, usize, f64)>) {
-    let norm: f64 = h.iter().map(|x| x.abs()).sum::<f64>() + j_terms.iter().map(|&(_, _, c)| c.abs()).sum::<f64>();
+fn normalize_ising(
+    h: &[f64],
+    j_terms: &[(usize, usize, f64)],
+) -> (Vec<f64>, Vec<(usize, usize, f64)>) {
+    let norm: f64 = h.iter().map(|x| x.abs()).sum::<f64>()
+        + j_terms.iter().map(|&(_, _, c)| c.abs()).sum::<f64>();
     let norm = norm.max(1e-12);
     let h_scaled: Vec<f64> = h.iter().map(|x| x / norm).collect();
-    let j_scaled: Vec<(usize, usize, f64)> = j_terms.iter().map(|&(a, b, c)| (a, b, c / norm)).collect();
+    let j_scaled: Vec<(usize, usize, f64)> =
+        j_terms.iter().map(|&(a, b, c)| (a, b, c / norm)).collect();
     (h_scaled, j_scaled)
 }
 
-fn qaoa_circuit(n: usize, h: &[f64], j_terms: &[(usize, usize, f64)], gammas: &[f64], betas: &[f64]) -> Circuit {
+fn qaoa_circuit(
+    n: usize,
+    h: &[f64],
+    j_terms: &[(usize, usize, f64)],
+    gammas: &[f64],
+    betas: &[f64],
+) -> Circuit {
     let mut c = Circuit::new(n);
     for q in 0..n {
         c.push(Gate::H(q));
@@ -680,7 +778,17 @@ fn expected_cost(register: &QuantumRegister, qubo: &Qubo) -> f64 {
     total
 }
 
-fn eval_layer(n: usize, h: &[f64], j_terms: &[(usize, usize, f64)], qubo: &Qubo, gammas: &mut [f64], betas: &mut [f64], layer: usize, gamma: f64, beta: f64) -> f64 {
+fn eval_layer(
+    n: usize,
+    h: &[f64],
+    j_terms: &[(usize, usize, f64)],
+    qubo: &Qubo,
+    gammas: &mut [f64],
+    betas: &mut [f64],
+    layer: usize,
+    gamma: f64,
+    beta: f64,
+) -> f64 {
     let (saved_g, saved_b) = (gammas[layer], betas[layer]);
     gammas[layer] = gamma;
     betas[layer] = beta;
@@ -692,14 +800,30 @@ fn eval_layer(n: usize, h: &[f64], j_terms: &[(usize, usize, f64)], qubo: &Qubo,
     cost
 }
 
-fn optimize_one_layer(n: usize, h: &[f64], j_terms: &[(usize, usize, f64)], qubo: &Qubo, gammas: &mut [f64], betas: &mut [f64], layer: usize, grid_points: usize, evaluations: &mut usize) {
+fn optimize_one_layer(
+    n: usize,
+    h: &[f64],
+    j_terms: &[(usize, usize, f64)],
+    qubo: &Qubo,
+    gammas: &mut [f64],
+    betas: &mut [f64],
+    layer: usize,
+    grid_points: usize,
+    evaluations: &mut usize,
+) {
     let two_pi = 2.0 * std::f64::consts::PI;
     let pi = std::f64::consts::PI;
 
     let mut best = (gammas[layer], betas[layer]);
     let mut best_cost = f64::INFINITY;
 
-    let mut scan = |g_lo: f64, g_hi: f64, b_lo: f64, b_hi: f64, steps: usize, best: &mut (f64, f64), best_cost: &mut f64| {
+    let mut scan = |g_lo: f64,
+                    g_hi: f64,
+                    b_lo: f64,
+                    b_hi: f64,
+                    steps: usize,
+                    best: &mut (f64, f64),
+                    best_cost: &mut f64| {
         for gi in 0..=steps {
             let gamma = g_lo + (g_hi - g_lo) * gi as f64 / steps as f64;
             for bi in 0..=steps {
@@ -717,7 +841,15 @@ fn optimize_one_layer(n: usize, h: &[f64], j_terms: &[(usize, usize, f64)], qubo
     scan(0.0, two_pi, 0.0, pi, grid_points, &mut best, &mut best_cost);
     for window in [0.5, 0.15] {
         let (g, b) = best;
-        scan(g - window, g + window, (b - window / 2.0).max(0.0), (b + window / 2.0).min(pi), grid_points, &mut best, &mut best_cost);
+        scan(
+            g - window,
+            g + window,
+            (b - window / 2.0).max(0.0),
+            (b + window / 2.0).min(pi),
+            grid_points,
+            &mut best,
+            &mut best_cost,
+        );
     }
 
     // `Rz(2*gamma*h)` is 2*pi-periodic in gamma, so a refinement window
@@ -752,17 +884,32 @@ fn optimize_qaoa_angles(
 
     let start_time = Instant::now();
     for _ in 0..num_starts {
-        let mut gammas: Vec<f64> = (0..p_layers).map(|_| rng.next_f64() * 2.0 * std::f64::consts::PI).collect();
-        let mut betas: Vec<f64> = (0..p_layers).map(|_| rng.next_f64() * std::f64::consts::PI).collect();
+        let mut gammas: Vec<f64> = (0..p_layers)
+            .map(|_| rng.next_f64() * 2.0 * std::f64::consts::PI)
+            .collect();
+        let mut betas: Vec<f64> = (0..p_layers)
+            .map(|_| rng.next_f64() * std::f64::consts::PI)
+            .collect();
 
         for _sweep in 0..2 {
             for layer in 0..p_layers {
-                optimize_one_layer(n, h, j_terms, qubo, &mut gammas, &mut betas, layer, grid_points, &mut evaluations);
+                optimize_one_layer(
+                    n,
+                    h,
+                    j_terms,
+                    qubo,
+                    &mut gammas,
+                    &mut betas,
+                    layer,
+                    grid_points,
+                    &mut evaluations,
+                );
             }
         }
 
         let final_circuit = qaoa_circuit(n, h, j_terms, &gammas, &betas);
-        let final_register = simulate_ideal(&final_circuit).expect("ideal simulation should not fail");
+        let final_register =
+            simulate_ideal(&final_circuit).expect("ideal simulation should not fail");
         let final_cost = expected_cost(&final_register, qubo);
         evaluations += 1;
         if final_cost < best_cost {
@@ -776,7 +923,11 @@ fn optimize_qaoa_angles(
     (best_gammas, best_betas, best_cost, elapsed, evaluations)
 }
 
-fn top_bitstrings(register: &QuantumRegister, qubo: &Qubo, top_n: usize) -> Vec<(Vec<u8>, f64, f64)> {
+fn top_bitstrings(
+    register: &QuantumRegister,
+    qubo: &Qubo,
+    top_n: usize,
+) -> Vec<(Vec<u8>, f64, f64)> {
     let amplitudes: &[Complex] = register.get_state_vector();
     let mut ranked: Vec<(Vec<u8>, f64, f64)> = amplitudes
         .iter()
@@ -794,7 +945,11 @@ fn top_bitstrings(register: &QuantumRegister, qubo: &Qubo, top_n: usize) -> Vec<
 }
 
 fn sample_shots(register: &QuantumRegister, shots: usize, rng: &mut Xorshift64) -> Vec<usize> {
-    let probs: Vec<f64> = register.get_state_vector().iter().map(|a| a.magnitude_squared()).collect();
+    let probs: Vec<f64> = register
+        .get_state_vector()
+        .iter()
+        .map(|a| a.magnitude_squared())
+        .collect();
     let mut samples = Vec::with_capacity(shots);
     for _ in 0..shots {
         let mut r = rng.next_f64();
@@ -863,13 +1018,29 @@ struct NoisyBackendExecutor {
 }
 
 impl NoisyBackendExecutor {
-    fn new(backend: Backend, n: usize, estimated_fidelity: f64, noise_scale: f64, seed: u64) -> Self {
-        NoisyBackendExecutor { backend, n, estimated_fidelity, noise_scale, rng: Xorshift64::new(seed) }
+    fn new(
+        backend: Backend,
+        n: usize,
+        estimated_fidelity: f64,
+        noise_scale: f64,
+        seed: u64,
+    ) -> Self {
+        NoisyBackendExecutor {
+            backend,
+            n,
+            estimated_fidelity,
+            noise_scale,
+            rng: Xorshift64::new(seed),
+        }
     }
 
     fn gate_error_rate(&self, total_gates: usize) -> f64 {
         let total_gates = (total_gates.max(1)) as f64;
-        let base_rate = 1.0 - self.estimated_fidelity.clamp(1e-9, 1.0).powf(1.0 / total_gates);
+        let base_rate = 1.0
+            - self
+                .estimated_fidelity
+                .clamp(1e-9, 1.0)
+                .powf(1.0 / total_gates);
         (base_rate * self.noise_scale).clamp(0.0, 0.5)
     }
 }
@@ -891,7 +1062,10 @@ impl CircuitExecutor for NoisyBackendExecutor {
         simulate_ideal(&noisy)
     }
     fn label(&self) -> String {
-        format!("{:?}, NISQ noise model, {:.1}x calibration-implied error rate", self.backend, self.noise_scale)
+        format!(
+            "{:?}, NISQ noise model, {:.1}x calibration-implied error rate",
+            self.backend, self.noise_scale
+        )
     }
 }
 
@@ -922,7 +1096,12 @@ struct Args {
 
 fn parse_args() -> Args {
     let raw: Vec<String> = std::env::args().collect();
-    let mut args = Args { p_layers: 1, shots: 2000, noise_shots: 300, fast: false };
+    let mut args = Args {
+        p_layers: 1,
+        shots: 2000,
+        noise_shots: 300,
+        fast: false,
+    };
     let mut i = 1;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -956,9 +1135,17 @@ fn main() {
     let n = nc * nf;
 
     println!("{}", "=".repeat(78));
-    println!("QAOA agricultural logistics pilot -- {} collection centers, {} options each ({} qubits)", nc, nf, n);
+    println!(
+        "QAOA agricultural logistics pilot -- {} collection centers, {} options each ({} qubits)",
+        nc, nf, n
+    );
     println!("Kashmir apple CA-storage allocation -- district tonnages & CA capacities are real, cited figures");
-    println!("p = {} layer(s), {} shots{}", args.p_layers, args.shots, if args.fast { ", fast mode" } else { "" });
+    println!(
+        "p = {} layer(s), {} shots{}",
+        args.p_layers,
+        args.shots,
+        if args.fast { ", fast mode" } else { "" }
+    );
     println!("{}", "=".repeat(78));
     println!(
         "NOTE: center/facility names, CA capacities, and the 30% CA-eligibility\n\
@@ -977,7 +1164,12 @@ fn main() {
     let cost_per_tonne_km = 3.5; // placeholder, currency/tonne-km
     let spoilage_per_tonne_hour = 15.0; // placeholder, currency/tonne-hour
     let avg_speed_kmph = 30.0;
-    let cost = assignment_cost(&instance, cost_per_tonne_km, spoilage_per_tonne_hour, avg_speed_kmph);
+    let cost = assignment_cost(
+        &instance,
+        cost_per_tonne_km,
+        spoilage_per_tonne_hour,
+        avg_speed_kmph,
+    );
 
     // `one_hot_penalty` just needs to dominate the cost swing between
     // options for one center (tens of millions here) -- its effective
@@ -999,7 +1191,11 @@ fn main() {
 
     let (classical_bits, classical_cost) = qubo.brute_force_optimal();
     let classical_feasible = is_feasible(&classical_bits, &instance);
-    println!("Classical exact optimum (brute force over 2^{} = {} assignments):", n, 1u64 << n);
+    println!(
+        "Classical exact optimum (brute force over 2^{} = {} assignments):",
+        n,
+        1u64 << n
+    );
     println!(
         "  {}  (total cost {:.2}, feasible: {})",
         format_assignment(&classical_bits, &instance),
@@ -1021,11 +1217,19 @@ fn main() {
     // How narrow a target this instance's constraints actually are --
     // used below to explain (rather than just assert away) shallow
     // QAOA's odds of landing on one by chance.
-    let feasible_state_count = (0..(1u32 << n)).filter(|&mask| is_feasible(&(0..n).map(|i| ((mask >> i) & 1) as u8).collect::<Vec<u8>>(), &instance)).count();
+    let feasible_state_count = (0..(1u32 << n))
+        .filter(|&mask| {
+            is_feasible(
+                &(0..n).map(|i| ((mask >> i) & 1) as u8).collect::<Vec<u8>>(),
+                &instance,
+            )
+        })
+        .count();
 
     // --- 2. Classically optimize the QAOA angles against the ideal simulator. ---
     println!("\nOptimizing QAOA angles against the ideal simulator...");
-    let (gammas, betas, expected, opt_time, evaluations) = optimize_qaoa_angles(n, &h_scaled, &j_scaled, &qubo, args.p_layers, args.fast);
+    let (gammas, betas, expected, opt_time, evaluations) =
+        optimize_qaoa_angles(n, &h_scaled, &j_scaled, &qubo, args.p_layers, args.fast);
     println!(
         "  {} circuit evaluations in {:.3}s ({:.2} ms/evaluation)",
         evaluations,
@@ -1043,7 +1247,11 @@ fn main() {
         "\nir_optimize::optimize: {} -> {} gates ({})",
         raw_circuit.gates.len(),
         optimized_circuit.gates.len(),
-        if raw_circuit.gates.len() == optimized_circuit.gates.len() { "no reduction on this circuit shape" } else { "reduced" }
+        if raw_circuit.gates.len() == optimized_circuit.gates.len() {
+            "no reduction on this circuit shape"
+        } else {
+            "reduced"
+        }
     );
 
     let ideal_register = simulate_ideal(&raw_circuit).expect("ideal simulation should not fail");
@@ -1069,7 +1277,10 @@ fn main() {
          [see Qubo::constant], this is a standard 0-1 ratio, not raw QUBO-internal units)",
         approx_ratio
     );
-    println!("Most likely single outcome matches classical exact optimum: {}", qaoa_matches_classical);
+    println!(
+        "Most likely single outcome matches classical exact optimum: {}",
+        qaoa_matches_classical
+    );
 
     // Post-selection: same reasoning as the portfolio example -- QAOA
     // optimizes E[H_cost], not P(argmin) directly, so take the top-k
@@ -1087,7 +1298,10 @@ fn main() {
     // than asserting `true`.
     let post_select_k = 64;
     let candidates = top_bitstrings(&ideal_register, &qubo, post_select_k);
-    let post_selected = candidates.iter().filter(|(bits, _, _)| is_feasible(bits, &instance)).min_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    let post_selected = candidates
+        .iter()
+        .filter(|(bits, _, _)| is_feasible(bits, &instance))
+        .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
     match post_selected {
         Some(selected) => {
             let overhead_pct = (selected.2 - classical_cost) / classical_cost * 100.0;
@@ -1111,7 +1325,11 @@ fn main() {
                  {} most likely outcomes -- a real limitation of an ansatz this shallow on a \
                  tightly-constrained instance, not a bug. Falling back to the classical exact \
                  optimum below.",
-                post_select_k, feasible_state_count, 1u64 << n, args.p_layers, post_select_k
+                post_select_k,
+                feasible_state_count,
+                1u64 << n,
+                args.p_layers,
+                post_select_k
             );
         }
     }
@@ -1120,15 +1338,22 @@ fn main() {
     // the "no feasible candidate" fallback -- reporting the classical
     // optimum instead, clearly labeled as such -- only needs writing
     // once.
-    let post_selected_matches = post_selected.map(|s| s.0 == classical_bits).unwrap_or(false);
-    let post_selected_bits: &[u8] = post_selected.map(|s| s.0.as_slice()).unwrap_or(&classical_bits);
+    let post_selected_matches = post_selected
+        .map(|s| s.0 == classical_bits)
+        .unwrap_or(false);
+    let post_selected_bits: &[u8] = post_selected
+        .map(|s| s.0.as_slice())
+        .unwrap_or(&classical_bits);
 
     // --- 3. Route + lower to every supported backend using this crate's
     //        real router, and estimate fidelity from published calibration. ---
     println!("\n{}", "=".repeat(78));
     println!("Backend comparison (real routing against each backend's actual coupling map)");
     println!("{}", "=".repeat(78));
-    println!("  {:<12} {:>10} {:>10} {:>10} {:>16}", "Backend", "SWAPs", "1q gates", "2q gates", "Est. fidelity");
+    println!(
+        "  {:<12} {:>10} {:>10} {:>10} {:>16}",
+        "Backend", "SWAPs", "1q gates", "2q gates", "Est. fidelity"
+    );
     println!("  {}", "-".repeat(64));
 
     let mut best_backend = BACKENDS[0];
@@ -1137,7 +1362,11 @@ fn main() {
 
     for &backend in BACKENDS.iter() {
         let swap_count = match backend.coupling_map(n) {
-            Some(coupling) => route_best(&raw_circuit, &coupling).gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count(),
+            Some(coupling) => route_best(&raw_circuit, &coupling)
+                .gates
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(_, _)))
+                .count(),
             None => 0,
         };
         let lowered = lower(&raw_circuit, backend);
@@ -1145,7 +1374,14 @@ fn main() {
         let cal = calibration_for(backend);
         let est_fidelity = estimate_backend_circuit_fidelity(&lowered, &cal);
 
-        println!("  {:<12} {:>10} {:>10} {:>10} {:>15.2}%", format!("{:?}", backend), swap_count, single, two, est_fidelity * 100.0);
+        println!(
+            "  {:<12} {:>10} {:>10} {:>10} {:>15.2}%",
+            format!("{:?}", backend),
+            swap_count,
+            single,
+            two,
+            est_fidelity * 100.0
+        );
         if est_fidelity > best_fidelity {
             best_fidelity = est_fidelity;
             best_backend = backend;
@@ -1153,14 +1389,27 @@ fn main() {
         lowered_by_backend.push((backend, lowered, est_fidelity));
     }
 
-    println!("\nRecommended backend: {:?} (estimated fidelity {:.2}%)", best_backend, best_fidelity * 100.0);
+    println!(
+        "\nRecommended backend: {:?} (estimated fidelity {:.2}%)",
+        best_backend,
+        best_fidelity * 100.0
+    );
 
     // --- 4. Execute on the recommended backend and sanity-check against
     //        the ideal simulation, then take a finite number of shots. ---
-    let (_, winning_circuit, _) = lowered_by_backend.into_iter().find(|(b, _, _)| *b == best_backend).expect("best_backend was picked from BACKENDS above");
-    let backend_register = emit::run_backend(&winning_circuit).expect("backend simulation should not fail");
-    let fidelity_vs_ideal = backend_register.fidelity(&ideal_register).expect("both registers have the same qubit count");
-    println!("\nExecuted on {:?}; state fidelity vs. the ideal (unlowered) circuit: {:.6}", best_backend, fidelity_vs_ideal);
+    let (_, winning_circuit, _) = lowered_by_backend
+        .into_iter()
+        .find(|(b, _, _)| *b == best_backend)
+        .expect("best_backend was picked from BACKENDS above");
+    let backend_register =
+        emit::run_backend(&winning_circuit).expect("backend simulation should not fail");
+    let fidelity_vs_ideal = backend_register
+        .fidelity(&ideal_register)
+        .expect("both registers have the same qubit count");
+    println!(
+        "\nExecuted on {:?}; state fidelity vs. the ideal (unlowered) circuit: {:.6}",
+        best_backend, fidelity_vs_ideal
+    );
     println!(
         "(Expected ~1.0 here: no noise model is applied in this simulation run, so backend \
          lowering + routing should be action-preserving. The {:.2}% figure above is a \
@@ -1208,12 +1457,15 @@ fn main() {
     let mut scale_stderr_costs = Vec::with_capacity(zne_scales.len());
     let mut scale_mean_fidelities = Vec::with_capacity(zne_scales.len());
     for (i, &scale) in zne_scales.iter().enumerate() {
-        let mut executor = NoisyBackendExecutor::new(best_backend, n, best_fidelity, scale, 0xC0FFEE + i as u64);
+        let mut executor =
+            NoisyBackendExecutor::new(best_backend, n, best_fidelity, scale, 0xC0FFEE + i as u64);
         let mut cost_sum = 0.0;
         let mut cost_sq_sum = 0.0;
         let mut fidelity_sum = 0.0;
         for _ in 0..args.noise_shots {
-            let noisy_register = executor.run(&raw_circuit).expect("noisy simulation should not fail");
+            let noisy_register = executor
+                .run(&raw_circuit)
+                .expect("noisy simulation should not fail");
             let c = expected_cost(&noisy_register, &qubo);
             cost_sum += c;
             cost_sq_sum += c * c;
@@ -1233,10 +1485,19 @@ fn main() {
 
     println!("\n  {:<32} {:>14}", "", "value");
     println!("  {}", "-".repeat(48));
-    println!("  raw noisy mean cost (1x noise)      {:>14.5}  (stderr {:.5})", scale_mean_costs[0], scale_stderr_costs[0]);
-    println!("  ZNE-mitigated mean cost             {:>14.5}", mitigated_cost);
+    println!(
+        "  raw noisy mean cost (1x noise)      {:>14.5}  (stderr {:.5})",
+        scale_mean_costs[0], scale_stderr_costs[0]
+    );
+    println!(
+        "  ZNE-mitigated mean cost             {:>14.5}",
+        mitigated_cost
+    );
     println!("  ideal E[H_cost] (from above)         {:>14.5}", expected);
-    println!("  mean trajectory fidelity (1x noise)  {:>13.2}%", scale_mean_fidelities[0] * 100.0);
+    println!(
+        "  mean trajectory fidelity (1x noise)  {:>13.2}%",
+        scale_mean_fidelities[0] * 100.0
+    );
     println!(
         "\n(mitigated = linear fit through mean cost at {:.0}x/{:.0}x/{:.0}x the calibration- \
          implied error rate, extrapolated back to zero -- it should land closer to ideal \
@@ -1255,7 +1516,10 @@ fn main() {
              resting on enough perturbed trajectories to trust over the raw one. Re-run with a \
              larger --noise-shots (several thousand) before drawing any conclusion from \
              whether mitigated beat raw here.",
-            scale_stderr_costs[0], raw_gap, format!("{:?}", best_backend), args.noise_shots
+            scale_stderr_costs[0],
+            raw_gap,
+            format!("{:?}", best_backend),
+            args.noise_shots
         );
     }
 
@@ -1266,11 +1530,22 @@ fn main() {
     println!(
         "  Recommended assignment (QAOA, post-selected):  {}{}",
         format_assignment(post_selected_bits, &instance),
-        if post_selected.is_none() { "  [no feasible QAOA candidate found -- this is the classical exact optimum]" } else { "" }
+        if post_selected.is_none() {
+            "  [no feasible QAOA candidate found -- this is the classical exact optimum]"
+        } else {
+            ""
+        }
     );
-    println!("  Classical exact optimum:                       {}", format_assignment(&classical_bits, &instance));
+    println!(
+        "  Classical exact optimum:                       {}",
+        format_assignment(&classical_bits, &instance)
+    );
     println!("  Match: {}", post_selected_matches);
-    println!("  Recommended backend: {:?} ({:.2}% estimated fidelity)", best_backend, best_fidelity * 100.0);
+    println!(
+        "  Recommended backend: {:?} ({:.2}% estimated fidelity)",
+        best_backend,
+        best_fidelity * 100.0
+    );
     println!("{}", "=".repeat(78));
     println!(
         "\nWhat's real here: district CA-storage-eligible tonnage (from reported apple \

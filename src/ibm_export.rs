@@ -355,14 +355,26 @@ mod tests {
 
     #[test]
     fn merge_adjacent_rz_does_not_cross_a_different_qubit() {
-        let instrs = vec![IbmInstr::Rz(0, 0.3), IbmInstr::Rz(1, 0.1), IbmInstr::Rz(0, 0.4)];
+        let instrs = vec![
+            IbmInstr::Rz(0, 0.3),
+            IbmInstr::Rz(1, 0.1),
+            IbmInstr::Rz(0, 0.4),
+        ];
         let merged = merge_adjacent_rz(instrs.clone());
-        assert_eq!(merged, instrs, "gates on q0 aren't adjacent, shouldn't merge");
+        assert_eq!(
+            merged, instrs,
+            "gates on q0 aren't adjacent, shouldn't merge"
+        );
     }
 
     #[test]
     fn validate_cx_native_basis_accepts_a_real_cx_native_basis() {
-        let basis = vec!["rz".to_string(), "sx".to_string(), "x".to_string(), "cx".to_string()];
+        let basis = vec![
+            "rz".to_string(),
+            "sx".to_string(),
+            "x".to_string(),
+            "cx".to_string(),
+        ];
         assert!(validate_cx_native_basis(&basis).is_ok());
     }
 
@@ -374,9 +386,18 @@ mod tests {
 
     #[test]
     fn validate_cx_native_basis_rejects_an_ecr_native_backend() {
-        let basis = vec!["rz".to_string(), "sx".to_string(), "x".to_string(), "ecr".to_string()];
+        let basis = vec![
+            "rz".to_string(),
+            "sx".to_string(),
+            "x".to_string(),
+            "ecr".to_string(),
+        ];
         let err = validate_cx_native_basis(&basis).unwrap_err();
-        assert!(err.contains("ecr"), "error should name ECR as the mismatch: {}", err);
+        assert!(
+            err.contains("ecr"),
+            "error should name ECR as the mismatch: {}",
+            err
+        );
     }
 
     #[test]
@@ -429,15 +450,25 @@ mod tests {
         let bc = crate::backend::lower(&circuit, Backend::IbmQ);
         let instrs = lower_ibm_native(&bc).expect("IbmQ circuit should export cleanly");
 
-        let cx_count = instrs.iter().filter(|i| matches!(i, IbmInstr::Cx(..))).count();
-        let measure_count = instrs.iter().filter(|i| matches!(i, IbmInstr::Measure(..))).count();
+        let cx_count = instrs
+            .iter()
+            .filter(|i| matches!(i, IbmInstr::Cx(..)))
+            .count();
+        let measure_count = instrs
+            .iter()
+            .filter(|i| matches!(i, IbmInstr::Measure(..)))
+            .count();
         assert_eq!(
             cx_count, 1,
             "a source Cx is already IbmQ's native two-qubit gate; push_native_cx should \
              lower it directly to 1 native Cx, not round-trip through Rzz: {:?}",
             instrs
         );
-        assert_eq!(measure_count, 2, "both qubits should be measured: {:?}", instrs);
+        assert_eq!(
+            measure_count, 2,
+            "both qubits should be measured: {:?}",
+            instrs
+        );
 
         let qasm = to_ibm_qasm(&bc, "bell_pair").unwrap();
         assert!(qasm.contains("cx q["));

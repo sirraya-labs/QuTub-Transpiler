@@ -26,13 +26,12 @@ use sirraya_qutub_transpiler::{decompose, lower, optimize, optimize_ir, Backend}
 /// causing snapshot failures.
 fn with_rounded_floats<T: std::fmt::Debug>(value: &T) -> String {
     let debug_str = format!("{:#?}", value);
-    
+
     // Round floating-point numbers to 12 decimal places
     // Matches patterns like: 1.5707963267948966 -> 1.570796326795
     let re = regex::Regex::new(r"(\d+\.\d{12})\d+").unwrap();
-    re.replace_all(&debug_str, |caps: &regex::Captures| {
-        caps[1].to_string()
-    }).to_string()
+    re.replace_all(&debug_str, |caps: &regex::Captures| caps[1].to_string())
+        .to_string()
 }
 
 fn bell() -> Circuit {
@@ -103,10 +102,7 @@ macro_rules! snapshot_pipeline {
             ] {
                 let lowered = lower(&ir_opt, backend);
                 let lowered_str = with_rounded_floats(&lowered);
-                insta::assert_snapshot!(
-                    format!("{}_{}", stringify!($name), label),
-                    lowered_str
-                );
+                insta::assert_snapshot!(format!("{}_{}", stringify!($name), label), lowered_str);
             }
         }
     };

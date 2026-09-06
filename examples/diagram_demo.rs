@@ -25,5 +25,9 @@ fn main() {
     let svg = Diagram::from_circuit(&c).to_svg();
     let out_path = "diagram.svg";
     std::fs::write(out_path, &svg).expect("failed to write SVG file");
-    println!("\n=== SVG (source) written to {} ({} bytes) ===", out_path, svg.len());
+    println!(
+        "\n=== SVG (source) written to {} ({} bytes) ===",
+        out_path,
+        svg.len()
+    );
 }
