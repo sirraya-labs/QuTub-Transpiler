@@ -8,7 +8,7 @@
     clippy::type_complexity,
     clippy::match_ref_pats,
     clippy::too_many_arguments,
-    clippy::explicit_counter_loop,
+    clippy::explicit_counter_loop
 )]
 
 //! sirraya-qutub-transpiler
