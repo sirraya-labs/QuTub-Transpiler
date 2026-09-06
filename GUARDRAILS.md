@@ -39,7 +39,7 @@ touched.
 ### Why fuzzing and provenance start advisory
 
 - **Fuzzing** needs a burn-in period before its false-positive rate is
-  known. A brand-new `cargo-fuzz` corpus finds real bugs *and* corner
+  known in project. A brand-new `cargo-fuzz` corpus finds real bugs *and* corner
   cases in the harness itself (e.g. a fuzzed circuit the harness
   shouldn't have generated in the first place). Blocking merges on that
   from day one punishes contributors for the harness's own bugs.
