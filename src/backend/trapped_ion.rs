@@ -2,8 +2,8 @@
 //! `{Rz, Ry, Rzz}`, identical to [`crate::native::decompose`]'s own
 //! canonical output -- see [`TrappedIonSpec::is_native_decompose_target`].
 
-use crate::backend::{BackendCircuit, BackendGate};
 use crate::backend::spec::{BackendSpec, RotAxis};
+use crate::backend::{BackendCircuit, BackendGate};
 use crate::coupling::CouplingMap;
 use crate::fidelity::PublishedCalibration;
 

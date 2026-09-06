@@ -1,0 +1,40 @@
+{
+  "backends": [
+    {
+      "gate_count_after": 111,
+      "output_hash": "bdb4d9b91b06bf9ababd14e6e45bd0dbfdca0342035b37908575405475c5fc9a",
+      "target": "TrappedIon"
+    },
+    {
+      "gate_count_after": 83,
+      "output_hash": "6e2d78d92fe448abbc18334d909af84654b7ad8c01f84d62e693fa934a34b78d",
+      "target": "IbmQ"
+    },
+    {
+      "gate_count_after": 79,
+      "output_hash": "012b28737841c929853434d302ba054063384a27e4928b7e53820ef6e5fe3120",
+      "target": "Rigetti"
+    }
+  ],
+  "circuit": "ansatz_6q_3layer",
+  "commit": "unknown",
+  "compiler": "sirraya-qutub-transpiler",
+  "compiler_version": "0.1.1",
+  "native_optimized": {
+    "depth": 41,
+    "gate_count": 126,
+    "hash": "8af6331db4bdfd5485f0278032d83f0a8a4e023c4bd88de4f6de57ac24ff8387"
+  },
+  "passes": [
+    "optimize_ir",
+    "decompose",
+    "optimize",
+    "lower"
+  ],
+  "source": {
+    "depth": 13,
+    "gate_count": 39,
+    "hash": "6447f34712f645e4b4cac2e2637df18d8d0de628c92736fcf68ea9a1117548be",
+    "num_qubits": 6
+  }
+}

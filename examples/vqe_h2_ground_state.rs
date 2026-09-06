@@ -78,7 +78,12 @@ use sirraya_qutub_transpiler::{decompose, emit, ir_optimize};
 use std::time::Instant;
 
 /// Every backend currently supported by the crate.
-const BACKENDS: [Backend; 4] = [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti, Backend::Google];
+const BACKENDS: [Backend; 4] = [
+    Backend::TrappedIon,
+    Backend::IbmQ,
+    Backend::Rigetti,
+    Backend::Google,
+];
 
 fn calibration_for(backend: Backend) -> PublishedCalibration {
     if backend == Backend::TrappedIon {
@@ -90,7 +95,10 @@ fn calibration_for(backend: Backend) -> PublishedCalibration {
     } else if backend == Backend::Google {
         PublishedCalibration::google_willow_2024()
     } else {
-        panic!("no published calibration registered for backend {:?}", backend);
+        panic!(
+            "no published calibration registered for backend {:?}",
+            backend
+        );
     }
 }
 
@@ -191,7 +199,10 @@ impl H2Hamiltonian {
 /// literature carries, and exactly why the exact-diagonalization
 /// ground truth above matters as a check, not just a reference number.
 fn vqe_ansatz(params: &[f64]) -> Circuit {
-    assert!(params.len() % 7 == 0, "7 params per layer: (Rz, Rx, Rz) per qubit + one Rzz angle");
+    assert!(
+        params.len() % 7 == 0,
+        "7 params per layer: (Rz, Rx, Rz) per qubit + one Rzz angle"
+    );
     let mut c = Circuit::new(2);
     for layer in params.chunks(7) {
         for q in 0..2 {
@@ -281,13 +292,17 @@ fn expected_energy(executor: &mut dyn CircuitExecutor, params: &[f64], h: &H2Ham
     let mut x_circuit = clone_circuit(2, &base);
     append_basis_rotation(&mut x_circuit, 0, 'X');
     append_basis_rotation(&mut x_circuit, 1, 'X');
-    let x_register = executor.run(&x_circuit).expect("x-basis run should not fail");
+    let x_register = executor
+        .run(&x_circuit)
+        .expect("x-basis run should not fail");
     let xx = product_expectation(&x_register);
 
     let mut y_circuit = clone_circuit(2, &base);
     append_basis_rotation(&mut y_circuit, 0, 'Y');
     append_basis_rotation(&mut y_circuit, 1, 'Y');
-    let y_register = executor.run(&y_circuit).expect("y-basis run should not fail");
+    let y_register = executor
+        .run(&y_circuit)
+        .expect("y-basis run should not fail");
     let yy = product_expectation(&y_register);
 
     h.g[0] + h.g[1] * z0 + h.g[2] * z1 + h.g[3] * zz + h.g[4] * yy + h.g[5] * xx
@@ -351,12 +366,21 @@ struct NoisyBackendExecutor {
 
 impl NoisyBackendExecutor {
     fn new(backend: Backend, estimated_fidelity: f64, noise_scale: f64, seed: u64) -> Self {
-        NoisyBackendExecutor { backend, estimated_fidelity, noise_scale, rng: Xorshift64::new(seed) }
+        NoisyBackendExecutor {
+            backend,
+            estimated_fidelity,
+            noise_scale,
+            rng: Xorshift64::new(seed),
+        }
     }
 
     fn gate_error_rate(&self, total_gates: usize) -> f64 {
         let total_gates = (total_gates.max(1)) as f64;
-        let base_rate = 1.0 - self.estimated_fidelity.clamp(1e-9, 1.0).powf(1.0 / total_gates);
+        let base_rate = 1.0
+            - self
+                .estimated_fidelity
+                .clamp(1e-9, 1.0)
+                .powf(1.0 / total_gates);
         (base_rate * self.noise_scale).clamp(0.0, 0.5)
     }
 }
@@ -434,7 +458,13 @@ fn zero_noise_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64]) -> (f
 //    joint grid search to be tractable.
 // ---------------------------------------------------------------------
 
-fn eval_param(executor: &mut dyn CircuitExecutor, h: &H2Hamiltonian, params: &mut [f64], idx: usize, value: f64) -> f64 {
+fn eval_param(
+    executor: &mut dyn CircuitExecutor,
+    h: &H2Hamiltonian,
+    params: &mut [f64],
+    idx: usize,
+    value: f64,
+) -> f64 {
     let saved = params[idx];
     params[idx] = value;
     let energy = expected_energy(executor, params, h);
@@ -442,7 +472,14 @@ fn eval_param(executor: &mut dyn CircuitExecutor, h: &H2Hamiltonian, params: &mu
     energy
 }
 
-fn optimize_one_param(executor: &mut dyn CircuitExecutor, h: &H2Hamiltonian, params: &mut [f64], idx: usize, grid_points: usize, evaluations: &mut usize) {
+fn optimize_one_param(
+    executor: &mut dyn CircuitExecutor,
+    h: &H2Hamiltonian,
+    params: &mut [f64],
+    idx: usize,
+    grid_points: usize,
+    evaluations: &mut usize,
+) {
     let two_pi = 2.0 * std::f64::consts::PI;
     let mut best_val = params[idx];
     let mut best_energy = eval_param(executor, h, params, idx, best_val);
@@ -467,9 +504,18 @@ fn optimize_one_param(executor: &mut dyn CircuitExecutor, h: &H2Hamiltonian, par
     params[idx] = best_val;
 }
 
-fn optimize_vqe(executor: &mut dyn CircuitExecutor, h: &H2Hamiltonian, num_params: usize, grid_points: usize, sweeps: usize, seed: u64) -> (Vec<f64>, f64, usize) {
+fn optimize_vqe(
+    executor: &mut dyn CircuitExecutor,
+    h: &H2Hamiltonian,
+    num_params: usize,
+    grid_points: usize,
+    sweeps: usize,
+    seed: u64,
+) -> (Vec<f64>, f64, usize) {
     let mut rng = Xorshift64::new(seed);
-    let mut params: Vec<f64> = (0..num_params).map(|_| rng.next_f64() * 2.0 * std::f64::consts::PI).collect();
+    let mut params: Vec<f64> = (0..num_params)
+        .map(|_| rng.next_f64() * 2.0 * std::f64::consts::PI)
+        .collect();
     let mut evaluations = 0usize;
     for _ in 0..sweeps {
         for idx in 0..num_params {
@@ -507,7 +553,12 @@ fn parse_args() -> Args {
     // mode: fine to run once ahead of a demo, a bit long to run live,
     // so it's worth pre-running and having the output ready rather
     // than executing it on stage.
-    let mut args = Args { p_layers: 3, sweeps: 3, noise_shots: 50_000, fast: false };
+    let mut args = Args {
+        p_layers: 3,
+        sweeps: 3,
+        noise_shots: 50_000,
+        fast: false,
+    };
     let mut i = 1;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -540,8 +591,17 @@ fn main() {
     let chemical_accuracy = 0.0016; // Hartree, ~1 kcal/mol -- same threshold O'Malley et al. 2016 report VQE against.
 
     println!("{}", "=".repeat(78));
-    println!("VQE ground-state energy of H2, R = {} Angstrom", h.bond_length_angstrom);
-    println!("p = {} layer(s), {} params, {} sweep(s){}", args.p_layers, num_params, args.sweeps, if args.fast { ", fast mode" } else { "" });
+    println!(
+        "VQE ground-state energy of H2, R = {} Angstrom",
+        h.bond_length_angstrom
+    );
+    println!(
+        "p = {} layer(s), {} params, {} sweep(s){}",
+        args.p_layers,
+        num_params,
+        args.sweeps,
+        if args.fast { ", fast mode" } else { "" }
+    );
     println!("{}", "=".repeat(78));
     println!("NOTE: minimal (STO-3G-derived) basis, one fixed bond length -- see this file's module doc comment.\n");
 
@@ -550,7 +610,10 @@ fn main() {
     let exact_total = h.exact_ground_state_total_energy();
     println!("Exact ground state (closed-form diagonalization of this qubit Hamiltonian):");
     println!("  electronic energy:  {:>10.6} Hartree", exact_electronic);
-    println!("  + nuclear repulsion {:>10.6} Hartree", h.nuclear_repulsion);
+    println!(
+        "  + nuclear repulsion {:>10.6} Hartree",
+        h.nuclear_repulsion
+    );
     println!("  = total energy:     {:>10.6} Hartree", exact_total);
 
     // --- 2. Classically optimize the VQE ansatz against the ideal simulator. ---
@@ -559,7 +622,8 @@ fn main() {
     let grid_points = if args.fast { 8 } else { 16 };
     let sweeps = if args.fast { 2 } else { args.sweeps };
     let start = Instant::now();
-    let (params, vqe_electronic, evaluations) = optimize_vqe(&mut ideal_executor, &h, num_params, grid_points, sweeps, 42);
+    let (params, vqe_electronic, evaluations) =
+        optimize_vqe(&mut ideal_executor, &h, num_params, grid_points, sweeps, 42);
     let elapsed = start.elapsed();
     println!(
         "  {} parameter evaluations ({} circuit executions) in {:.3}s",
@@ -569,15 +633,28 @@ fn main() {
     );
     let vqe_total = vqe_electronic + h.nuclear_repulsion;
     let error = (vqe_electronic - exact_electronic).abs();
-    println!("  VQE electronic energy: {:.6} Hartree (exact: {:.6}, error {:.6} Hartree)", vqe_electronic, exact_electronic, error);
-    println!("  VQE total energy:      {:.6} Hartree (exact: {:.6})", vqe_total, exact_total);
-    println!("  Within chemical accuracy (< {:.4} Hartree)? {}", chemical_accuracy, error < chemical_accuracy);
+    println!(
+        "  VQE electronic energy: {:.6} Hartree (exact: {:.6}, error {:.6} Hartree)",
+        vqe_electronic, exact_electronic, error
+    );
+    println!(
+        "  VQE total energy:      {:.6} Hartree (exact: {:.6})",
+        vqe_total, exact_total
+    );
+    println!(
+        "  Within chemical accuracy (< {:.4} Hartree)? {}",
+        chemical_accuracy,
+        error < chemical_accuracy
+    );
 
     // --- 3. Route + lower to every supported backend, estimate fidelity. ---
     println!("\n{}", "=".repeat(78));
     println!("Backend comparison (real routing against each backend's actual coupling map)");
     println!("{}", "=".repeat(78));
-    println!("  {:<12} {:>10} {:>10} {:>10} {:>16}", "Backend", "SWAPs", "1q gates", "2q gates", "Est. fidelity");
+    println!(
+        "  {:<12} {:>10} {:>10} {:>10} {:>16}",
+        "Backend", "SWAPs", "1q gates", "2q gates", "Est. fidelity"
+    );
     println!("  {}", "-".repeat(64));
     println!("  (routing/lowering the unrotated -- Z-basis -- circuit; X/Y-basis runs add one extra single-qubit gate per qubit and have essentially the same profile)");
 
@@ -587,7 +664,11 @@ fn main() {
 
     for &backend in BACKENDS.iter() {
         let swap_count = match backend.coupling_map(2) {
-            Some(coupling) => route_best(&base_circuit, &coupling).gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count(),
+            Some(coupling) => route_best(&base_circuit, &coupling)
+                .gates
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(_, _)))
+                .count(),
             None => 0,
         };
         let lowered = lower(&base_circuit, backend);
@@ -595,13 +676,24 @@ fn main() {
         let cal = calibration_for(backend);
         let est_fidelity = estimate_backend_circuit_fidelity(&lowered, &cal);
 
-        println!("  {:<12} {:>10} {:>10} {:>10} {:>15.2}%", format!("{:?}", backend), swap_count, single, two, est_fidelity * 100.0);
+        println!(
+            "  {:<12} {:>10} {:>10} {:>10} {:>15.2}%",
+            format!("{:?}", backend),
+            swap_count,
+            single,
+            two,
+            est_fidelity * 100.0
+        );
         if est_fidelity > best_fidelity {
             best_fidelity = est_fidelity;
             best_backend = backend;
         }
     }
-    println!("\nRecommended backend: {:?} (estimated fidelity {:.2}%)", best_backend, best_fidelity * 100.0);
+    println!(
+        "\nRecommended backend: {:?} (estimated fidelity {:.2}%)",
+        best_backend,
+        best_fidelity * 100.0
+    );
 
     // --- 4. Realistic NISQ execution: real noise applied, then mitigated (ZNE). ---
     println!("\n{}", "=".repeat(78));
@@ -611,7 +703,9 @@ fn main() {
         "({:?}'s {:.2}% estimated fidelity above is only an estimate until applied to a run -- \
          this section actually applies an approximate version of that noise, over {} \
          independent Monte-Carlo trajectories per noise level.)",
-        best_backend, best_fidelity * 100.0, args.noise_shots
+        best_backend,
+        best_fidelity * 100.0,
+        args.noise_shots
     );
 
     // Five points instead of three: more leverage for the linear fit
@@ -623,7 +717,8 @@ fn main() {
     let mut scale_mean_energies = Vec::with_capacity(zne_scales.len());
     let mut scale_stderr_energies = Vec::with_capacity(zne_scales.len());
     for (i, &scale) in zne_scales.iter().enumerate() {
-        let mut executor = NoisyBackendExecutor::new(best_backend, best_fidelity, scale, 0xC0FFEE + i as u64);
+        let mut executor =
+            NoisyBackendExecutor::new(best_backend, best_fidelity, scale, 0xC0FFEE + i as u64);
         let mut sum = 0.0;
         let mut sq_sum = 0.0;
         for _ in 0..args.noise_shots {
@@ -658,9 +753,18 @@ fn main() {
 
     println!("\n  {:<34} {:>12}", "", "Hartree");
     println!("  {}", "-".repeat(48));
-    println!("  raw noisy mean energy (1x noise)  {:>12.6}  (stderr {:.6})", scale_mean_energies[0], scale_stderr_energies[0]);
-    println!("  ZNE-mitigated mean energy         {:>12.6}  (stderr {:.6})", mitigated_electronic, mitigated_stderr);
-    println!("  exact electronic energy           {:>12.6}", exact_electronic);
+    println!(
+        "  raw noisy mean energy (1x noise)  {:>12.6}  (stderr {:.6})",
+        scale_mean_energies[0], scale_stderr_energies[0]
+    );
+    println!(
+        "  ZNE-mitigated mean energy         {:>12.6}  (stderr {:.6})",
+        mitigated_electronic, mitigated_stderr
+    );
+    println!(
+        "  exact electronic energy           {:>12.6}",
+        exact_electronic
+    );
     println!(
         "\n(raw error {:.6} Hartree, mitigated error {:.6} Hartree.)",
         raw_gap, mitigated_gap
@@ -677,7 +781,8 @@ fn main() {
              fit's stderr ({:.6}) -- likely a genuine case of linear extrapolation bias (the \
              true noise-vs-scale curve isn't perfectly linear here), not sampling noise. \
              Consider a quadratic (Richardson) extrapolation or more noise-shots per scale.",
-            improvement.abs(), mitigated_stderr
+            improvement.abs(),
+            mitigated_stderr
         );
     } else {
         println!(
@@ -715,8 +820,8 @@ fn main() {
     if !raw_passes && mitigated_passes {
         println!(
             "  -> Raw NISQ execution misses chemical accuracy; ZNE mitigation recovers it \
-             (a {:.2} sigma improvement over sampling noise, per above)."
-            , improvement.abs() / mitigated_stderr
+             (a {:.2} sigma improvement over sampling noise, per above).",
+            improvement.abs() / mitigated_stderr
         );
     }
 
@@ -724,17 +829,32 @@ fn main() {
     println!("\n{}", "=".repeat(78));
     println!("Summary");
     println!("{}", "=".repeat(78));
-    println!("  Exact electronic energy:        {:.6} Hartree", exact_electronic);
-    println!("  VQE (ideal simulator):          {:.6} Hartree (error {:.6})", vqe_electronic, error);
+    println!(
+        "  Exact electronic energy:        {:.6} Hartree",
+        exact_electronic
+    );
+    println!(
+        "  VQE (ideal simulator):          {:.6} Hartree (error {:.6})",
+        vqe_electronic, error
+    );
     println!(
         "  VQE (NISQ, raw, {:?}):     {:.6} Hartree (error {:.6}) [{}]",
-        best_backend, scale_mean_energies[0], raw_gap, if raw_passes { "PASS" } else { "FAIL" }
+        best_backend,
+        scale_mean_energies[0],
+        raw_gap,
+        if raw_passes { "PASS" } else { "FAIL" }
     );
     println!(
         "  VQE (NISQ, ZNE-mitigated):       {:.6} Hartree (error {:.6}, stderr {:.6}) [{}]",
-        mitigated_electronic, mitigated_gap, mitigated_stderr, if mitigated_passes { "PASS" } else { "FAIL" }
+        mitigated_electronic,
+        mitigated_gap,
+        mitigated_stderr,
+        if mitigated_passes { "PASS" } else { "FAIL" }
     );
-    println!("  Chemical accuracy threshold:     {:.4} Hartree", chemical_accuracy);
+    println!(
+        "  Chemical accuracy threshold:     {:.4} Hartree",
+        chemical_accuracy
+    );
     if !raw_passes && mitigated_passes {
         println!(
             "\n  Headline: raw NISQ execution misses chemical accuracy; ZNE mitigation \

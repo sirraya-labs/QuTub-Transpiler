@@ -1,0 +1,25 @@
+---
+source: tests/ir_snapshots.rs
+expression: ir_opt_str
+---
+Circuit {
+    num_qubits: 4,
+    num_clbits: 0,
+    gates: [
+        H(
+            0,
+        ),
+        Cx(
+            0,
+            1,
+        ),
+        Cx(
+            0,
+            2,
+        ),
+        Cx(
+            0,
+            3,
+        ),
+    ],
+}

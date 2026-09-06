@@ -62,9 +62,7 @@ pub fn apply_to(circuit: &NativeCircuit, reg: &mut QuantumRegister) -> Result<()
 /// outcomes written by every `Measure` in the circuit (indexed by
 /// classical bit, sized to `circuit.num_clbits`). This is the P0.1
 /// roadmap item's `run_with_measurement`-style entry point.
-pub fn run_with_measurement(
-    circuit: &NativeCircuit,
-) -> Result<(QuantumRegister, Vec<u8>), String> {
+pub fn run_with_measurement(circuit: &NativeCircuit) -> Result<(QuantumRegister, Vec<u8>), String> {
     let mut reg = QuantumRegister::new(circuit.num_qubits)?;
     let mut clbits = vec![0u8; circuit.num_clbits];
     apply_to_with_measurement(circuit, &mut reg, &mut clbits)?;
@@ -174,7 +172,11 @@ fn native_gate_stmt(gate: &NativeGate, measure_stmt: &dyn Fn(usize, usize) -> St
                 .map(|&(clbit, value)| format!("c[{}]=={}", clbit, value as u8))
                 .collect::<Vec<_>>()
                 .join(" && ");
-            format!("if ({}) {}", condition_text, native_gate_stmt(inner, measure_stmt))
+            format!(
+                "if ({}) {}",
+                condition_text,
+                native_gate_stmt(inner, measure_stmt)
+            )
         }
     }
 }
@@ -201,7 +203,9 @@ pub fn to_qasm(circuit: &NativeCircuit, circuit_name: &str) -> String {
         circuit_name
     ));
     for gate in &circuit.gates {
-        out.push_str(&native_gate_stmt(gate, &|q, c| format!("measure q[{}] -> c[{}]", q, c)));
+        out.push_str(&native_gate_stmt(gate, &|q, c| {
+            format!("measure q[{}] -> c[{}]", q, c)
+        }));
         out.push_str(";\n");
     }
     out
@@ -230,7 +234,9 @@ pub fn to_qasm3(circuit: &NativeCircuit, circuit_name: &str) -> String {
         circuit_name
     ));
     for gate in &circuit.gates {
-        out.push_str(&native_gate_stmt(gate, &|q, c| format!("c[{}] = measure q[{}]", c, q)));
+        out.push_str(&native_gate_stmt(gate, &|q, c| {
+            format!("c[{}] = measure q[{}]", c, q)
+        }));
         out.push_str(";\n");
     }
     out
@@ -435,7 +441,10 @@ mod qasm3_emit_tests {
         let mut nc = NativeCircuit::new(2);
         nc.num_clbits = 1;
         nc.push(NativeGate::Measure(0, 0));
-        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(1, 0.5))));
+        nc.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rz(1, 0.5)),
+        ));
         nc
     }
 

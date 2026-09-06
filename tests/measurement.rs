@@ -62,8 +62,8 @@ fn empirical_frequency_of_one(circuit: &Circuit, clbit: usize) -> f64 {
     let native = optimize(&decompose(circuit));
     let mut ones = 0usize;
     for _ in 0..SHOTS {
-        let (_, clbits) = emit::run_with_measurement(&native)
-            .expect("measuring circuit must run cleanly");
+        let (_, clbits) =
+            emit::run_with_measurement(&native).expect("measuring circuit must run cleanly");
         if clbits[clbit] == 1 {
             ones += 1;
         }
@@ -84,7 +84,10 @@ fn measures_a_fair_superposition_close_to_50_50() {
     let (_, ideal_p1) = ideal_measurement_probability(&without_measure, 0);
     let empirical_p1 = empirical_frequency_of_one(&with_measure, 0);
     assert_within_statistical_tolerance(empirical_p1, ideal_p1, SHOTS, "H then Measure");
-    assert!((ideal_p1 - 0.5).abs() < 1e-9, "sanity check: H should give exactly 0.5");
+    assert!(
+        (ideal_p1 - 0.5).abs() < 1e-9,
+        "sanity check: H should give exactly 0.5"
+    );
 }
 
 #[test]
@@ -95,7 +98,9 @@ fn measures_a_biased_rotation_at_the_right_skew() {
     let theta = 0.9_f64;
     let mut with_measure = Circuit::new(1);
     with_measure.num_clbits = 1;
-    with_measure.push(Gate::Ry(0, theta)).push(Gate::Measure(0, 0));
+    with_measure
+        .push(Gate::Ry(0, theta))
+        .push(Gate::Measure(0, 0));
 
     let mut without_measure = Circuit::new(1);
     without_measure.push(Gate::Ry(0, theta));
@@ -126,6 +131,11 @@ fn measures_the_correct_qubit_out_of_an_entangled_pair() {
 
     let (_, ideal_p1) = ideal_measurement_probability(&without_measure, 1);
     let empirical_p1 = empirical_frequency_of_one(&with_measure, 0);
-    assert_within_statistical_tolerance(empirical_p1, ideal_p1, SHOTS, "Bell pair, measure qubit 1");
+    assert_within_statistical_tolerance(
+        empirical_p1,
+        ideal_p1,
+        SHOTS,
+        "Bell pair, measure qubit 1",
+    );
     assert!((ideal_p1 - 0.5).abs() < 1e-9);
 }

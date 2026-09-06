@@ -251,11 +251,8 @@ impl CouplingMap {
             let heavy_edges = subdivide_edges(&hex_edges);
             let total = heavy_hex_node_count(&heavy_edges);
             if total >= num_qubits {
-                let mut cm = heavy_hex_dfs_map(
-                    &heavy_edges,
-                    HeavyHexNode::Data(0, 0),
-                    Some(num_qubits),
-                );
+                let mut cm =
+                    heavy_hex_dfs_map(&heavy_edges, HeavyHexNode::Data(0, 0), Some(num_qubits));
                 debug_assert_eq!(
                     cm.num_qubits, num_qubits,
                     "a d x d heavy-hex grid with >= num_qubits total qubits is always \
@@ -691,8 +688,7 @@ fn square_grid_dfs_map(
         }
     }
 
-    let index: HashMap<GridCoord, usize> =
-        order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+    let index: HashMap<GridCoord, usize> = order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
     let mut cm_edges: HashSet<(usize, usize)> = HashSet::new();
     for &(a, b) in edges {
@@ -748,10 +744,20 @@ mod tests {
     #[test]
     fn heavy_hex_grid_1x1_matches_a_single_hexagon() {
         let map = CouplingMap::heavy_hex_grid(1, 1);
-        assert_eq!(map.num_qubits(), 12, "a single hexagon should be 6 data + 6 flag qubits");
+        assert_eq!(
+            map.num_qubits(),
+            12,
+            "a single hexagon should be 6 data + 6 flag qubits"
+        );
         for q in 0..12 {
-            let degree = (0..12).filter(|&other| other != q && map.is_adjacent(q, other)).count();
-            assert_eq!(degree, 2, "qubit {} should have exactly 2 neighbors on a bare hexagon", q);
+            let degree = (0..12)
+                .filter(|&other| other != q && map.is_adjacent(q, other))
+                .count();
+            assert_eq!(
+                degree, 2,
+                "qubit {} should have exactly 2 neighbors on a bare hexagon",
+                q
+            );
         }
         // It should be one connected cycle, not e.g. two disjoint triangles.
         for target in 1..12 {
@@ -781,7 +787,10 @@ mod tests {
                 saw_degree_three = true;
             }
         }
-        assert!(saw_degree_three, "a 3x3 grid should have at least one interior degree-3 data qubit");
+        assert!(
+            saw_degree_three,
+            "a 3x3 grid should have at least one interior degree-3 data qubit"
+        );
     }
 
     #[test]
@@ -803,7 +812,12 @@ mod tests {
     fn heavy_hex_for_returns_exact_requested_size() {
         for n in [0, 1, 2, 5, 12, 13, 25, 50, 77] {
             let map = CouplingMap::heavy_hex_for(n);
-            assert_eq!(map.num_qubits(), n, "heavy_hex_for({}) returned the wrong qubit count", n);
+            assert_eq!(
+                map.num_qubits(),
+                n,
+                "heavy_hex_for({}) returned the wrong qubit count",
+                n
+            );
         }
     }
 
@@ -831,8 +845,16 @@ mod tests {
         for n in [12, 25, 50, 77] {
             let map = CouplingMap::heavy_hex_for(n);
             for q in 0..n {
-                let degree = (0..n).filter(|&other| other != q && map.is_adjacent(q, other)).count();
-                assert!(degree <= 3, "heavy_hex_for({}): qubit {} has degree {} > 3", n, q, degree);
+                let degree = (0..n)
+                    .filter(|&other| other != q && map.is_adjacent(q, other))
+                    .count();
+                assert!(
+                    degree <= 3,
+                    "heavy_hex_for({}): qubit {} has degree {} > 3",
+                    n,
+                    q,
+                    degree
+                );
             }
         }
     }
@@ -889,7 +911,9 @@ mod tests {
         let map = CouplingMap::square_grid(2, 3);
         assert_eq!(map.num_qubits(), 6);
         let degree = |q: usize| {
-            (0..6).filter(|&other| other != q && map.is_adjacent(q, other)).count()
+            (0..6)
+                .filter(|&other| other != q && map.is_adjacent(q, other))
+                .count()
         };
         let degrees: Vec<usize> = (0..6).map(degree).collect();
         let mut sorted = degrees.clone();
@@ -947,7 +971,11 @@ mod tests {
     fn from_edges_supports_irregular_real_device_style_topologies() {
         // A star with one disabled spoke (no edge to qubit 4 at all).
         let map = CouplingMap::from_edges(5, [(0, 1), (0, 2), (0, 3)]).unwrap();
-        assert_eq!(map.neighbors(4).len(), 0, "qubit 4 has no edges, same as a disabled qubit");
+        assert_eq!(
+            map.neighbors(4).len(),
+            0,
+            "qubit 4 has no edges, same as a disabled qubit"
+        );
         assert_eq!(map.neighbors(0).len(), 3);
     }
 
@@ -967,7 +995,10 @@ mod tests {
                 saw_degree_four = true;
             }
         }
-        assert!(saw_degree_four, "a 3x3 grid should have at least one interior degree-4 qubit");
+        assert!(
+            saw_degree_four,
+            "a 3x3 grid should have at least one interior degree-4 qubit"
+        );
     }
 
     #[test]
@@ -996,7 +1027,12 @@ mod tests {
     fn square_grid_for_returns_exact_requested_size() {
         for n in [0, 1, 2, 5, 9, 10, 16, 50, 77] {
             let map = CouplingMap::square_grid_for(n);
-            assert_eq!(map.num_qubits(), n, "square_grid_for({}) returned the wrong qubit count", n);
+            assert_eq!(
+                map.num_qubits(),
+                n,
+                "square_grid_for({}) returned the wrong qubit count",
+                n
+            );
         }
     }
 
@@ -1024,8 +1060,16 @@ mod tests {
         for n in [9, 16, 50, 77] {
             let map = CouplingMap::square_grid_for(n);
             for q in 0..n {
-                let degree = (0..n).filter(|&other| other != q && map.is_adjacent(q, other)).count();
-                assert!(degree <= 4, "square_grid_for({}): qubit {} has degree {} > 4", n, q, degree);
+                let degree = (0..n)
+                    .filter(|&other| other != q && map.is_adjacent(q, other))
+                    .count();
+                assert!(
+                    degree <= 4,
+                    "square_grid_for({}): qubit {} has degree {} > 4",
+                    n,
+                    q,
+                    degree
+                );
             }
         }
     }
@@ -1062,7 +1106,9 @@ mod tests {
                     "heavy_hex_for({}): DFS numbering should keep at least 90% of \
                      consecutive-index pairs graph-adjacent (only backtracking at real \
                      degree-3 branch points), got {}/{}",
-                    n, present, total
+                    n,
+                    present,
+                    total
                 );
             }
         }
@@ -1080,7 +1126,9 @@ mod tests {
                 present * 10 >= total * 8,
                 "square_grid_for({}): DFS numbering should keep at least 80% of \
                  consecutive-index pairs graph-adjacent, got {}/{}",
-                n, present, total
+                n,
+                present,
+                total
             );
         }
     }

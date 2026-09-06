@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop)]
 //! Trotterized time evolution of an N-qubit transverse-field Ising
 //! chain, run through this crate's real compiler pipeline -- same
 //! shape as `vqe_h2_ground_state.rs`, same [`CircuitExecutor`] /
@@ -67,7 +68,12 @@ use sirraya_qutub_transpiler::route::route_best;
 use sirraya_qutub_transpiler::{decompose, emit, ir_optimize};
 
 /// Every backend currently supported by the crate.
-const BACKENDS: [Backend; 4] = [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti, Backend::Google];
+const BACKENDS: [Backend; 4] = [
+    Backend::TrappedIon,
+    Backend::IbmQ,
+    Backend::Rigetti,
+    Backend::Google,
+];
 
 fn calibration_for(backend: Backend) -> PublishedCalibration {
     if backend == Backend::TrappedIon {
@@ -79,7 +85,10 @@ fn calibration_for(backend: Backend) -> PublishedCalibration {
     } else if backend == Backend::Google {
         PublishedCalibration::google_willow_2024()
     } else {
-        panic!("no published calibration registered for backend {:?}", backend);
+        panic!(
+            "no published calibration registered for backend {:?}",
+            backend
+        );
     }
 }
 
@@ -122,7 +131,10 @@ fn cscale(v: &[(f64, f64)], s: f64) -> Cvec {
 }
 
 fn cadd(a: &[(f64, f64)], b: &[(f64, f64)]) -> Cvec {
-    a.iter().zip(b.iter()).map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi)).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&(ar, ai), &(br, bi))| (ar + br, ai + bi))
+        .collect()
 }
 
 /// Multiply every amplitude by `-i`: `(-i)*(re + i*im) = im - i*re`.
@@ -193,7 +205,11 @@ impl IsingChain {
             // Renormalize to control the tiny floating-point drift
             // RK4 accumulates over many steps -- the physical state
             // must stay on the unit sphere.
-            let norm: f64 = psi.iter().map(|&(re, im)| re * re + im * im).sum::<f64>().sqrt();
+            let norm: f64 = psi
+                .iter()
+                .map(|&(re, im)| re * re + im * im)
+                .sum::<f64>()
+                .sqrt();
             for a in psi.iter_mut() {
                 a.0 /= norm;
                 a.1 /= norm;
@@ -260,7 +276,11 @@ fn magnetization_profile_from_register(register: &QuantumRegister, n: usize) -> 
 /// needed three measurement cliques -- Z, X, Y), `<Z>_avg` is diagonal
 /// in the computational basis, so it's readable from a *single*
 /// circuit execution per shot.
-fn measure_avg_magnetization(executor: &mut dyn CircuitExecutor, circuit: &Circuit, n: usize) -> f64 {
+fn measure_avg_magnetization(
+    executor: &mut dyn CircuitExecutor,
+    circuit: &Circuit,
+    n: usize,
+) -> f64 {
     let register = executor.run(circuit).expect("run should not fail");
     avg_magnetization(&magnetization_profile_from_register(&register, n))
 }
@@ -333,13 +353,29 @@ struct NoisyBackendExecutor {
 }
 
 impl NoisyBackendExecutor {
-    fn new(n: usize, backend: Backend, estimated_fidelity: f64, noise_scale: f64, seed: u64) -> Self {
-        NoisyBackendExecutor { n, backend, estimated_fidelity, noise_scale, rng: Xorshift64::new(seed) }
+    fn new(
+        n: usize,
+        backend: Backend,
+        estimated_fidelity: f64,
+        noise_scale: f64,
+        seed: u64,
+    ) -> Self {
+        NoisyBackendExecutor {
+            n,
+            backend,
+            estimated_fidelity,
+            noise_scale,
+            rng: Xorshift64::new(seed),
+        }
     }
 
     fn gate_error_rate(&self, total_gates: usize) -> f64 {
         let total_gates = (total_gates.max(1)) as f64;
-        let base_rate = 1.0 - self.estimated_fidelity.clamp(1e-9, 1.0).powf(1.0 / total_gates);
+        let base_rate = 1.0
+            - self
+                .estimated_fidelity
+                .clamp(1e-9, 1.0)
+                .powf(1.0 / total_gates);
         (base_rate * self.noise_scale).clamp(0.0, 0.5)
     }
 }
@@ -373,14 +409,23 @@ impl CircuitExecutor for NoisyBackendExecutor {
 /// straight line can have a small intercept_stderr (tight statistics)
 /// while still being the wrong functional form, and stderr alone
 /// can't distinguish those two cases.
-fn weighted_linear_fit(scales: &[f64], values: &[f64], stderrs: &[f64]) -> (f64, f64, f64, f64, f64, usize) {
+fn weighted_linear_fit(
+    scales: &[f64],
+    values: &[f64],
+    stderrs: &[f64],
+) -> (f64, f64, f64, f64, f64, usize) {
     let weights: Vec<f64> = stderrs.iter().map(|&s| 1.0 / s.max(1e-9).powi(2)).collect();
 
     let s: f64 = weights.iter().sum();
     let sx: f64 = weights.iter().zip(scales).map(|(w, x)| w * x).sum();
     let sy: f64 = weights.iter().zip(values).map(|(w, y)| w * y).sum();
     let sxx: f64 = weights.iter().zip(scales).map(|(w, x)| w * x * x).sum();
-    let sxy: f64 = weights.iter().zip(scales).zip(values).map(|((w, x), y)| w * x * y).sum();
+    let sxy: f64 = weights
+        .iter()
+        .zip(scales)
+        .zip(values)
+        .map(|((w, x), y)| w * x * y)
+        .sum();
 
     let delta = s * sxx - sx * sx;
     let (intercept, intercept_stderr, slope, slope_stderr) = if delta.abs() < 1e-12 {
@@ -390,7 +435,12 @@ fn weighted_linear_fit(scales: &[f64], values: &[f64], stderrs: &[f64]) -> (f64,
         let slope = (s * sxy - sx * sy) / delta;
         let intercept_var = sxx / delta;
         let slope_var = s / delta;
-        (intercept, intercept_var.max(0.0).sqrt(), slope, slope_var.max(0.0).sqrt())
+        (
+            intercept,
+            intercept_var.max(0.0).sqrt(),
+            slope,
+            slope_var.max(0.0).sqrt(),
+        )
     };
 
     // Weighted chi-square of the fitted line against the data itself
@@ -457,7 +507,11 @@ fn invert3(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
 /// Returns `(intercept, intercept_stderr, quadratic_coeff,
 /// quadratic_coeff_stderr, chi_square, degrees_of_freedom)`, or
 /// `None` if the normal-equations matrix is singular.
-fn weighted_quadratic_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64]) -> Option<(f64, f64, f64, f64, f64, usize)> {
+fn weighted_quadratic_extrapolate(
+    scales: &[f64],
+    values: &[f64],
+    stderrs: &[f64],
+) -> Option<(f64, f64, f64, f64, f64, usize)> {
     let weights: Vec<f64> = stderrs.iter().map(|&s| 1.0 / s.max(1e-9).powi(2)).collect();
 
     let mut m = [[0.0f64; 3]; 3];
@@ -476,7 +530,9 @@ fn weighted_quadratic_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64
     }
 
     let inv = invert3(&m)?;
-    let coeffs: Vec<f64> = (0..3).map(|r| (0..3).map(|c| inv[r][c] * rhs[c]).sum()).collect();
+    let coeffs: Vec<f64> = (0..3)
+        .map(|r| (0..3).map(|c| inv[r][c] * rhs[c]).sum())
+        .collect();
     let intercept_stderr = inv[0][0].max(0.0).sqrt();
     let quad_coeff_stderr = inv[2][2].max(0.0).sqrt();
 
@@ -489,7 +545,14 @@ fn weighted_quadratic_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64
         .sum();
     let dof = scales.len().saturating_sub(3);
 
-    Some((coeffs[0], intercept_stderr, coeffs[2], quad_coeff_stderr, chi2, dof))
+    Some((
+        coeffs[0],
+        intercept_stderr,
+        coeffs[2],
+        quad_coeff_stderr,
+        chi2,
+        dof,
+    ))
 }
 
 /// Weighted nonlinear (Gauss-Newton) fit of `y = A + B * exp(-k * x)`
@@ -533,7 +596,11 @@ fn weighted_exponential_extrapolate(
     // most-decayed) point, amplitude from the total observed spread,
     // a modest positive decay rate. Gauss-Newton converges quickly
     // from here for a well-behaved monotonic decay curve like this.
-    let mut p = [*values.last().unwrap(), values[0] - values.last().unwrap(), 0.3];
+    let mut p = [
+        *values.last().unwrap(),
+        values[0] - values.last().unwrap(),
+        0.3,
+    ];
     if p[1].abs() < 1e-9 {
         p[1] = 1e-3;
     }
@@ -687,7 +754,11 @@ fn parse_args() -> Args {
                 i += 2;
             }
             "--sweep-steps" if i + 1 < raw.len() => {
-                let parsed: Vec<usize> = raw[i + 1].split(',').filter_map(|s| s.trim().parse().ok()).filter(|&v: &usize| v >= 1).collect();
+                let parsed: Vec<usize> = raw[i + 1]
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .filter(|&v: &usize| v >= 1)
+                    .collect();
                 if !parsed.is_empty() {
                     args.sweep_steps = parsed;
                 }
@@ -709,7 +780,11 @@ fn parse_args() -> Args {
 
 fn main() {
     let args = parse_args();
-    let model = IsingChain { n: args.qubits, coupling_j: args.coupling_j, field_h: args.field_h };
+    let model = IsingChain {
+        n: args.qubits,
+        coupling_j: args.coupling_j,
+        field_h: args.field_h,
+    };
 
     println!("{}", "=".repeat(78));
     println!(
@@ -724,7 +799,10 @@ fn main() {
     let exact_state = model.evolve_exact(args.total_time, rk4_substeps);
     let exact_profile = magnetization_profile_exact(&exact_state, args.qubits);
     let exact_avg = avg_magnetization(&exact_profile);
-    println!("Exact reference (RK4 integration of the Schrodinger equation, {} substeps):", rk4_substeps);
+    println!(
+        "Exact reference (RK4 integration of the Schrodinger equation, {} substeps):",
+        rk4_substeps
+    );
     println!("  <Z>_avg at T = {:.6}:  {:.6}", args.total_time, exact_avg);
     if args.qubits <= 10 {
         print!("  per-site profile: [");
@@ -743,11 +821,21 @@ fn main() {
     println!("{}", "=".repeat(78));
     println!("  {:>8}  {:>14}  {:>14}", "steps", "<Z>_avg", "abs error");
     println!("  {}", "-".repeat(40));
-    let sweep_steps: Vec<usize> = if args.fast { vec![1, 2, 4, 8] } else { vec![1, 2, 4, 8, 16, 32] };
+    let sweep_steps: Vec<usize> = if args.fast {
+        vec![1, 2, 4, 8]
+    } else {
+        vec![1, 2, 4, 8, 16, 32]
+    };
     let mut ideal_executor = IdealExecutor;
     let mut device_ideal_avg = 0.0;
     for &steps in &sweep_steps {
-        let circuit = trotter_circuit(args.qubits, args.coupling_j, args.field_h, args.total_time, steps);
+        let circuit = trotter_circuit(
+            args.qubits,
+            args.coupling_j,
+            args.field_h,
+            args.total_time,
+            steps,
+        );
         let avg = measure_avg_magnetization(&mut ideal_executor, &circuit, args.qubits);
         let err = (avg - exact_avg).abs();
         println!("  {:>8}  {:>14.6}  {:>14.6}", steps, avg, err);
@@ -774,16 +862,29 @@ fn main() {
     println!("\n{}", "=".repeat(78));
     println!("Backend comparison (real routing against each backend's actual coupling map)");
     println!("{}", "=".repeat(78));
-    println!("  {:<12} {:>10} {:>10} {:>10} {:>16}", "Backend", "SWAPs", "1q gates", "2q gates", "Est. fidelity");
+    println!(
+        "  {:<12} {:>10} {:>10} {:>10} {:>16}",
+        "Backend", "SWAPs", "1q gates", "2q gates", "Est. fidelity"
+    );
     println!("  {}", "-".repeat(64));
 
-    let device_circuit = trotter_circuit(args.qubits, args.coupling_j, args.field_h, args.total_time, args.trotter_steps);
+    let device_circuit = trotter_circuit(
+        args.qubits,
+        args.coupling_j,
+        args.field_h,
+        args.total_time,
+        args.trotter_steps,
+    );
     let mut best_backend = BACKENDS[0];
     let mut best_fidelity = -1.0;
 
     for &backend in BACKENDS.iter() {
         let swap_count = match backend.coupling_map(args.qubits) {
-            Some(coupling) => route_best(&device_circuit, &coupling).gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count(),
+            Some(coupling) => route_best(&device_circuit, &coupling)
+                .gates
+                .iter()
+                .filter(|g| matches!(g, Gate::Swap(_, _)))
+                .count(),
             None => 0,
         };
         let lowered = lower(&device_circuit, backend);
@@ -791,13 +892,24 @@ fn main() {
         let cal = calibration_for(backend);
         let est_fidelity = estimate_backend_circuit_fidelity(&lowered, &cal);
 
-        println!("  {:<12} {:>10} {:>10} {:>10} {:>15.2}%", format!("{:?}", backend), swap_count, single, two, est_fidelity * 100.0);
+        println!(
+            "  {:<12} {:>10} {:>10} {:>10} {:>15.2}%",
+            format!("{:?}", backend),
+            swap_count,
+            single,
+            two,
+            est_fidelity * 100.0
+        );
         if est_fidelity > best_fidelity {
             best_fidelity = est_fidelity;
             best_backend = backend;
         }
     }
-    println!("\nRecommended backend: {:?} (estimated fidelity {:.2}%)", best_backend, best_fidelity * 100.0);
+    println!(
+        "\nRecommended backend: {:?} (estimated fidelity {:.2}%)",
+        best_backend,
+        best_fidelity * 100.0
+    );
 
     // --- 4. Realistic NISQ execution: real noise applied, then mitigated (ZNE). ---
     println!("\n{}", "=".repeat(78));
@@ -808,7 +920,9 @@ fn main() {
          this section actually applies an approximate version of that noise, over {} \
          independent Monte-Carlo trajectories per noise level. Unlike the H2 example, this \
          observable is diagonal, so each trajectory needs only one circuit run, not three.)",
-        best_backend, best_fidelity * 100.0, args.noise_shots
+        best_backend,
+        best_fidelity * 100.0,
+        args.noise_shots
     );
 
     // Seven points instead of five: the fit-diagnostic tests below
@@ -824,7 +938,13 @@ fn main() {
     let mut scale_mean: Vec<f64> = Vec::with_capacity(zne_scales.len());
     let mut scale_stderr: Vec<f64> = Vec::with_capacity(zne_scales.len());
     for (i, &scale) in zne_scales.iter().enumerate() {
-        let mut executor = NoisyBackendExecutor::new(args.qubits, best_backend, best_fidelity, scale, 0xC0FFEE + i as u64);
+        let mut executor = NoisyBackendExecutor::new(
+            args.qubits,
+            best_backend,
+            best_fidelity,
+            scale,
+            0xC0FFEE + i as u64,
+        );
         let mut sum = 0.0;
         let mut sq_sum = 0.0;
         for _ in 0..args.noise_shots {
@@ -848,7 +968,11 @@ fn main() {
     //         the data actually supports.
     let (linear_mitigated, linear_mitigated_stderr, _, _, lin_chi2, lin_dof) =
         weighted_linear_fit(&zne_scales, &scale_mean, &scale_stderr);
-    let lin_reduced_chi2 = if lin_dof > 0 { lin_chi2 / lin_dof as f64 } else { f64::NAN };
+    let lin_reduced_chi2 = if lin_dof > 0 {
+        lin_chi2 / lin_dof as f64
+    } else {
+        f64::NAN
+    };
     let poor_linear_fit = lin_dof > 0 && lin_reduced_chi2 > 2.0;
     let quad_fit = weighted_quadratic_extrapolate(&zne_scales, &scale_mean, &scale_stderr);
     let exp_fit = weighted_exponential_extrapolate(&zne_scales, &scale_mean, &scale_stderr);
@@ -895,13 +1019,25 @@ fn main() {
 
     println!("\n  {:<34} {:>12}", "", "<Z>_avg");
     println!("  {}", "-".repeat(48));
-    println!("  raw noisy mean (1x noise)         {:>12.6}  (stderr {:.6})", scale_mean[0], scale_stderr[0]);
-    println!("  ZNE-mitigated mean (linear)        {:>12.6}  (stderr {:.6})", linear_mitigated, linear_mitigated_stderr);
+    println!(
+        "  raw noisy mean (1x noise)         {:>12.6}  (stderr {:.6})",
+        scale_mean[0], scale_stderr[0]
+    );
+    println!(
+        "  ZNE-mitigated mean (linear)        {:>12.6}  (stderr {:.6})",
+        linear_mitigated, linear_mitigated_stderr
+    );
     if let Some((qi, qis, _, _, _, _)) = quad_fit {
-        println!("  ZNE-mitigated mean (quadratic)     {:>12.6}  (stderr {:.6})", qi, qis);
+        println!(
+            "  ZNE-mitigated mean (quadratic)     {:>12.6}  (stderr {:.6})",
+            qi, qis
+        );
     }
     if let Some((ei, eis, _, _, _, _, _)) = exp_fit {
-        println!("  ZNE-mitigated mean (exponential)   {:>12.6}  (stderr {:.6})", ei, eis);
+        println!(
+            "  ZNE-mitigated mean (exponential)   {:>12.6}  (stderr {:.6})",
+            ei, eis
+        );
     }
     println!("  exact reference (RK4)             {:>12.6}", exact_avg);
     println!(
@@ -909,7 +1045,10 @@ fn main() {
          further down for why this model was selected.",
         mitigation_model, mitigated, mitigated_stderr
     );
-    println!("\n(raw error {:.6}, mitigated error {:.6}, using the reported model.)", raw_gap, mitigated_gap);
+    println!(
+        "\n(raw error {:.6}, mitigated error {:.6}, using the reported model.)",
+        raw_gap, mitigated_gap
+    );
     if improvement_significant && improvement > 0.0 {
         println!(
             "ZNE improved the estimate by {:.6}, which exceeds the mitigated fit's own stderr \
@@ -920,7 +1059,8 @@ fn main() {
         println!(
             "ZNE moved the estimate {:.6} *away* from exact, exceeding the mitigated fit's \
              stderr ({:.6}) -- likely genuine extrapolation-model bias, not sampling noise.",
-            improvement.abs(), mitigated_stderr
+            improvement.abs(),
+            mitigated_stderr
         );
     } else {
         println!(
@@ -950,26 +1090,54 @@ fn main() {
         lin_chi2,
         lin_dof,
         lin_reduced_chi2,
-        if poor_linear_fit { "  [POOR FIT]" } else { "  [acceptable]" },
+        if poor_linear_fit {
+            "  [POOR FIT]"
+        } else {
+            "  [acceptable]"
+        },
         lin_aic
     );
     if let Some((qi, qis, qc, qcs, qchi2, qdof)) = quad_fit {
-        let q_reduced = if qdof > 0 { qchi2 / qdof as f64 } else { f64::NAN };
+        let q_reduced = if qdof > 0 {
+            qchi2 / qdof as f64
+        } else {
+            f64::NAN
+        };
         println!(
             "    Quadratic:    chi^2 = {:.3}, dof = {}, reduced chi^2 = {:.3}   AIC = {:.3}   \
              intercept = {:.6} (+/- {:.6}), curvature = {:.6} (+/- {:.6}, {:.1} sigma)",
-            qchi2, qdof, q_reduced, quad_aic.unwrap(), qi, qis, qc, qcs, qc.abs() / qcs.max(1e-12)
+            qchi2,
+            qdof,
+            q_reduced,
+            quad_aic.unwrap(),
+            qi,
+            qis,
+            qc,
+            qcs,
+            qc.abs() / qcs.max(1e-12)
         );
     } else {
         println!("    Quadratic:    could not be computed (degenerate/duplicate scale points).");
     }
     if let Some((ei, eis, a, b, k, echi2, edof)) = exp_fit {
-        let e_reduced = if edof > 0 { echi2 / edof as f64 } else { f64::NAN };
+        let e_reduced = if edof > 0 {
+            echi2 / edof as f64
+        } else {
+            f64::NAN
+        };
         println!(
             "    Exponential:  chi^2 = {:.3}, dof = {}, reduced chi^2 = {:.3}   AIC = {:.3}   \
              intercept (A+B) = {:.6} (+/- {:.6}), asymptote A = {:.6}, amplitude B = {:.6}, \
              decay k = {:.6}",
-            echi2, edof, e_reduced, exp_aic.unwrap(), ei, eis, a, b, k
+            echi2,
+            edof,
+            e_reduced,
+            exp_aic.unwrap(),
+            ei,
+            eis,
+            a,
+            b,
+            k
         );
     } else {
         println!(
@@ -993,13 +1161,20 @@ fn main() {
     } else {
         "enough degrees of freedom for the AIC comparison below to carry real statistical weight"
     };
-    println!("    Statistical power:  linear dof = {} -- {}.", lin_dof, power_note);
+    println!(
+        "    Statistical power:  linear dof = {} -- {}.",
+        lin_dof, power_note
+    );
     println!(
         "    -> Model selection (AIC, lower is better; >2 gap required to switch): linear = \
          {:.3}{}{}",
         lin_aic,
-        quad_aic.map(|a| format!(", quadratic = {:.3}", a)).unwrap_or_default(),
-        exp_aic.map(|a| format!(", exponential = {:.3}", a)).unwrap_or_default(),
+        quad_aic
+            .map(|a| format!(", quadratic = {:.3}", a))
+            .unwrap_or_default(),
+        exp_aic
+            .map(|a| format!(", exponential = {:.3}", a))
+            .unwrap_or_default(),
     );
     println!(
         "       Reporting the {} estimate ({:.6} +/- {:.6}) for the error decomposition, \
@@ -1027,18 +1202,29 @@ fn main() {
         "\n  Error decomposition at {} Trotter steps:",
         args.trotter_steps
     );
-    println!("    Trotter (algorithmic) error, ideal circuit vs. exact:   {:.6}", (device_ideal_avg - exact_avg).abs());
+    println!(
+        "    Trotter (algorithmic) error, ideal circuit vs. exact:   {:.6}",
+        (device_ideal_avg - exact_avg).abs()
+    );
     println!(
         "    Noise-induced error, raw vs. ideal circuit (same steps):   {:.6}  ({:.1} sigma) [{}]",
         noise_gap_raw,
         noise_gap_raw / scale_stderr[0],
-        if noise_corrupted { "NOISE DETECTED" } else { "consistent" }
+        if noise_corrupted {
+            "NOISE DETECTED"
+        } else {
+            "consistent"
+        }
     );
     println!(
         "    Noise-induced error, mitigated vs. ideal circuit:          {:.6}  ({:.1} sigma) [{}]",
         noise_gap_mitigated,
         noise_gap_mitigated / mitigated_stderr,
-        if noise_recovered { "RECOVERED" } else { "NOT recovered" }
+        if noise_recovered {
+            "RECOVERED"
+        } else {
+            "NOT recovered"
+        }
     );
     if noise_corrupted && noise_recovered {
         println!(
@@ -1046,7 +1232,8 @@ fn main() {
              same circuit gives ideally); ZNE mitigation recovers it to within {:.1} sigma of \
              the ideal-circuit answer -- essentially a full noise correction, independent of \
              (and not to be confused with) the separate Trotter-step-count question above.",
-            noise_gap_raw / scale_stderr[0], noise_gap_mitigated / mitigated_stderr
+            noise_gap_raw / scale_stderr[0],
+            noise_gap_mitigated / mitigated_stderr
         );
     }
 
@@ -1073,7 +1260,8 @@ fn main() {
              alone leave a {:.6} algorithmic gap -- larger than the noise-mitigation stderr. \
              This is a step-count question, not a mitigation failure; see the decomposition \
              above and the convergence table earlier in this output.)",
-            args.trotter_steps, (device_ideal_avg - exact_avg).abs()
+            args.trotter_steps,
+            (device_ideal_avg - exact_avg).abs()
         );
     }
 
@@ -1091,7 +1279,10 @@ fn main() {
     //         mitigation -- this sweep finds it empirically instead
     //         of guessing.
     println!("\n{}", "=".repeat(78));
-    println!("Trotter step-count trade-off ({:?}, {} shots/scale per point)", best_backend, args.sweep_shots);
+    println!(
+        "Trotter step-count trade-off ({:?}, {} shots/scale per point)",
+        best_backend, args.sweep_shots
+    );
     println!("{}", "=".repeat(78));
     println!(
         "  {:>6}  {:>12}  {:>10}  {:>16}  {:>18}",
@@ -1103,7 +1294,13 @@ fn main() {
     let mut best_sweep_total_error = f64::INFINITY;
     let cal = calibration_for(best_backend);
     for &steps in &args.sweep_steps {
-        let circuit = trotter_circuit(args.qubits, args.coupling_j, args.field_h, args.total_time, steps);
+        let circuit = trotter_circuit(
+            args.qubits,
+            args.coupling_j,
+            args.field_h,
+            args.total_time,
+            steps,
+        );
         let ideal_avg_sweep = measure_avg_magnetization(&mut ideal_executor, &circuit, args.qubits);
         let trotter_err_sweep = (ideal_avg_sweep - exact_avg).abs();
         let est_fidelity_sweep = backend_fidelity_for(&circuit, best_backend, &cal);
@@ -1111,7 +1308,13 @@ fn main() {
         let mut sm: Vec<f64> = Vec::with_capacity(zne_scales.len());
         let mut se: Vec<f64> = Vec::with_capacity(zne_scales.len());
         for (i, &scale) in zne_scales.iter().enumerate() {
-            let mut executor = NoisyBackendExecutor::new(args.qubits, best_backend, est_fidelity_sweep, scale, 0xBEEF + (steps as u64) * 1000 + i as u64);
+            let mut executor = NoisyBackendExecutor::new(
+                args.qubits,
+                best_backend,
+                est_fidelity_sweep,
+                scale,
+                0xBEEF + (steps as u64) * 1000 + i as u64,
+            );
             let mut sum = 0.0;
             let mut sq_sum = 0.0;
             for _ in 0..args.sweep_shots {
@@ -1132,7 +1335,12 @@ fn main() {
 
         println!(
             "  {:>6}  {:>12.6}  {:>9.2}%  {:>16.6}  {:>13.6} ({:.1} sigma)",
-            steps, trotter_err_sweep, est_fidelity_sweep * 100.0, total_err, noise_residual, residual_sigma
+            steps,
+            trotter_err_sweep,
+            est_fidelity_sweep * 100.0,
+            total_err,
+            noise_residual,
+            residual_sigma
         );
 
         if total_err < best_sweep_total_error {
@@ -1151,10 +1359,21 @@ fn main() {
     println!("Summary");
     println!("{}", "=".repeat(78));
     println!("  Exact reference (RK4):           {:.6}", exact_avg);
-    println!("  Trotter circuit, ideal simulator: {:.6} (Trotter error {:.6})", device_ideal_avg, (device_ideal_avg - exact_avg).abs());
+    println!(
+        "  Trotter circuit, ideal simulator: {:.6} (Trotter error {:.6})",
+        device_ideal_avg,
+        (device_ideal_avg - exact_avg).abs()
+    );
     println!(
         "  NISQ, raw, {:?}:            {:.6} (noise error {:.6} vs. ideal circuit, [{}])",
-        best_backend, scale_mean[0], noise_gap_raw, if noise_corrupted { "NOISE DETECTED" } else { "consistent" }
+        best_backend,
+        scale_mean[0],
+        noise_gap_raw,
+        if noise_corrupted {
+            "NOISE DETECTED"
+        } else {
+            "consistent"
+        }
     );
     println!(
         "  NISQ, ZNE-mitigated:              {:.6} (noise error {:.6} vs. ideal circuit, [{}], {} model)",
@@ -1165,7 +1384,8 @@ fn main() {
             "\n  Headline: hardware noise measurably corrupts raw execution ({:.1} sigma from \
              the ideal-circuit answer); ZNE mitigation recovers it to within {:.1} sigma -- a \
              clean, statistically decisive noise correction.",
-            noise_gap_raw / scale_stderr[0], noise_gap_mitigated / mitigated_stderr
+            noise_gap_raw / scale_stderr[0],
+            noise_gap_mitigated / mitigated_stderr
         );
     }
     println!("{}", "=".repeat(78));

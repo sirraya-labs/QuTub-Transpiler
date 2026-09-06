@@ -145,7 +145,10 @@ impl C {
 impl std::ops::Mul for C {
     type Output = C;
     fn mul(self, o: C) -> C {
-        C::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
+        C::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
     }
 }
 impl std::ops::Sub for C {
@@ -248,22 +251,40 @@ fn push_single(nc: &mut NativeCircuit, q: usize, m: Mat2) {
 
 fn m_h() -> Mat2 {
     let f = 1.0 / std::f64::consts::SQRT_2;
-    [[C::new(f, 0.0), C::new(f, 0.0)], [C::new(f, 0.0), C::new(-f, 0.0)]]
+    [
+        [C::new(f, 0.0), C::new(f, 0.0)],
+        [C::new(f, 0.0), C::new(-f, 0.0)],
+    ]
 }
 fn m_x() -> Mat2 {
-    [[C::new(0.0, 0.0), C::new(1.0, 0.0)], [C::new(1.0, 0.0), C::new(0.0, 0.0)]]
+    [
+        [C::new(0.0, 0.0), C::new(1.0, 0.0)],
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+    ]
 }
 fn m_y() -> Mat2 {
-    [[C::new(0.0, 0.0), C::new(0.0, -1.0)], [C::new(0.0, 1.0), C::new(0.0, 0.0)]]
+    [
+        [C::new(0.0, 0.0), C::new(0.0, -1.0)],
+        [C::new(0.0, 1.0), C::new(0.0, 0.0)],
+    ]
 }
 fn m_z() -> Mat2 {
-    [[C::new(1.0, 0.0), C::new(0.0, 0.0)], [C::new(0.0, 0.0), C::new(-1.0, 0.0)]]
+    [
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::new(-1.0, 0.0)],
+    ]
 }
 fn m_s() -> Mat2 {
-    [[C::new(1.0, 0.0), C::new(0.0, 0.0)], [C::new(0.0, 0.0), C::new(0.0, 1.0)]]
+    [
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::new(0.0, 1.0)],
+    ]
 }
 fn m_sdg() -> Mat2 {
-    [[C::new(1.0, 0.0), C::new(0.0, 0.0)], [C::new(0.0, 0.0), C::new(0.0, -1.0)]]
+    [
+        [C::new(1.0, 0.0), C::new(0.0, 0.0)],
+        [C::new(0.0, 0.0), C::new(0.0, -1.0)],
+    ]
 }
 fn m_t() -> Mat2 {
     [
@@ -279,7 +300,10 @@ fn m_tdg() -> Mat2 {
 }
 pub(crate) fn m_rx(theta: f64) -> Mat2 {
     let (c, s) = ((theta / 2.0).cos(), (theta / 2.0).sin());
-    [[C::new(c, 0.0), C::new(0.0, -s)], [C::new(0.0, -s), C::new(c, 0.0)]]
+    [
+        [C::new(c, 0.0), C::new(0.0, -s)],
+        [C::new(0.0, -s), C::new(c, 0.0)],
+    ]
 }
 
 /// Decomposes a full source-level [`Circuit`] into the native
@@ -448,7 +472,10 @@ mod if_decompose_tests {
         let nc = decompose(&c);
         assert_eq!(
             nc.gates,
-            vec![NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.5)))]
+            vec![NativeGate::If(
+                vec![(0, true)],
+                Box::new(NativeGate::Rz(0, 0.5))
+            )]
         );
     }
 
@@ -466,9 +493,15 @@ mod if_decompose_tests {
             match g {
                 NativeGate::If(conditions, inner) => {
                     assert_eq!(conditions.as_slice(), &[(2, false)]);
-                    assert!(matches!(inner.as_ref(), NativeGate::Rz(..) | NativeGate::Ry(..)));
+                    assert!(matches!(
+                        inner.as_ref(),
+                        NativeGate::Rz(..) | NativeGate::Ry(..)
+                    ));
                 }
-                other => panic!("expected every native gate to be If-wrapped, got {:?}", other),
+                other => panic!(
+                    "expected every native gate to be If-wrapped, got {:?}",
+                    other
+                ),
             }
         }
     }
@@ -485,7 +518,10 @@ mod if_decompose_tests {
                 NativeGate::If(conditions, _) => {
                     assert_eq!(conditions.as_slice(), &[(0, true), (1, false)]);
                 }
-                other => panic!("expected every native gate to be If-wrapped, got {:?}", other),
+                other => panic!(
+                    "expected every native gate to be If-wrapped, got {:?}",
+                    other
+                ),
             }
         }
     }
@@ -493,7 +529,10 @@ mod if_decompose_tests {
     #[test]
     fn gate_counts_prices_a_conditioned_rotation_the_same_as_an_unconditioned_one() {
         let mut conditioned = NativeCircuit::new(1);
-        conditioned.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rz(0, 0.1))));
+        conditioned.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rz(0, 0.1)),
+        ));
         let mut plain = NativeCircuit::new(1);
         plain.push(NativeGate::Rz(0, 0.1));
         assert_eq!(conditioned.gate_counts(), plain.gate_counts());
@@ -503,7 +542,10 @@ mod if_decompose_tests {
     #[test]
     fn gate_counts_prices_a_conditioned_two_qubit_gate_as_two_qubit() {
         let mut nc = NativeCircuit::new(2);
-        nc.push(NativeGate::If(vec![(0, true)], Box::new(NativeGate::Rzz(0, 1, 0.2))));
+        nc.push(NativeGate::If(
+            vec![(0, true)],
+            Box::new(NativeGate::Rzz(0, 1, 0.2)),
+        ));
         assert_eq!(nc.gate_counts(), (0, 1));
     }
 }

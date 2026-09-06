@@ -1,0 +1,88 @@
+name: Guardrails / Fuzz smoke (advisory)
+
+# Phase 2a. Runs a short libFuzzer session on every PR that touches a
+# correctness-sensitive module. ADVISORY ONLY (continue-on-error: true) —
+# it posts a red annotation but does not block merge. This is the
+# "won't break new-contributor PRs" hinge: a doc fix, a new backend
+# example, or a README change never even triggers this job (paths:
+# filter below), and a compiler-core PR that trips a fuzz finding still
+# merges — it just carries a visible flag for a maintainer to triage.
+#
+# Promote to required once: (a) the corpus in fuzz/corpus/ has soaked
+# nightly runs for ~2 weeks with no unreviewed crash, and (b) at least
+# one real bug has been caught and turned into a regression test — i.e.
+# once the check has proven it finds real things, not before.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "src/qasm.rs"
+      - "src/ir_optimize.rs"
+      - "src/optimize.rs"
+      - "src/native.rs"
+      - "src/route.rs"
+      - "src/coupling.rs"
+      - "src/backend.rs"
+      - "fuzz/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory: never blocks merge
+    strategy:
+      matrix:
+        target: [qasm-parse, ir-pipeline-no-panic]  # FIXED: kebab-case
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo + fuzz target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-${{ matrix.target }}-
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Restore existing corpus (if any regression cases exist)
+        run: mkdir -p fuzz/corpus/${{ matrix.target }}
+
+      # PR budget: 90s per target. Deliberately short — this is a smoke
+      # test to catch obviously-broken changes fast, not a real campaign.
+      # The real campaign is the nightly job.
+      - name: Fuzz (90s)
+        timeout-minutes: 5  # FIXED: added timeout to prevent hanging
+        run: |
+          cd fuzz
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=90 -print_final_stats=1
+
+      - name: Minimize + upload any crash found
+        if: failure()
+        run: |
+          cd fuzz
+          mkdir -p artifacts/${{ matrix.target }}
+          for f in artifacts/${{ matrix.target }}/crash-*; do
+            [ -e "$f" ] || continue
+            cargo fuzz tmin ${{ matrix.target }} "$f" -o "$f.min" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}-${{ github.event.pull_request.number }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

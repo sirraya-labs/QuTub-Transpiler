@@ -105,7 +105,11 @@ pub enum SeqInstr {
     /// built around -- see the module doc comment for why this
     /// specific shape (compare-immediate-and-jump) rather than a
     /// richer condition language.
-    JumpIfEqual { reg: usize, value: u8, target: usize },
+    JumpIfEqual {
+        reg: usize,
+        value: u8,
+        target: usize,
+    },
     /// Unconditional jump, used to skip *around* a conditioned block
     /// when the condition is `false`-triggered (see [`compile`]).
     Jump { target: usize },
@@ -153,7 +157,11 @@ pub fn compile(circuit: &BackendCircuit, cal: &PulseCalibration) -> Result<Progr
     }
     instrs.push(SeqInstr::Halt);
 
-    Ok(Program { backend: circuit.backend, instrs, num_registers: circuit.num_clbits })
+    Ok(Program {
+        backend: circuit.backend,
+        instrs,
+        num_registers: circuit.num_clbits,
+    })
 }
 
 fn compile_one(
@@ -287,7 +295,14 @@ pub fn execute_with_readout_noise(
     readout_cal: &crate::readout::ReadoutCalibration,
     uniform_samples: impl FnMut() -> f64,
 ) -> Result<(QuantumRegister, Vec<u8>), String> {
-    execute_with_noise(circuit, program, cal, None, Some(readout_cal), uniform_samples)
+    execute_with_noise(
+        circuit,
+        program,
+        cal,
+        None,
+        Some(readout_cal),
+        uniform_samples,
+    )
 }
 
 /// The full, combined noisy execution: real per-gate depolarizing
@@ -326,7 +341,14 @@ pub fn execute_with_noise(
     readout_cal: Option<&crate::readout::ReadoutCalibration>,
     mut uniform_samples: impl FnMut() -> f64,
 ) -> Result<(QuantumRegister, Vec<u8>), String> {
-    execute_impl(circuit, program, cal, gate_cal, readout_cal, &mut uniform_samples)
+    execute_impl(
+        circuit,
+        program,
+        cal,
+        gate_cal,
+        readout_cal,
+        &mut uniform_samples,
+    )
 }
 
 /// The shared core every `execute*` function runs -- identical except
@@ -404,7 +426,9 @@ fn execute_impl(
             )
         })?;
         match instr {
-            SeqInstr::Play(PulseInstruction::ShiftPhase { channel, angle_rad, .. }) => {
+            SeqInstr::Play(PulseInstruction::ShiftPhase {
+                channel, angle_rad, ..
+            }) => {
                 // No gate-noise sampling here -- virtual-Z, see this
                 // function's own doc comment on `gate_cal`.
                 if let Channel::Drive(q) = *channel {
@@ -412,7 +436,9 @@ fn execute_impl(
                 }
                 pc += 1;
             }
-            SeqInstr::Play(PulseInstruction::Play { channel, amplitude, .. }) => {
+            SeqInstr::Play(PulseInstruction::Play {
+                channel, amplitude, ..
+            }) => {
                 match *channel {
                     Channel::Drive(q) => {
                         let theta = invert_amplitude(*amplitude, cal.rot.pi_amplitude, "rot")?;
@@ -475,7 +501,11 @@ fn execute_impl(
                 clbits[*r] = reported;
                 pc += 1;
             }
-            SeqInstr::JumpIfEqual { reg: r, value, target } => {
+            SeqInstr::JumpIfEqual {
+                reg: r,
+                value,
+                target,
+            } => {
                 let actual = registers[*r].ok_or_else(|| {
                     format!(
                         "execute: JumpIfEqual read register {} before any MeasureInto wrote it",
@@ -605,7 +635,9 @@ mod tests {
                     t < program.instrs.len() && t != i,
                     "instr {} jumps to {}, which is out of bounds or a self-loop \
                      (program has {} instructions)",
-                    i, t, program.instrs.len()
+                    i,
+                    t,
+                    program.instrs.len()
                 );
             }
         }
@@ -629,7 +661,11 @@ mod tests {
         let mut steps = 0usize;
         loop {
             steps += 1;
-            assert!(steps < 10_000, "symbolic_run: probable infinite loop, pc={}", pc);
+            assert!(
+                steps < 10_000,
+                "symbolic_run: probable infinite loop, pc={}",
+                pc
+            );
             match &program.instrs[pc] {
                 // Only a real `Play` counts as "fired" -- `ShiftPhase`
                 // is a virtual, zero-duration frame update (see
@@ -684,14 +720,16 @@ mod tests {
                 if actual {
                     match inner.as_ref() {
                         BackendGate::Rot(q, _) => expected.push(*q),
-                        BackendGate::Cx(a, b) | BackendGate::Cz(a, b) | BackendGate::Rzz(a, b, _) => {
+                        BackendGate::Cx(a, b)
+                        | BackendGate::Cz(a, b)
+                        | BackendGate::Rzz(a, b, _) => {
                             expected.push(*a);
                             expected.push(*b);
                         }
                         BackendGate::Rz(..) => {} // virtual only, no real Play
-                        BackendGate::Measure(..) | BackendGate::If(..) => unreachable!(
-                            "BackendGate::If never wraps Measure or another If"
-                        ),
+                        BackendGate::Measure(..) | BackendGate::If(..) => {
+                            unreachable!("BackendGate::If never wraps Measure or another If")
+                        }
                     }
                 }
             }
@@ -826,13 +864,19 @@ mod tests {
 
             for trial in 0..20 {
                 let (reg, _clbits) = execute(&bc, &program, &cal).unwrap();
-                let bob = reg.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+                let bob = reg
+                    .to_density_matrix()
+                    .unwrap()
+                    .partial_trace(&[2])
+                    .unwrap();
                 let fidelity = bob.fidelity(&target).unwrap();
                 assert!(
                     (fidelity - 1.0).abs() < 1e-9,
                     "state {} trial {}: teleportation via sequencer::execute should reach \
                      ~100% fidelity, got {}",
-                    label, trial, fidelity
+                    label,
+                    trial,
+                    fidelity
                 );
             }
         }
@@ -901,13 +945,19 @@ mod tests {
 
             for trial in 0..10 {
                 let (reg, _clbits) = execute(&bc, &program, &cal).unwrap();
-                let bob = reg.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+                let bob = reg
+                    .to_density_matrix()
+                    .unwrap()
+                    .partial_trace(&[2])
+                    .unwrap();
                 let fidelity = bob.fidelity(&target).unwrap();
                 assert!(
                     (fidelity - 1.0).abs() < 1e-9,
                     "backend {:?} trial {}: expected ~100% fidelity, got {} -- likely a wrong \
                      NativeTwoQubitGate dispatch for this backend",
-                    backend, trial, fidelity
+                    backend,
+                    trial,
+                    fidelity
                 );
             }
         }
@@ -972,7 +1022,11 @@ mod tests {
         // ~100% -- confirms any failure below is readout.rs's doing,
         // not a pre-existing bug in compile/execute.
         let (reg_exact, _) = execute(&bc, &program, &cal).unwrap();
-        let bob_exact = reg_exact.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+        let bob_exact = reg_exact
+            .to_density_matrix()
+            .unwrap()
+            .partial_trace(&[2])
+            .unwrap();
         assert!((bob_exact.fidelity(&target).unwrap() - 1.0).abs() < 1e-9);
 
         // With p01=0/p10=1, corrupt_readout's outcome doesn't depend
@@ -984,7 +1038,11 @@ mod tests {
         for _ in 0..30 {
             let (reg_noisy, _clbits) =
                 execute_with_readout_noise(&bc, &program, &cal, &broken_readout, || 0.5).unwrap();
-            let bob_noisy = reg_noisy.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+            let bob_noisy = reg_noisy
+                .to_density_matrix()
+                .unwrap()
+                .partial_trace(&[2])
+                .unwrap();
             let fidelity = bob_noisy.fidelity(&target).unwrap();
             if (fidelity - 1.0).abs() > 1e-6 {
                 saw_broken_fidelity = true;
@@ -1072,7 +1130,11 @@ mod tests {
         // any degradation below is the noise model's doing, not a
         // pre-existing bug.
         let (reg_exact, _) = execute(&bc, &program, &cal).unwrap();
-        let bob_exact = reg_exact.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+        let bob_exact = reg_exact
+            .to_density_matrix()
+            .unwrap()
+            .partial_trace(&[2])
+            .unwrap();
         assert!((bob_exact.fidelity(&target).unwrap() - 1.0).abs() < 1e-9);
 
         let mut rng = rand::thread_rng();
@@ -1084,7 +1146,11 @@ mod tests {
                     rng.gen::<f64>()
                 })
                 .unwrap();
-            let bob_noisy = reg_noisy.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+            let bob_noisy = reg_noisy
+                .to_density_matrix()
+                .unwrap()
+                .partial_trace(&[2])
+                .unwrap();
             total_fidelity += bob_noisy.fidelity(&target).unwrap();
         }
         let avg_fidelity = total_fidelity / trials as f64;
@@ -1092,7 +1158,8 @@ mod tests {
             avg_fidelity < 0.9,
             "expected guaranteed-probability, genuinely random per-gate noise to substantially \
              degrade average teleportation fidelity across {} trials, got average {}",
-            trials, avg_fidelity
+            trials,
+            avg_fidelity
         );
     }
 
@@ -1157,7 +1224,11 @@ mod tests {
                 || rng.gen::<f64>(),
             )
             .unwrap();
-            let bob_noisy = reg_noisy.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+            let bob_noisy = reg_noisy
+                .to_density_matrix()
+                .unwrap()
+                .partial_trace(&[2])
+                .unwrap();
             total_fidelity += bob_noisy.fidelity(&target).unwrap();
         }
         let avg_fidelity = total_fidelity / trials as f64;
@@ -1165,7 +1236,8 @@ mod tests {
             avg_fidelity < 0.9,
             "expected the gate-noise component of execute_with_noise to still degrade average \
              fidelity even with readout noise set to zero, got average {} across {} trials",
-            avg_fidelity, trials
+            avg_fidelity,
+            trials
         );
     }
 
@@ -1229,9 +1301,14 @@ mod tests {
                     !expected.is_empty(),
                     should_fire,
                     "m0={} m1={}: expected ground-truth firing to require BOTH bits set",
+                    m0,
+                    m1
+                );
+                assert_eq!(
+                    fired, expected,
+                    "m0={} m1={}: Program disagreed with ground truth",
                     m0, m1
                 );
-                assert_eq!(fired, expected, "m0={} m1={}: Program disagreed with ground truth", m0, m1);
             }
         }
 
@@ -1257,7 +1334,11 @@ mod tests {
         let program_both_true = compile(&bc_both_true, &cal).unwrap();
         let (reg, clbits) = execute(&bc_both_true, &program_both_true, &cal).unwrap();
         assert_eq!(clbits, vec![1, 1]);
-        let q2 = reg.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+        let q2 = reg
+            .to_density_matrix()
+            .unwrap()
+            .partial_trace(&[2])
+            .unwrap();
         assert!((q2.fidelity(&target_flipped).unwrap() - 1.0).abs() < 1e-9);
 
         // And the negative case: m0=1, m1=0 -- condition doesn't hold,
@@ -1267,7 +1348,11 @@ mod tests {
         let program_one_true = compile(&bc_one_true, &cal).unwrap();
         let (reg2, clbits2) = execute(&bc_one_true, &program_one_true, &cal).unwrap();
         assert_eq!(clbits2, vec![1, 0]);
-        let q2_unflipped = reg2.to_density_matrix().unwrap().partial_trace(&[2]).unwrap();
+        let q2_unflipped = reg2
+            .to_density_matrix()
+            .unwrap()
+            .partial_trace(&[2])
+            .unwrap();
         assert!((q2_unflipped.fidelity(&target_unflipped).unwrap() - 1.0).abs() < 1e-9);
     }
 }

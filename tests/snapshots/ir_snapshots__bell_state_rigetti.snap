@@ -1,0 +1,55 @@
+---
+source: tests/ir_snapshots.rs
+expression: lowered_str
+---
+BackendCircuit {
+    backend: Rigetti,
+    num_qubits: 2,
+    num_clbits: 2,
+    gates: [
+        Rz(
+            0,
+            1.570796326794,
+        ),
+        Rot(
+            0,
+            1.570796326794,
+        ),
+        Rz(
+            1,
+            1.570796326794,
+        ),
+        Rot(
+            1,
+            1.570796326794,
+        ),
+        Cz(
+            0,
+            1,
+        ),
+        Rz(
+            0,
+            1.570796326794,
+        ),
+        Measure(
+            0,
+            0,
+        ),
+        Rz(
+            1,
+            3.141592653589,
+        ),
+        Rot(
+            1,
+            1.570796326794,
+        ),
+        Rz(
+            1,
+            1.570796326794,
+        ),
+        Measure(
+            1,
+            1,
+        ),
+    ],
+}

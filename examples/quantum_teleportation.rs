@@ -1,3 +1,9 @@
+//! Quantum Teleportation Example
+//!
+//! Demonstrates the quantum teleportation protocol using the QuTub transpiler.
+
+// Allow complex types in test state arrays (not production code)
+#![allow(clippy::type_complexity)]
 //! Quantum teleportation, run through this crate's real compiler
 //! pipeline -- same [`CircuitExecutor`] / `NoisyBackendExecutor` /
 //! `zero_noise_extrapolate` machinery as `trotter_ising_dynamics.rs`
@@ -98,7 +104,12 @@ use sirraya_qutub_transpiler::{decompose, emit, ir_optimize};
 
 /// Every backend currently supported by the crate -- same list
 /// `trotter_ising_dynamics.rs` compares against.
-const BACKENDS: [Backend; 4] = [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti, Backend::Google];
+const BACKENDS: [Backend; 4] = [
+    Backend::TrappedIon,
+    Backend::IbmQ,
+    Backend::Rigetti,
+    Backend::Google,
+];
 
 fn calibration_for(backend: Backend) -> PublishedCalibration {
     if backend == Backend::TrappedIon {
@@ -110,7 +121,10 @@ fn calibration_for(backend: Backend) -> PublishedCalibration {
     } else if backend == Backend::Google {
         PublishedCalibration::google_willow_2024()
     } else {
-        panic!("no published calibration registered for backend {:?}", backend);
+        panic!(
+            "no published calibration registered for backend {:?}",
+            backend
+        );
     }
 }
 
@@ -226,7 +240,11 @@ fn bloch_vector(dm: &DensityMatrix) -> (f64, f64, f64) {
     let rho00 = m[0][0];
     let rho01 = m[0][1];
     let rho11 = m[1][1];
-    (2.0 * rho01.real(), -2.0 * rho01.imag(), rho00.real() - rho11.real())
+    (
+        2.0 * rho01.real(),
+        -2.0 * rho01.imag(),
+        rho00.real() - rho11.real(),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -299,13 +317,29 @@ struct NoisyBackendExecutor {
 }
 
 impl NoisyBackendExecutor {
-    fn new(n: usize, backend: Backend, estimated_fidelity: f64, noise_scale: f64, seed: u64) -> Self {
-        NoisyBackendExecutor { n, backend, estimated_fidelity, noise_scale, rng: Xorshift64::new(seed) }
+    fn new(
+        n: usize,
+        backend: Backend,
+        estimated_fidelity: f64,
+        noise_scale: f64,
+        seed: u64,
+    ) -> Self {
+        NoisyBackendExecutor {
+            n,
+            backend,
+            estimated_fidelity,
+            noise_scale,
+            rng: Xorshift64::new(seed),
+        }
     }
 
     fn gate_error_rate(&self, total_gates: usize) -> f64 {
         let total_gates = (total_gates.max(1)) as f64;
-        let base_rate = 1.0 - self.estimated_fidelity.clamp(1e-9, 1.0).powf(1.0 / total_gates);
+        let base_rate = 1.0
+            - self
+                .estimated_fidelity
+                .clamp(1e-9, 1.0)
+                .powf(1.0 / total_gates);
         (base_rate * self.noise_scale).clamp(0.0, 0.5)
     }
 }
@@ -393,7 +427,12 @@ fn zero_noise_extrapolate(scales: &[f64], values: &[f64], stderrs: &[f64]) -> (f
     let sx: f64 = weights.iter().zip(scales).map(|(w, x)| w * x).sum();
     let sy: f64 = weights.iter().zip(values).map(|(w, y)| w * y).sum();
     let sxx: f64 = weights.iter().zip(scales).map(|(w, x)| w * x * x).sum();
-    let sxy: f64 = weights.iter().zip(scales).zip(values).map(|((w, x), y)| w * x * y).sum();
+    let sxy: f64 = weights
+        .iter()
+        .zip(scales)
+        .zip(values)
+        .map(|((w, x), y)| w * x * y)
+        .sum();
 
     let delta = s * sxx - sx * sx;
     if delta.abs() < 1e-12 {
@@ -426,20 +465,31 @@ fn main() -> Result<(), String> {
     println!("1. Backend comparison (fidelity estimate on the entangling circuit)");
     println!("{}", "=".repeat(78));
     let representative = teleportation_entangling_circuit(prep_i);
-    println!("{:<14}{:>12}{:>16}", "backend", "native gates", "est. fidelity");
+    println!(
+        "{:<14}{:>12}{:>16}",
+        "backend", "native gates", "est. fidelity"
+    );
     let mut best_backend = BACKENDS[0];
     let mut best_fidelity = -1.0;
     for &backend in &BACKENDS {
         let cal = calibration_for(backend);
         let lowered = lower(&representative, backend);
         let est = estimate_backend_circuit_fidelity(&lowered, &cal);
-        println!("{:<14}{:>12}{:>15.2}%", format!("{:?}", backend), lowered.gates.len(), est * 100.0);
+        println!(
+            "{:<14}{:>12}{:>15.2}%",
+            format!("{:?}", backend),
+            lowered.gates.len(),
+            est * 100.0
+        );
         if est > best_fidelity {
             best_fidelity = est;
             best_backend = backend;
         }
     }
-    println!("\nRecommended backend for the noisy run below: {:?}", best_backend);
+    println!(
+        "\nRecommended backend for the noisy run below: {:?}",
+        best_backend
+    );
 
     // --- 2. Ideal (noiseless) verification, six input states -----------
     println!("\n{}", "=".repeat(78));
@@ -468,7 +518,8 @@ fn main() -> Result<(), String> {
         let mut max_dm_bloch_disagreement = 0.0f64;
 
         for _ in 0..trials_per_state {
-            let (m0, m1, f_dm, f_bloch) = run_teleportation_trial(&mut ideal_executor, *prep, &target)?;
+            let (m0, m1, f_dm, f_bloch) =
+                run_teleportation_trial(&mut ideal_executor, *prep, &target)?;
             outcome_counts[(m0 as usize) + 2 * (m1 as usize)] += 1;
             sum_fidelity += f_dm;
             min_fidelity = min_fidelity.min(f_dm);
@@ -481,12 +532,16 @@ fn main() -> Result<(), String> {
             name,
             mean_fidelity * 100.0,
             min_fidelity * 100.0,
-            pct(outcome_counts[0]), pct(outcome_counts[1]), pct(outcome_counts[2]), pct(outcome_counts[3]),
+            pct(outcome_counts[0]),
+            pct(outcome_counts[1]),
+            pct(outcome_counts[2]),
+            pct(outcome_counts[3]),
         );
         assert!(
             max_dm_bloch_disagreement < 1e-9,
             "DensityMatrix::fidelity and the Bloch-vector cross-check disagreed by {} for {}",
-            max_dm_bloch_disagreement, name
+            max_dm_bloch_disagreement,
+            name
         );
     }
     println!(
@@ -499,7 +554,10 @@ fn main() -> Result<(), String> {
 
     // --- 3. NISQ-realistic execution + zero-noise extrapolation --------
     println!("\n{}", "=".repeat(78));
-    println!("3. Realistic noise + zero-noise extrapolation ({:?}, |i> state)", best_backend);
+    println!(
+        "3. Realistic noise + zero-noise extrapolation ({:?}, |i> state)",
+        best_backend
+    );
     println!("{}", "=".repeat(78));
     let cal = calibration_for(best_backend);
     let lowered = lower(&representative, best_backend);
@@ -512,7 +570,8 @@ fn main() -> Result<(), String> {
     let mut scale_stderr = Vec::with_capacity(zne_scales.len());
     println!("{:>8}{:>14}{:>14}", "scale", "mean F", "stderr");
     for (i, &scale) in zne_scales.iter().enumerate() {
-        let mut executor = NoisyBackendExecutor::new(3, best_backend, est_fidelity, scale, 0xC0FFEE + i as u64);
+        let mut executor =
+            NoisyBackendExecutor::new(3, best_backend, est_fidelity, scale, 0xC0FFEE + i as u64);
         let mut sum = 0.0;
         let mut sq_sum = 0.0;
         for _ in 0..shots_per_scale {
@@ -524,27 +583,45 @@ fn main() -> Result<(), String> {
         let mean = sum / n;
         let variance = (sq_sum / n - mean * mean).max(0.0);
         let stderr = (variance / n).sqrt();
-        println!("{:>8.1}{:>13.4}%{:>13.4}%", scale, mean * 100.0, stderr * 100.0);
+        println!(
+            "{:>8.1}{:>13.4}%{:>13.4}%",
+            scale,
+            mean * 100.0,
+            stderr * 100.0
+        );
         scale_mean.push(mean);
         scale_stderr.push(stderr);
     }
-    let (mitigated, mitigated_stderr) = zero_noise_extrapolate(&zne_scales, &scale_mean, &scale_stderr);
+    let (mitigated, mitigated_stderr) =
+        zero_noise_extrapolate(&zne_scales, &scale_mean, &scale_stderr);
     println!(
         "\nRaw (scale=1.0) fidelity:    {:.4}% +/- {:.4}%",
-        scale_mean[0] * 100.0, scale_stderr[0] * 100.0
+        scale_mean[0] * 100.0,
+        scale_stderr[0] * 100.0
     );
     println!(
         "ZNE-mitigated fidelity:      {:.4}% +/- {:.4}%  (extrapolated to zero noise)",
-        mitigated * 100.0, mitigated_stderr * 100.0
+        mitigated * 100.0,
+        mitigated_stderr * 100.0
     );
 
     // --- Summary ---------------------------------------------------------
     println!("\n{}", "=".repeat(78));
     println!("Summary");
     println!("{}", "=".repeat(78));
-    println!("  Ideal-simulator teleportation fidelity:  ~100% across 6 input states, all 4 outcomes");
-    println!("  {:?} raw (noisy) fidelity:          {:.2}%", best_backend, scale_mean[0] * 100.0);
-    println!("  {:?} ZNE-mitigated fidelity:        {:.2}%", best_backend, mitigated * 100.0);
+    println!(
+        "  Ideal-simulator teleportation fidelity:  ~100% across 6 input states, all 4 outcomes"
+    );
+    println!(
+        "  {:?} raw (noisy) fidelity:          {:.2}%",
+        best_backend,
+        scale_mean[0] * 100.0
+    );
+    println!(
+        "  {:?} ZNE-mitigated fidelity:        {:.2}%",
+        best_backend,
+        mitigated * 100.0
+    );
     println!(
         "\nEntanglement resource: 1 Bell pair. Classical communication: 2 bits.\n\
          Corrections compiled as real Gate::If classical control, executed via\n\

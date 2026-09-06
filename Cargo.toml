@@ -23,6 +23,23 @@ sirraya-qutub = "0.1.13"
 [dev-dependencies]
 rand = "0.8"
 
+# === ADDED: New dev-dependencies for guardrails ===
+[dev-dependencies.insta]
+version = "1"
+features = ["yaml", "filters"]   # <-- ADDED "filters"
+
+[dev-dependencies.sha2]
+version = "0.10"
+
+[dev-dependencies.serde_json]
+version = "1"
+
+[dev-dependencies.regex]          # <-- ADDED regex for floating-point rounding
+version = "1"
+
+[dev-dependencies.toml]           # <-- ADDED toml for provenance manifest (if needed)
+version = "0.8"
+
 [features]
 default = []
 # Feature flags for optional functionality

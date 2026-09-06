@@ -1,0 +1,73 @@
+name: Guardrails / Fuzz nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Run at 2 AM daily
+  workflow_dispatch:
+
+jobs:
+  fuzz-nightly:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [qasm-parse, ir-pipeline-no-panic]  # FIXED: kebab-case
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo + fuzz target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-nightly-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-nightly-${{ matrix.target }}-
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Restore existing corpus
+        run: mkdir -p fuzz/corpus/${{ matrix.target }}
+
+      - name: Nightly fuzzing (15 min)
+        timeout-minutes: 20
+        run: |
+          cd fuzz
+          cargo fuzz run ${{ matrix.target }} -- -max_total_time=900 -print_final_stats=1
+
+      - name: Minimize crashes
+        if: failure()
+        run: |
+          cd fuzz
+          mkdir -p artifacts/${{ matrix.target }}
+          for f in artifacts/${{ matrix.target }}/crash-*; do
+            [ -e "$f" ] || continue
+            cargo fuzz tmin ${{ matrix.target }} "$f" -o "$f.min" || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-nightly-crash-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+
+      - name: File issue for crashes
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[FUZZ] Nightly crash found in ${process.env.MATRIX_TARGET}`,
+              body: 'Nightly fuzzing found a crash. Check the workflow artifacts for details.\n\nRun: ' + context.runId,
+              labels: ['fuzz-finding', 'bug']
+            })

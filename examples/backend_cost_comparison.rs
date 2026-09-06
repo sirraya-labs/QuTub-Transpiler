@@ -23,11 +23,7 @@ use sirraya_qutub_transpiler::fidelity::estimate_backend_circuit_fidelity;
 use sirraya_qutub_transpiler::ir::{Circuit, Gate};
 
 /// Every backend currently supported by the crate.
-const BACKENDS: [Backend; 3] = [
-    Backend::TrappedIon,
-    Backend::IbmQ,
-    Backend::Rigetti,
-];
+const BACKENDS: [Backend; 3] = [Backend::TrappedIon, Backend::IbmQ, Backend::Rigetti];
 
 /// Construct a Bell pair.
 ///
@@ -38,8 +34,7 @@ const BACKENDS: [Backend; 3] = [
 /// q1 ───────X──
 fn bell_pair() -> Circuit {
     let mut c = Circuit::new(2);
-    c.push(Gate::H(0))
-        .push(Gate::Cx(0, 1));
+    c.push(Gate::H(0)).push(Gate::Cx(0, 1));
     c
 }
 
@@ -73,8 +68,7 @@ fn qft(n: usize) -> Circuit {
         c.push(Gate::H(i));
 
         for j in (i + 1)..n {
-            let lambda =
-                std::f64::consts::PI / (1u32 << (j - i)) as f64;
+            let lambda = std::f64::consts::PI / (1u32 << (j - i)) as f64;
 
             c.push(Gate::Cp(j, i, lambda));
         }
@@ -97,10 +91,7 @@ fn print_header(name: &str, circuit: &Circuit) {
 
     println!(
         "{:<14} {:>12} {:>12} {:>20}",
-        "Backend",
-        "1Q Gates",
-        "2Q Gates",
-        "Estimated Fidelity"
+        "Backend", "1Q Gates", "2Q Gates", "Estimated Fidelity"
     );
 
     println!("{}", "-".repeat(78));
@@ -125,8 +116,7 @@ fn main() {
 
             let calibration = backend.calibration();
 
-            let fidelity =
-                estimate_backend_circuit_fidelity(&backend_circuit, &calibration);
+            let fidelity = estimate_backend_circuit_fidelity(&backend_circuit, &calibration);
 
             println!(
                 "{:<14} {:>12} {:>12} {:>20.6}",
@@ -144,15 +134,9 @@ fn main() {
         println!("{}", "-".repeat(78));
 
         if let Some((backend, fidelity)) = best {
-            println!(
-                "Recommended backend : {:?}",
-                backend
-            );
+            println!("Recommended backend : {:?}", backend);
 
-            println!(
-                "Estimated fidelity  : {:.6}",
-                fidelity
-            );
+            println!("Estimated fidelity  : {:.6}", fidelity);
 
             println!(
                 "Reason              : Highest estimated fidelity under the \

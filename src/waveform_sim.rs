@@ -160,7 +160,11 @@ pub struct BlochVector {
 impl BlochVector {
     /// The starting state every [`integrate`] call begins from: the
     /// qubit's ground state, `|0>`.
-    pub const GROUND: BlochVector = BlochVector { x: 0.0, y: 0.0, z: 1.0 };
+    pub const GROUND: BlochVector = BlochVector {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
 
     /// Should stay `1.0` (up to numerical-integration error) for any
     /// state reachable by the lossless, unitary evolution [`integrate`]
@@ -199,7 +203,10 @@ fn envelope_shape(envelope: &Envelope, t_ns: f64, duration_ns: f64) -> f64 {
             let dt = t_ns - duration_ns / 2.0;
             (-(dt * dt) / (2.0 * sigma_ns * sigma_ns)).exp()
         }
-        Envelope::GaussianSquare { sigma_ns, risefall_ns } => {
+        Envelope::GaussianSquare {
+            sigma_ns,
+            risefall_ns,
+        } => {
             if t_ns < risefall_ns {
                 let dt = t_ns - risefall_ns;
                 (-(dt * dt) / (2.0 * sigma_ns * sigma_ns)).exp()
@@ -224,9 +231,12 @@ fn envelope_shape(envelope: &Envelope, t_ns: f64, duration_ns: f64) -> f64 {
 /// nothing to integrate (see `pulse.rs`'s doc comment on virtual-Z).
 pub fn integrate(instr: &PulseInstruction) -> Result<BlochVector, String> {
     let (duration_ns, envelope, amplitude) = match *instr {
-        PulseInstruction::Play { duration_ns, envelope, amplitude, .. } => {
-            (duration_ns, envelope, amplitude)
-        }
+        PulseInstruction::Play {
+            duration_ns,
+            envelope,
+            amplitude,
+            ..
+        } => (duration_ns, envelope, amplitude),
         PulseInstruction::ShiftPhase { .. } => {
             return Err(
                 "ShiftPhase is a zero-duration virtual phase update, not a physical pulse \
@@ -240,9 +250,14 @@ pub fn integrate(instr: &PulseInstruction) -> Result<BlochVector, String> {
     let dt = duration_ns / STEPS as f64;
 
     let deriv = |v: BlochVector, t_ns: f64| -> BlochVector {
-        let omega_x =
-            RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS * amplitude * envelope_shape(&envelope, t_ns, duration_ns);
-        BlochVector { x: 0.0, y: -omega_x * v.z, z: omega_x * v.y }
+        let omega_x = RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS
+            * amplitude
+            * envelope_shape(&envelope, t_ns, duration_ns);
+        BlochVector {
+            x: 0.0,
+            y: -omega_x * v.z,
+            z: omega_x * v.y,
+        }
     };
 
     let mut v = BlochVector::GROUND;
@@ -252,18 +267,32 @@ pub fn integrate(instr: &PulseInstruction) -> Result<BlochVector, String> {
         let k2 = deriv(add(v, scale(k1, dt / 2.0)), t + dt / 2.0);
         let k3 = deriv(add(v, scale(k2, dt / 2.0)), t + dt / 2.0);
         let k4 = deriv(add(v, scale(k3, dt)), t + dt);
-        v = add(v, scale(add(add(k1, scale(k2, 2.0)), add(scale(k3, 2.0), k4)), dt / 6.0));
+        v = add(
+            v,
+            scale(
+                add(add(k1, scale(k2, 2.0)), add(scale(k3, 2.0), k4)),
+                dt / 6.0,
+            ),
+        );
         t += dt;
     }
     Ok(v)
 }
 
 fn add(a: BlochVector, b: BlochVector) -> BlochVector {
-    BlochVector { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }
+    BlochVector {
+        x: a.x + b.x,
+        y: a.y + b.y,
+        z: a.z + b.z,
+    }
 }
 
 fn scale(a: BlochVector, s: f64) -> BlochVector {
-    BlochVector { x: a.x * s, y: a.y * s, z: a.z * s }
+    BlochVector {
+        x: a.x * s,
+        y: a.y * s,
+        z: a.z * s,
+    }
 }
 
 /// The net rotation angle a Bloch vector's `z` alone implies --
@@ -331,7 +360,10 @@ fn add_zz(a: TwoQubitZZState, b: TwoQubitZZState) -> TwoQubitZZState {
 }
 
 fn scale_zz(a: TwoQubitZZState, s: f64) -> TwoQubitZZState {
-    TwoQubitZZState { c00: (a.c00.0 * s, a.c00.1 * s), c01: (a.c01.0 * s, a.c01.1 * s) }
+    TwoQubitZZState {
+        c00: (a.c00.0 * s, a.c00.1 * s),
+        c01: (a.c01.0 * s, a.c01.1 * s),
+    }
 }
 
 /// Converts a two-qubit `Play` instruction's dimensionless `amplitude`
@@ -357,9 +389,12 @@ pub const TWO_QUBIT_RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS: f64 = 6.832_305_92e
 /// does -- nothing to integrate for a zero-duration virtual update.
 pub fn integrate_two_qubit_zz(instr: &PulseInstruction) -> Result<TwoQubitZZState, String> {
     let (duration_ns, envelope, amplitude) = match *instr {
-        PulseInstruction::Play { duration_ns, envelope, amplitude, .. } => {
-            (duration_ns, envelope, amplitude)
-        }
+        PulseInstruction::Play {
+            duration_ns,
+            envelope,
+            amplitude,
+            ..
+        } => (duration_ns, envelope, amplitude),
         PulseInstruction::ShiftPhase { .. } => {
             return Err(
                 "ShiftPhase is a zero-duration virtual phase update, not a physical pulse \
@@ -396,7 +431,10 @@ pub fn integrate_two_qubit_zz(instr: &PulseInstruction) -> Result<TwoQubitZZStat
         let k4 = deriv(add_zz(s, scale_zz(k3, dt)), t + dt);
         s = add_zz(
             s,
-            scale_zz(add_zz(add_zz(k1, scale_zz(k2, 2.0)), add_zz(scale_zz(k3, 2.0), k4)), dt / 6.0),
+            scale_zz(
+                add_zz(add_zz(k1, scale_zz(k2, 2.0)), add_zz(scale_zz(k3, 2.0), k4)),
+                dt / 6.0,
+            ),
         );
         t += dt;
     }
@@ -417,7 +455,10 @@ mod tests {
             channel: Channel::Drive(0),
             start_time_ns: 0.0,
             duration_ns: cal.duration_ns,
-            envelope: Envelope::Drag { sigma_ns: cal.sigma_ns, beta: cal.drag_beta },
+            envelope: Envelope::Drag {
+                sigma_ns: cal.sigma_ns,
+                beta: cal.drag_beta,
+            },
             amplitude: cal.pi_amplitude * theta / PI,
         }
     }
@@ -437,7 +478,10 @@ mod tests {
         let cal = ibm_heron_r2_pulse_calibration();
         let v = integrate(&play_for_rot(&cal.rot, PI / 2.0)).unwrap();
         let theta = rotation_angle_rad(v);
-        assert!((theta - PI / 2.0).abs() < 0.01, "expected ~pi/2, got {theta}");
+        assert!(
+            (theta - PI / 2.0).abs() < 0.01,
+            "expected ~pi/2, got {theta}"
+        );
     }
 
     #[test]
@@ -457,7 +501,11 @@ mod tests {
         // accuracy, independent of any calibration table.
         let cal = ibm_heron_r2_pulse_calibration();
         let v = integrate(&play_for_rot(&cal.rot, PI)).unwrap();
-        assert!((v.norm() - 1.0).abs() < 1e-6, "RK4 drift too large: |v| = {}", v.norm());
+        assert!(
+            (v.norm() - 1.0).abs() < 1e-6,
+            "RK4 drift too large: |v| = {}",
+            v.norm()
+        );
     }
 
     #[test]
@@ -516,12 +564,18 @@ mod tests {
         assert!(integrate(&instr).is_err());
     }
 
-    fn play_for_rzz(cal: &crate::pulse::TwoQubitContinuousPulseCalibration, theta: f64) -> PulseInstruction {
+    fn play_for_rzz(
+        cal: &crate::pulse::TwoQubitContinuousPulseCalibration,
+        theta: f64,
+    ) -> PulseInstruction {
         PulseInstruction::Play {
             channel: Channel::Control(0, 1),
             start_time_ns: 0.0,
             duration_ns: cal.duration_ns,
-            envelope: Envelope::GaussianSquare { sigma_ns: cal.sigma_ns, risefall_ns: cal.risefall_ns },
+            envelope: Envelope::GaussianSquare {
+                sigma_ns: cal.sigma_ns,
+                risefall_ns: cal.risefall_ns,
+            },
             amplitude: cal.pi_amplitude * theta / PI,
         }
     }
@@ -531,7 +585,10 @@ mod tests {
             channel: Channel::Control(0, 1),
             start_time_ns: 0.0,
             duration_ns: cal.duration_ns,
-            envelope: Envelope::GaussianSquare { sigma_ns: cal.sigma_ns, risefall_ns: cal.risefall_ns },
+            envelope: Envelope::GaussianSquare {
+                sigma_ns: cal.sigma_ns,
+                risefall_ns: cal.risefall_ns,
+            },
             amplitude: cal.amplitude,
         }
     }
@@ -552,7 +609,10 @@ mod tests {
         let cal = trapped_ion_pulse_calibration();
         let s = integrate_two_qubit_zz(&play_for_rzz(&cal.rzz.unwrap(), PI / 2.0)).unwrap();
         let theta = s.relative_phase_rad();
-        assert!((theta - PI / 2.0).abs() < 0.01, "expected ~pi/2, got {theta}");
+        assert!(
+            (theta - PI / 2.0).abs() < 0.01,
+            "expected ~pi/2, got {theta}"
+        );
     }
 
     #[test]
@@ -573,7 +633,11 @@ mod tests {
         // independent of any calibration table.
         let cal = trapped_ion_pulse_calibration();
         let s = integrate_two_qubit_zz(&play_for_rzz(&cal.rzz.unwrap(), PI)).unwrap();
-        assert!((s.norm() - 1.0).abs() < 1e-6, "RK4 drift too large: |s| = {}", s.norm());
+        assert!(
+            (s.norm() - 1.0).abs() < 1e-6,
+            "RK4 drift too large: |s| = {}",
+            s.norm()
+        );
     }
 
     #[test]
@@ -627,17 +691,20 @@ mod tests {
             ibm_theta / target < 0.10,
             "IbmQ's two_qubit pulse achieved {:.6} rad, {:.2}% of the PI/2 target -- expected \
              well under 10% (see this test's own doc comment on why)",
-            ibm_theta, 100.0 * ibm_theta / target
+            ibm_theta,
+            100.0 * ibm_theta / target
         );
 
         let rigetti_cal = rigetti_ankaa3_pulse_calibration();
-        let rigetti_s = integrate_two_qubit_zz(&play_for_two_qubit(&rigetti_cal.two_qubit)).unwrap();
+        let rigetti_s =
+            integrate_two_qubit_zz(&play_for_two_qubit(&rigetti_cal.two_qubit)).unwrap();
         let rigetti_theta = rigetti_s.relative_phase_rad().abs();
         assert!(
             rigetti_theta / target < 0.10,
             "Rigetti's two_qubit pulse achieved {:.6} rad, {:.2}% of the PI/2 target -- expected \
              well under 10% (see this test's own doc comment on why)",
-            rigetti_theta, 100.0 * rigetti_theta / target
+            rigetti_theta,
+            100.0 * rigetti_theta / target
         );
     }
 }

@@ -43,8 +43,8 @@
 //! same identity would only be a second place for it to silently drift
 //! from the first.
 
-use crate::backend::{push_h, BackendCircuit, BackendGate, EPS};
 use crate::backend::spec::{BackendSpec, RotAxis};
+use crate::backend::{push_h, BackendCircuit, BackendGate, EPS};
 use crate::coupling::CouplingMap;
 use crate::fidelity::PublishedCalibration;
 

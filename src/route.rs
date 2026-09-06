@@ -221,9 +221,17 @@ fn route_boundary(circuit: &Circuit, coupling: &CouplingMap) -> RoutedCircuit {
     }
 
     let restoration_start = out.gates.len();
-    restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
+    restore_identity_mapping(
+        &mut out,
+        &mut logical_to_physical,
+        &mut physical_to_logical,
+        coupling,
+    );
 
-    RoutedCircuit { circuit: out, restoration_start }
+    RoutedCircuit {
+        circuit: out,
+        restoration_start,
+    }
 }
 
 /// Updates both mapping directions for a `Swap(from, to)` that's about
@@ -347,7 +355,13 @@ fn restore_identity_mapping(
     coupling: &CouplingMap,
 ) {
     let identity: Vec<LogicalQubit> = (0..physical_to_logical.len()).map(LogicalQubit).collect();
-    route_to_layout(out, logical_to_physical, physical_to_logical, &identity, coupling);
+    route_to_layout(
+        out,
+        logical_to_physical,
+        physical_to_logical,
+        &identity,
+        coupling,
+    );
 }
 
 /// A BFS spanning tree of `coupling` restricted to vertices `0..n`,
@@ -493,7 +507,9 @@ fn bfs_distances(coupling: &CouplingMap, source: PhysicalQubit) -> Vec<usize> {
 /// the shared building block [`choose_initial_layout`] and
 /// [`route_lookahead`] both score candidate placements/SWAPs against.
 fn distance_matrix(coupling: &CouplingMap) -> Vec<Vec<usize>> {
-    (0..coupling.num_qubits()).map(|q| bfs_distances(coupling, PhysicalQubit(q))).collect()
+    (0..coupling.num_qubits())
+        .map(|q| bfs_distances(coupling, PhysicalQubit(q)))
+        .collect()
 }
 
 /// Number of two-qubit `Gate`s between each unordered logical qubit
@@ -549,8 +565,11 @@ fn detect_interaction_chain(
     // cycle has zero, and a disconnected union of paths/cycles has
     // some other count -- either way, not the single-chain shape this
     // is looking for.
-    let mut endpoints: Vec<LogicalQubit> =
-        adjacency.iter().filter(|(_, nbrs)| nbrs.len() == 1).map(|(&q, _)| q).collect();
+    let mut endpoints: Vec<LogicalQubit> = adjacency
+        .iter()
+        .filter(|(_, nbrs)| nbrs.len() == 1)
+        .map(|(&q, _)| q)
+        .collect();
     if endpoints.len() != 2 {
         return None;
     }
@@ -560,7 +579,10 @@ fn detect_interaction_chain(
     let mut prev = None;
     let mut current = endpoints[0];
     while order.len() < adjacency.len() {
-        let next = adjacency[&current].iter().find(|&&n| Some(n) != prev).copied();
+        let next = adjacency[&current]
+            .iter()
+            .find(|&&n| Some(n) != prev)
+            .copied();
         match next {
             Some(n) => {
                 order.push(n);
@@ -649,8 +671,15 @@ fn find_hamiltonian_path(
         visited[start] = true;
         path.push(PhysicalQubit(start));
         let mut budget = HAMILTONIAN_PATH_SEARCH_BUDGET;
-        if dfs_extend_path(coupling, &dist, identity_targets, &mut path, &mut visited, len, &mut budget)
-        {
+        if dfs_extend_path(
+            coupling,
+            &dist,
+            identity_targets,
+            &mut path,
+            &mut visited,
+            len,
+            &mut budget,
+        ) {
             return Some(path);
         }
     }
@@ -686,10 +715,15 @@ fn dfs_extend_path(
         return false;
     }
     *budget -= 1;
-    let current = *path.last().expect("path is never empty here: len >= 1, checked by caller");
+    let current = *path
+        .last()
+        .expect("path is never empty here: len >= 1, checked by caller");
     let target = identity_targets[path.len()].0;
-    let mut candidates: Vec<usize> =
-        coupling.neighbors(current.0).into_iter().filter(|&next| !visited[next]).collect();
+    let mut candidates: Vec<usize> = coupling
+        .neighbors(current.0)
+        .into_iter()
+        .filter(|&next| !visited[next])
+        .collect();
     candidates.sort_by_key(|&next| dist[next][target]);
 
     for next in candidates {
@@ -768,8 +802,10 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
             // qubit that logical qubit already occupies under the
             // identity mapping -- see find_hamiltonian_path's doc
             // comment for why the search is biased toward these.
-            let identity_targets: Vec<PhysicalQubit> = chain.iter().map(|lq| PhysicalQubit(lq.0)).collect();
-            if let Some(phys_path) = find_hamiltonian_path(coupling, chain.len(), &identity_targets) {
+            let identity_targets: Vec<PhysicalQubit> =
+                chain.iter().map(|lq| PhysicalQubit(lq.0)).collect();
+            if let Some(phys_path) = find_hamiltonian_path(coupling, chain.len(), &identity_targets)
+            {
                 let mut logical_to_physical = vec![PhysicalQubit(usize::MAX); num_qubits];
                 for (lq, &pq) in chain.iter().zip(phys_path.iter()) {
                     logical_to_physical[lq.0] = pq;
@@ -831,8 +867,11 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
                         let mut score = 0usize;
                         let mut any_neighbor = false;
                         for &placed_lq in &order[..i] {
-                            let key =
-                                if lq < placed_lq { (lq, placed_lq) } else { (placed_lq, lq) };
+                            let key = if lq < placed_lq {
+                                (lq, placed_lq)
+                            } else {
+                                (placed_lq, lq)
+                            };
                             if let Some(&w) = weights.get(&key) {
                                 if w > 0 {
                                     any_neighbor = true;
@@ -874,7 +913,9 @@ pub fn choose_initial_layout(circuit: &Circuit, coupling: &CouplingMap) -> Vec<P
 }
 
 fn gate_is_front(gi: usize, gate_qubits: &[Vec<LogicalQubit>], queues: &[VecDeque<usize>]) -> bool {
-    gate_qubits[gi].iter().all(|&q| queues[q.0].front() == Some(&gi))
+    gate_qubits[gi]
+        .iter()
+        .all(|&q| queues[q.0].front() == Some(&gi))
 }
 
 /// How much [`route_lookahead`]'s SWAP-scoring heuristic weighs each
@@ -983,8 +1024,9 @@ fn route_lookahead_boundary(circuit: &Circuit, coupling: &CouplingMap) -> Routed
     let mut executed = vec![false; total_gates];
     let mut remaining = total_gates;
 
-    let mut front: Vec<usize> =
-        (0..total_gates).filter(|&gi| gate_is_front(gi, &gate_qubits, &queues)).collect();
+    let mut front: Vec<usize> = (0..total_gates)
+        .filter(|&gi| gate_is_front(gi, &gate_qubits, &queues))
+        .collect();
 
     while remaining > 0 {
         // Execute everything currently reachable, to a fixed point --
@@ -1128,9 +1170,17 @@ fn route_lookahead_boundary(circuit: &Circuit, coupling: &CouplingMap) -> Routed
     }
 
     let restoration_start = out.gates.len();
-    restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
+    restore_identity_mapping(
+        &mut out,
+        &mut logical_to_physical,
+        &mut physical_to_logical,
+        coupling,
+    );
 
-    RoutedCircuit { circuit: out, restoration_start }
+    RoutedCircuit {
+        circuit: out,
+        restoration_start,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1285,7 +1335,10 @@ fn build_successors(gate_qubits: &[Vec<LogicalQubit>], num_qubits: usize) -> Vec
             successors[w[0]].insert(w[1]);
         }
     }
-    successors.into_iter().map(|s| s.into_iter().collect()).collect()
+    successors
+        .into_iter()
+        .map(|s| s.into_iter().collect())
+        .collect()
 }
 
 /// A small, fast, deterministic (given a seed) PRNG -- xorshift64 --
@@ -1416,7 +1469,9 @@ fn sabre_pass(
     let mut executed = vec![false; total_gates];
     let mut remaining = total_gates;
 
-    let mut front: Vec<usize> = (0..total_gates).filter(|&gi| pred_remaining[gi] == 0).collect();
+    let mut front: Vec<usize> = (0..total_gates)
+        .filter(|&gi| pred_remaining[gi] == 0)
+        .collect();
 
     let mut decay = vec![1.0f64; num_qubits];
     let mut swaps_since_reset = 0usize;
@@ -1536,7 +1591,10 @@ fn sabre_pass(
             .map(|gi| (gate_qubits[gi][0], gate_qubits[gi][1]))
             .collect();
 
-        let front_two_qubit_count = front.iter().filter(|&&gi| gate_qubits[gi].len() == 2).count();
+        let front_two_qubit_count = front
+            .iter()
+            .filter(|&&gi| gate_qubits[gi].len() == 2)
+            .count();
         on_frontier(front_two_qubit_count, extended.len());
 
         let mut best_swap: Option<(PhysicalQubit, PhysicalQubit)> = None;
@@ -1773,12 +1831,26 @@ pub fn route_sabre_with_frontier_stats(
 
             for _ in 0..*layout_iterations {
                 sabre_pass(
-                    &circuit.gates, &gate_qubits, coupling, &dist,
-                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                    &circuit.gates,
+                    &gate_qubits,
+                    coupling,
+                    &dist,
+                    &mut l2p,
+                    &mut p2l,
+                    |_| {},
+                    |_, _| {},
+                    &mut rng_state,
                 );
                 sabre_pass(
-                    &reversed_gates, &reversed_gate_qubits, coupling, &dist,
-                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                    &reversed_gates,
+                    &reversed_gate_qubits,
+                    coupling,
+                    &dist,
+                    &mut l2p,
+                    &mut p2l,
+                    |_| {},
+                    |_, _| {},
+                    &mut rng_state,
                 );
             }
 
@@ -1854,7 +1926,8 @@ fn score_layout(
     for &(a_lq, b_lq) in extended {
         ext_score += dist[l2p[a_lq.0].0][l2p[b_lq.0].0] as f64;
     }
-    front_score / front_count.max(1) as f64 + LOOKAHEAD_WEIGHT * (ext_score / extended.len().max(1) as f64)
+    front_score / front_count.max(1) as f64
+        + LOOKAHEAD_WEIGHT * (ext_score / extended.len().max(1) as f64)
 }
 
 /// Identical to [`sabre_pass`] except the swap-selection step scores
@@ -1901,7 +1974,9 @@ fn sabre_pass2(
     let mut executed = vec![false; total_gates];
     let mut remaining = total_gates;
 
-    let mut front: Vec<usize> = (0..total_gates).filter(|&gi| pred_remaining[gi] == 0).collect();
+    let mut front: Vec<usize> = (0..total_gates)
+        .filter(|&gi| pred_remaining[gi] == 0)
+        .collect();
 
     let mut decay = vec![1.0f64; num_qubits];
     let mut swaps_since_reset = 0usize;
@@ -2083,14 +2158,22 @@ fn sabre_pass2(
 /// by the commit pass anyway -- spending depth-2 search there wouldn't
 /// change what gets emitted, only how the (already realization-costed)
 /// candidate layout was chosen.
-pub fn route_sabre2_with_trials(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> Circuit {
+pub fn route_sabre2_with_trials(
+    circuit: &Circuit,
+    coupling: &CouplingMap,
+    trials_per_seed: usize,
+) -> Circuit {
     route_sabre2_impl(circuit, coupling, trials_per_seed).circuit
 }
 
 /// [`route_sabre2_with_trials`]'s implementation, returning the
 /// real/restoration boundary alongside the circuit -- see
 /// [`RoutedCircuit`]'s own doc comment.
-fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> RoutedCircuit {
+fn route_sabre2_impl(
+    circuit: &Circuit,
+    coupling: &CouplingMap,
+    trials_per_seed: usize,
+) -> RoutedCircuit {
     let num_qubits = circuit.num_qubits;
 
     let mut fallback = Circuit::new(num_qubits);
@@ -2100,7 +2183,10 @@ fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed:
     }
     if num_qubits <= 1 {
         let restoration_start = fallback.gates.len();
-        return RoutedCircuit { circuit: fallback, restoration_start };
+        return RoutedCircuit {
+            circuit: fallback,
+            restoration_start,
+        };
     }
 
     let dist = distance_matrix(coupling);
@@ -2111,7 +2197,10 @@ fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed:
         .collect();
     if gate_qubits.iter().all(|qs| qs.len() < 2) {
         let restoration_start = fallback.gates.len();
-        return RoutedCircuit { circuit: fallback, restoration_start };
+        return RoutedCircuit {
+            circuit: fallback,
+            restoration_start,
+        };
     }
     let reversed_gate_qubits: Vec<Vec<LogicalQubit>> = gate_qubits.iter().rev().cloned().collect();
     let reversed_gates: Vec<Gate> = circuit.gates.iter().rev().cloned().collect();
@@ -2142,12 +2231,26 @@ fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed:
 
             for _ in 0..*layout_iterations {
                 sabre_pass(
-                    &circuit.gates, &gate_qubits, coupling, &dist,
-                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                    &circuit.gates,
+                    &gate_qubits,
+                    coupling,
+                    &dist,
+                    &mut l2p,
+                    &mut p2l,
+                    |_| {},
+                    |_, _| {},
+                    &mut rng_state,
                 );
                 sabre_pass(
-                    &reversed_gates, &reversed_gate_qubits, coupling, &dist,
-                    &mut l2p, &mut p2l, |_| {}, |_, _| {}, &mut rng_state,
+                    &reversed_gates,
+                    &reversed_gate_qubits,
+                    coupling,
+                    &dist,
+                    &mut l2p,
+                    &mut p2l,
+                    |_| {},
+                    |_, _| {},
+                    &mut rng_state,
                 );
             }
 
@@ -2188,7 +2291,10 @@ fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed:
             let total = swap_count(&out);
             if total < best_swaps {
                 best_swaps = total;
-                best = Some(RoutedCircuit { circuit: out, restoration_start });
+                best = Some(RoutedCircuit {
+                    circuit: out,
+                    restoration_start,
+                });
             }
         }
     }
@@ -2196,7 +2302,11 @@ fn route_sabre2_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed:
     best.expect("at least one trial always runs")
 }
 
-pub fn route_sabre_with_trials(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> Circuit {
+pub fn route_sabre_with_trials(
+    circuit: &Circuit,
+    coupling: &CouplingMap,
+    trials_per_seed: usize,
+) -> Circuit {
     route_sabre_impl(circuit, coupling, trials_per_seed).circuit
 }
 
@@ -2207,7 +2317,11 @@ pub fn route_sabre(circuit: &Circuit, coupling: &CouplingMap) -> Circuit {
 /// [`route_sabre`]/[`route_sabre_with_trials`]'s shared implementation,
 /// returning the real/restoration boundary alongside the circuit -- see
 /// [`RoutedCircuit`]'s own doc comment.
-fn route_sabre_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: usize) -> RoutedCircuit {
+fn route_sabre_impl(
+    circuit: &Circuit,
+    coupling: &CouplingMap,
+    trials_per_seed: usize,
+) -> RoutedCircuit {
     let num_qubits = circuit.num_qubits;
     debug_assert_eq!(
         coupling.num_qubits(),
@@ -2224,7 +2338,10 @@ fn route_sabre_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: 
         // Identity mapping throughout: nothing was ever routed, so
         // every gate here is real content, none of it restoration.
         let restoration_start = fallback.gates.len();
-        return RoutedCircuit { circuit: fallback, restoration_start };
+        return RoutedCircuit {
+            circuit: fallback,
+            restoration_start,
+        };
     }
 
     let dist = distance_matrix(coupling);
@@ -2239,7 +2356,10 @@ fn route_sabre_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: 
         // needs it (identity mapping), so the unmodified circuit is
         // already a valid answer.
         let restoration_start = fallback.gates.len();
-        return RoutedCircuit { circuit: fallback, restoration_start };
+        return RoutedCircuit {
+            circuit: fallback,
+            restoration_start,
+        };
     }
     let reversed_gate_qubits: Vec<Vec<LogicalQubit>> = gate_qubits.iter().rev().cloned().collect();
     // Reversed `Gate`s to match `reversed_gate_qubits`, so
@@ -2363,12 +2483,17 @@ fn route_sabre_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: 
             let total = swap_count(&out);
             if total < best_swaps {
                 best_swaps = total;
-                best = Some(RoutedCircuit { circuit: out, restoration_start });
+                best = Some(RoutedCircuit {
+                    circuit: out,
+                    restoration_start,
+                });
             }
         }
     }
 
-    best.expect("SABRE_TRIALS_PER_SEED >= 1 and seeds is non-empty, so at least one trial always runs")
+    best.expect(
+        "SABRE_TRIALS_PER_SEED >= 1 and seeds is non-empty, so at least one trial always runs",
+    )
 }
 
 /// Number of `Gate::Swap`s in a routed circuit -- the one number that
@@ -2377,7 +2502,10 @@ fn route_sabre_impl(circuit: &Circuit, coupling: &CouplingMap, trials_per_seed: 
 /// `Swap -> Cx;Cx;Cx` identity), independent of gate-count noise from
 /// anything else in the circuit.
 fn swap_count(c: &Circuit) -> usize {
-    c.gates.iter().filter(|g| matches!(g, Gate::Swap(_, _))).count()
+    c.gates
+        .iter()
+        .filter(|g| matches!(g, Gate::Swap(_, _)))
+        .count()
 }
 
 /// Splits a routed circuit's total `Gate::Swap` count into "routing"
@@ -2419,7 +2547,11 @@ fn swap_count(c: &Circuit) -> usize {
 /// `restoration`, since there is no real gate for any of them to have
 /// been "routing" toward.
 pub fn restoration_swap_count(routed: &Circuit) -> (usize, usize) {
-    match routed.gates.iter().rposition(|g| !matches!(g, Gate::Swap(..))) {
+    match routed
+        .gates
+        .iter()
+        .rposition(|g| !matches!(g, Gate::Swap(..)))
+    {
         Some(last_real_gate) => {
             let routing = routed.gates[..=last_real_gate]
                 .iter()
@@ -2735,7 +2867,11 @@ fn detect_qft_cascade(circuit: &Circuit) -> Option<QftAngles> {
 /// finds the mapping already exactly identity and inserts zero
 /// additional `Swap`s, so the fact costs nothing when it holds.
 fn emit_qft_cascade(n: usize, angles: &QftAngles, path: &[PhysicalQubit]) -> Vec<Gate> {
-    debug_assert_eq!(path.len(), n, "path must have exactly one physical qubit per line position");
+    debug_assert_eq!(
+        path.len(),
+        n,
+        "path must have exactly one physical qubit per line position"
+    );
     let mut at: Vec<usize> = (0..n).collect(); // at[pos] = logical qubit currently at line position `pos`
     let mut pos: Vec<usize> = (0..n).collect(); // pos[logical] = that logical qubit's current line position
     let mut out = Vec::new();
@@ -2745,7 +2881,11 @@ fn emit_qft_cascade(n: usize, angles: &QftAngles, path: &[PhysicalQubit]) -> Vec
         out.push(Gate::H(path[p].0));
         for _ in 0..(n - 1 - i) {
             let other = at[p + 1];
-            let (target, lambda) = if other > i { (i, angles[i][other]) } else { (other, angles[other][i]) };
+            let (target, lambda) = if other > i {
+                (i, angles[i][other])
+            } else {
+                (other, angles[other][i])
+            };
             let phys_target = if target == i { path[p] } else { path[p + 1] };
             let phys_control = if target == i { path[p + 1] } else { path[p] };
             out.push(Gate::Cp(phys_control.0, phys_target.0, lambda));
@@ -2839,7 +2979,10 @@ fn route_qft_boundary(circuit: &Circuit, coupling: &CouplingMap) -> Option<Route
     if n == 0 {
         let mut out = Circuit::new(0);
         out.num_clbits = circuit.num_clbits;
-        return Some(RoutedCircuit { circuit: out, restoration_start: 0 });
+        return Some(RoutedCircuit {
+            circuit: out,
+            restoration_start: 0,
+        });
     }
     debug_assert_eq!(
         coupling.num_qubits(),
@@ -2882,9 +3025,17 @@ fn route_qft_boundary(circuit: &Circuit, coupling: &CouplingMap) -> Option<Route
     // of the cascade's own Swaps) is the correct mapping to restore
     // identity from.
     let restoration_start = out.gates.len();
-    restore_identity_mapping(&mut out, &mut logical_to_physical, &mut physical_to_logical, coupling);
+    restore_identity_mapping(
+        &mut out,
+        &mut logical_to_physical,
+        &mut physical_to_logical,
+        coupling,
+    );
 
-    Some(RoutedCircuit { circuit: out, restoration_start })
+    Some(RoutedCircuit {
+        circuit: out,
+        restoration_start,
+    })
 }
 
 fn remap_single(gate: &Gate, new_q: usize) -> Gate {
@@ -2933,9 +3084,10 @@ fn remap_two(gate: &Gate, new_first: usize, new_second: usize) -> Gate {
         Ryy(_, _, t) => Ryy(new_first, new_second, t),
         Rzz(_, _, t) => Rzz(new_first, new_second, t),
         Cp(_, _, l) => Cp(new_first, new_second, l),
-        If(ref conditions, ref inner) => {
-            If(conditions.clone(), Box::new(remap_two(inner, new_first, new_second)))
-        }
+        If(ref conditions, ref inner) => If(
+            conditions.clone(),
+            Box::new(remap_two(inner, new_first, new_second)),
+        ),
         _ => unreachable!("remap_two called on a single-qubit gate"),
     }
 }
@@ -2958,9 +3110,12 @@ mod tests {
         let mut reg = QuantumRegister::new(num_qubits).unwrap();
         let mut rng = rand::thread_rng();
         for q in 0..num_qubits {
-            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
-            reg.apply_ry(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
-            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU)).unwrap();
+            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
+            reg.apply_ry(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
+            reg.apply_rz(q, rng.gen_range(0.0..std::f64::consts::TAU))
+                .unwrap();
         }
         reg
     }
@@ -3153,7 +3308,10 @@ mod tests {
             }
         }
         let (measured_wire, clbit) = found.expect("routed circuit must still contain a Measure");
-        assert_eq!(clbit, 0, "the classical bit index must be untouched by routing");
+        assert_eq!(
+            clbit, 0,
+            "the classical bit index must be untouched by routing"
+        );
         assert_eq!(
             measured_wire, logical_to_physical[0].0,
             "Measure must read qubit 0 off its *current* physical wire, not its original one"
@@ -3225,7 +3383,10 @@ mod tests {
     // -------------------------------------------------------------
 
     fn swap_count(c: &Circuit) -> usize {
-        c.gates.iter().filter(|g| matches!(g, Gate::Swap(..))).count()
+        c.gates
+            .iter()
+            .filter(|g| matches!(g, Gate::Swap(..)))
+            .count()
     }
 
     /// Same methodology as [`assert_routing_preserves_action`], but for
@@ -3441,7 +3602,10 @@ mod tests {
                 best <= naive && best <= lookahead && best <= sabre,
                 "route_best ({}) should never exceed any individual router \
                  (route: {}, route_lookahead: {}, route_sabre: {})",
-                best, naive, lookahead, sabre
+                best,
+                naive,
+                lookahead,
+                sabre
             );
             assert_route_best_preserves_action(c, coupling);
         }
@@ -3578,16 +3742,14 @@ mod tests {
         // not a replay of its cascade Swaps. Re-appending that exact
         // tail to the stripped circuit is therefore guaranteed
         // action-preserving by construction, for every candidate.
-        let cases: Vec<(Circuit, CouplingMap)> = vec![
-            (qft_like(8), CouplingMap::heavy_hex_for(8)),
-            {
+        let cases: Vec<(Circuit, CouplingMap)> =
+            vec![(qft_like(8), CouplingMap::heavy_hex_for(8)), {
                 let mut c = Circuit::new(6);
                 for q in 0..5 {
                     c.push(Gate::Cx(q, (q + 3) % 6));
                 }
                 (c, CouplingMap::heavy_hex_for(6))
-            },
-        ];
+            }];
         for (c, coupling) in &cases {
             let winner = route_best_no_restore_boundary(c, coupling);
             let no_restore = winner.strip_restoration();
@@ -3641,7 +3803,11 @@ mod tests {
         for g in &routed.gates {
             let qs = g.qubits();
             if qs.len() == 2 {
-                assert!(coupling.is_adjacent(qs[0], qs[1]), "gate {:?} not on adjacent qubits", g);
+                assert!(
+                    coupling.is_adjacent(qs[0], qs[1]),
+                    "gate {:?} not on adjacent qubits",
+                    g
+                );
             }
         }
         assert_lookahead_routing_preserves_action(&c, &coupling);
@@ -3754,7 +3920,11 @@ mod tests {
         for g in &routed.gates {
             let qs = g.qubits();
             if qs.len() == 2 {
-                assert!(coupling.is_adjacent(qs[0], qs[1]), "gate {:?} not on a real edge", g);
+                assert!(
+                    coupling.is_adjacent(qs[0], qs[1]),
+                    "gate {:?} not on a real edge",
+                    g
+                );
             }
         }
         let mut logical_to_physical: Vec<PhysicalQubit> = (0..12).map(PhysicalQubit).collect();
@@ -3769,19 +3939,29 @@ mod tests {
                 );
             }
         }
-        assert_eq!(logical_to_physical, (0..12).map(PhysicalQubit).collect::<Vec<_>>());
+        assert_eq!(
+            logical_to_physical,
+            (0..12).map(PhysicalQubit).collect::<Vec<_>>()
+        );
         assert_lookahead_routing_preserves_action(&c, &coupling);
     }
 
     #[test]
     fn choose_initial_layout_is_a_permutation() {
         let mut c = Circuit::new(6);
-        c.push(Gate::Cx(0, 5)).push(Gate::Cx(0, 5)).push(Gate::Cx(0, 5));
+        c.push(Gate::Cx(0, 5))
+            .push(Gate::Cx(0, 5))
+            .push(Gate::Cx(0, 5));
         let coupling = CouplingMap::linear(6);
         let layout = choose_initial_layout(&c, &coupling);
         let mut sorted: Vec<usize> = layout.iter().map(|p| p.0).collect();
         sorted.sort_unstable();
-        assert_eq!(sorted, (0..6).collect::<Vec<_>>(), "layout must be a permutation: {:?}", layout);
+        assert_eq!(
+            sorted,
+            (0..6).collect::<Vec<_>>(),
+            "layout must be a permutation: {:?}",
+            layout
+        );
     }
 
     #[test]
@@ -3794,7 +3974,16 @@ mod tests {
             .push(Gate::Cx(3, 4));
         let weights = interaction_weights(&c);
         let chain = detect_interaction_chain(&weights).expect("should detect a chain");
-        assert_eq!(chain, vec![LogicalQubit(0), LogicalQubit(1), LogicalQubit(2), LogicalQubit(3), LogicalQubit(4)]);
+        assert_eq!(
+            chain,
+            vec![
+                LogicalQubit(0),
+                LogicalQubit(1),
+                LogicalQubit(2),
+                LogicalQubit(3),
+                LogicalQubit(4)
+            ]
+        );
     }
 
     #[test]
@@ -3812,7 +4001,10 @@ mod tests {
     #[test]
     fn detect_interaction_chain_rejects_a_cycle() {
         let mut c = Circuit::new(4);
-        c.push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(2, 3)).push(Gate::Cx(3, 0));
+        c.push(Gate::Cx(0, 1))
+            .push(Gate::Cx(1, 2))
+            .push(Gate::Cx(2, 3))
+            .push(Gate::Cx(3, 0));
         let weights = interaction_weights(&c);
         assert!(detect_interaction_chain(&weights).is_none());
     }
@@ -3824,7 +4016,11 @@ mod tests {
         let path = find_hamiltonian_path(&coupling, 6, &identity)
             .expect("a 6-node line has a length-6 path");
         for w in path.windows(2) {
-            assert!(coupling.is_adjacent(w[0].0, w[1].0), "path {:?} has a non-adjacent hop", path);
+            assert!(
+                coupling.is_adjacent(w[0].0, w[1].0),
+                "path {:?} has a non-adjacent hop",
+                path
+            );
         }
         let mut seen: Vec<usize> = path.iter().map(|p| p.0).collect();
         seen.sort_unstable();
@@ -3832,7 +4028,10 @@ mod tests {
         // On a linear map the identity mapping *is* a valid Hamiltonian
         // path, and it's the closest possible to itself -- the bias
         // should find exactly it, at zero displacement.
-        assert_eq!(path, identity, "on a linear map the bias should recover the identity path exactly");
+        assert_eq!(
+            path, identity,
+            "on a linear map the bias should recover the identity path exactly"
+        );
     }
 
     #[test]
@@ -3842,7 +4041,11 @@ mod tests {
         let path = find_hamiltonian_path(&coupling, 10, &identity)
             .expect("heavy_hex_for(10) should admit a length-10 path");
         for w in path.windows(2) {
-            assert!(coupling.is_adjacent(w[0].0, w[1].0), "path {:?} has a non-adjacent hop", path);
+            assert!(
+                coupling.is_adjacent(w[0].0, w[1].0),
+                "path {:?} has a non-adjacent hop",
+                path
+            );
         }
         let mut seen: Vec<usize> = path.iter().map(|p| p.0).collect();
         seen.sort_unstable();
@@ -3880,12 +4083,19 @@ mod tests {
         let layout = choose_initial_layout(&c, &coupling);
         let mut sorted: Vec<usize> = layout.iter().map(|p| p.0).collect();
         sorted.sort_unstable();
-        assert_eq!(sorted, (0..10).collect::<Vec<_>>(), "layout must be a permutation: {:?}", layout);
+        assert_eq!(
+            sorted,
+            (0..10).collect::<Vec<_>>(),
+            "layout must be a permutation: {:?}",
+            layout
+        );
         for q in 0..9 {
             assert!(
                 coupling.is_adjacent(layout[q].0, layout[q + 1].0),
                 "chain hop {}-{} not placed adjacently: {:?}",
-                q, q + 1, layout
+                q,
+                q + 1,
+                layout
             );
         }
 
@@ -3978,7 +4188,9 @@ mod tests {
         // pairs like that.
         let mut c = Circuit::new(6);
         for _ in 0..4 {
-            c.push(Gate::Cx(0, 3)).push(Gate::Cx(1, 4)).push(Gate::Cx(2, 5));
+            c.push(Gate::Cx(0, 3))
+                .push(Gate::Cx(1, 4))
+                .push(Gate::Cx(2, 5));
         }
         let coupling = CouplingMap::linear(6);
         let naive = route(&c, &coupling);
@@ -4060,7 +4272,10 @@ mod tests {
         // An otherwise-plausible two-qubit circuit that just isn't a
         // QFT cascade at all.
         let mut c2 = Circuit::new(4);
-        c2.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(2, 3));
+        c2.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Cx(1, 2))
+            .push(Gate::Cx(2, 3));
         assert!(detect_qft_cascade(&c2).is_none());
 
         // Right gates, wrong trailing block (not the standard reversal).
@@ -4093,7 +4308,8 @@ mod tests {
             let coupling = CouplingMap::linear(n);
             let cp_count = c.gates.iter().filter(|g| matches!(g, Gate::Cp(..))).count();
 
-            let qft_routed = route_qft(&c, &coupling).expect("qft_like must match detect_qft_cascade");
+            let qft_routed =
+                route_qft(&c, &coupling).expect("qft_like must match detect_qft_cascade");
             assert_eq!(
                 swap_count(&qft_routed),
                 cp_count,
@@ -4153,7 +4369,10 @@ mod tests {
     #[test]
     fn route_qft_returns_none_for_non_qft_circuits() {
         let mut c = Circuit::new(4);
-        c.push(Gate::H(0)).push(Gate::Cx(0, 1)).push(Gate::Cx(1, 2)).push(Gate::Cx(2, 3));
+        c.push(Gate::H(0))
+            .push(Gate::Cx(0, 1))
+            .push(Gate::Cx(1, 2))
+            .push(Gate::Cx(2, 3));
         let coupling = CouplingMap::linear(4);
         assert!(route_qft(&c, &coupling).is_none());
     }
@@ -4189,8 +4408,10 @@ mod tests {
         // earlier in program order) -- the commutation-aware version
         // must not.
         let gates = vec![Gate::Rz(0, 0.4), Gate::Cx(0, 1)];
-        let gate_qubits: Vec<Vec<LogicalQubit>> =
-            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let gate_qubits: Vec<Vec<LogicalQubit>> = gates
+            .iter()
+            .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+            .collect();
         let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
         assert_eq!(
             predecessors[1],
@@ -4211,8 +4432,10 @@ mod tests {
         // doesn't overreach into pairs that were never proven to
         // commute.
         let gates = vec![Gate::X(0), Gate::Cx(0, 1)];
-        let gate_qubits: Vec<Vec<LogicalQubit>> =
-            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let gate_qubits: Vec<Vec<LogicalQubit>> = gates
+            .iter()
+            .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+            .collect();
         let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
         assert_eq!(
             predecessors[1],
@@ -4225,8 +4448,10 @@ mod tests {
     #[test]
     fn disjoint_gates_have_no_dependency_edge_regardless_of_program_order() {
         let gates = vec![Gate::H(0), Gate::X(1)];
-        let gate_qubits: Vec<Vec<LogicalQubit>> =
-            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let gate_qubits: Vec<Vec<LogicalQubit>> = gates
+            .iter()
+            .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+            .collect();
         let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
         assert!(predecessors[1].is_empty());
     }
@@ -4251,10 +4476,16 @@ mod tests {
         // constraint -- since there's no 0->1 edge to carry it. The
         // full pairwise check must not drop it.
         let gates = vec![Gate::Rz(0, 0.4), Gate::Cx(0, 1), Gate::X(0)];
-        let gate_qubits: Vec<Vec<LogicalQubit>> =
-            gates.iter().map(|g| g.qubits().into_iter().map(LogicalQubit).collect()).collect();
+        let gate_qubits: Vec<Vec<LogicalQubit>> = gates
+            .iter()
+            .map(|g| g.qubits().into_iter().map(LogicalQubit).collect())
+            .collect();
         let predecessors = build_commutation_predecessors(&gates, &gate_qubits);
-        assert_eq!(predecessors[1], Vec::<usize>::new(), "Cx should not depend on the commuting Rz");
+        assert_eq!(
+            predecessors[1],
+            Vec::<usize>::new(),
+            "Cx should not depend on the commuting Rz"
+        );
         assert_eq!(
             predecessors[2],
             vec![0, 1],

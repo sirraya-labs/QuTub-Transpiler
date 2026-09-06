@@ -196,8 +196,16 @@ mod tests {
             ReadoutCalibration::rigetti_ankaa3(),
             ReadoutCalibration::google_willow_2024(),
         ] {
-            assert!((0.0..=1.0).contains(&cal.p01), "{}: p01 out of range", cal.name);
-            assert!((0.0..=1.0).contains(&cal.p10), "{}: p10 out of range", cal.name);
+            assert!(
+                (0.0..=1.0).contains(&cal.p01),
+                "{}: p01 out of range",
+                cal.name
+            );
+            assert!(
+                (0.0..=1.0).contains(&cal.p10),
+                "{}: p10 out of range",
+                cal.name
+            );
         }
     }
 
@@ -206,7 +214,10 @@ mod tests {
         // The one calibration here with a real published p01 != p10 --
         // confirms this module isn't quietly symmetrizing everything.
         let cal = ReadoutCalibration::rigetti_ankaa3();
-        assert!(cal.p10 > cal.p01, "expected the physically-typical p10 > p01 asymmetry");
+        assert!(
+            cal.p10 > cal.p01,
+            "expected the physically-typical p10 > p01 asymmetry"
+        );
     }
 
     #[test]
@@ -229,7 +240,12 @@ mod tests {
 
     #[test]
     fn zero_error_calibration_never_flips() {
-        let cal = ReadoutCalibration { name: "test", backend: Backend::TrappedIon, p01: 0.0, p10: 0.0 };
+        let cal = ReadoutCalibration {
+            name: "test",
+            backend: Backend::TrappedIon,
+            p01: 0.0,
+            p10: 0.0,
+        };
         for &sample in &[0.0, 0.3, 0.9999] {
             assert_eq!(corrupt_readout(0, &cal, sample), 0);
             assert_eq!(corrupt_readout(1, &cal, sample), 1);
@@ -238,7 +254,12 @@ mod tests {
 
     #[test]
     fn certain_error_calibration_always_flips() {
-        let cal = ReadoutCalibration { name: "test", backend: Backend::TrappedIon, p01: 1.0, p10: 1.0 };
+        let cal = ReadoutCalibration {
+            name: "test",
+            backend: Backend::TrappedIon,
+            p01: 1.0,
+            p10: 1.0,
+        };
         for &sample in &[0.0, 0.3, 0.9999] {
             assert_eq!(corrupt_readout(0, &cal, sample), 1);
             assert_eq!(corrupt_readout(1, &cal, sample), 0);

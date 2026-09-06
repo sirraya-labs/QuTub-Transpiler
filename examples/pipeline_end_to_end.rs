@@ -60,7 +60,10 @@ fn main() -> Result<(), String> {
         circuit.gates.len(),
         circuit.gate_counts()
     );
-    println!("\n--- Source circuit ---\n{}", Diagram::from_circuit(&circuit).to_ascii());
+    println!(
+        "\n--- Source circuit ---\n{}",
+        Diagram::from_circuit(&circuit).to_ascii()
+    );
 
     // --- Source-level optimization ------------------------------------
     // Adjacent self-inverse / explicit-inverse pairs cancel, with a
@@ -89,13 +92,22 @@ fn main() -> Result<(), String> {
     // figures actually describe.
     let cal = PublishedCalibration::quantinuum_helios_2026();
     let fidelity_estimate = estimate_circuit_fidelity(&native, &cal);
-    println!("Estimated circuit fidelity on {}: {:.6}", cal.name, fidelity_estimate);
+    println!(
+        "Estimated circuit fidelity on {}: {:.6}",
+        cal.name, fidelity_estimate
+    );
 
-    println!("\nNative QASM:\n{}", emit::to_qasm(&native, "pipeline_end_to_end"));
+    println!(
+        "\nNative QASM:\n{}",
+        emit::to_qasm(&native, "pipeline_end_to_end")
+    );
 
     // Real execution with real, Born-rule-sampled measurement outcomes.
     let (_reg, clbits) = emit::run_with_measurement(&native)?;
-    println!("TrappedIon native measurement outcomes (by clbit): {:?}", clbits);
+    println!(
+        "TrappedIon native measurement outcomes (by clbit): {:?}",
+        clbits
+    );
 
     // --- Multi-backend lowering -----------------------------------------
     // Same source circuit, routed and re-expressed for each backend's
@@ -118,7 +130,10 @@ fn main() -> Result<(), String> {
         );
 
         let (_backend_reg, backend_clbits) = emit::run_backend_with_measurement(&bc)?;
-        println!("[{:?}] measurement outcomes (by clbit): {:?}", backend, backend_clbits);
+        println!(
+            "[{:?}] measurement outcomes (by clbit): {:?}",
+            backend, backend_clbits
+        );
 
         // IbmQ only: real IBM-basis (Rz/SX/X/Cx) QASM -- see
         // ibm_export.rs's own doc comment for why this only accepts an
