@@ -13,7 +13,11 @@ const DATA_QUBITS: [usize; 3] = [0, 1, 2];
 const ANCILLA_QUBITS: [usize; 2] = [3, 4];
 const SYNDROME_CLBITS: [usize; 2] = [0, 1];
 
-fn run_round(code: &dyn StabilizerCode, injected_error: Gate) -> Result<(), String> {
+fn run_round(
+    code: &dyn StabilizerCode,
+    injected_error: Gate,
+    expected_syndrome: [u8; 2],
+) -> Result<(), String> {
     let mut circuit = Circuit::new(DATA_QUBITS.len() + ANCILLA_QUBITS.len());
     circuit.num_clbits = SYNDROME_CLBITS.len();
 
@@ -31,11 +35,14 @@ fn run_round(code: &dyn StabilizerCode, injected_error: Gate) -> Result<(), Stri
 
     let correction_start = circuit.gates.len();
     code.correct(&mut circuit, &DATA_QUBITS, &SYNDROME_CLBITS);
-    let corrections = circuit.gates[correction_start..].to_vec();
+    let correction_end = circuit.gates.len();
 
     // correct() appends one Gate::If branch for each non-zero syndrome. At
     // runtime only the branch matching the measured (1, 1) syndrome executes.
-    if !corrections.iter().all(|gate| matches!(gate, Gate::If(..))) {
+    if !circuit.gates[correction_start..correction_end]
+        .iter()
+        .all(|gate| matches!(gate, Gate::If(..)))
+    {
         return Err(format!(
             "{} emitted a non-conditional correction",
             code.id()
@@ -47,7 +54,7 @@ fn run_round(code: &dyn StabilizerCode, injected_error: Gate) -> Result<(), Stri
     let native = decompose(&optimize_ir(&circuit));
     let (register, syndrome) = emit::run_with_measurement(&native)?;
 
-    if syndrome != [1, 1] {
+    if syndrome != expected_syndrome {
         return Err(format!(
             "{} measured unexpected syndrome {syndrome:?}",
             code.id()
@@ -73,7 +80,7 @@ fn run_round(code: &dyn StabilizerCode, injected_error: Gate) -> Result<(), Stri
     println!("  injected error: {injected_error:?}");
     println!("  measured syndrome: {syndrome:?}");
     println!("  conditional correction table:");
-    for correction in corrections {
+    for correction in &circuit.gates[correction_start..correction_end] {
         println!("    {correction:?}");
     }
     println!("  recovered logical |1> fidelity: {fidelity:.6}\n");
@@ -82,8 +89,8 @@ fn run_round(code: &dyn StabilizerCode, injected_error: Gate) -> Result<(), Stri
 }
 
 fn main() -> Result<(), String> {
-    run_round(&ThreeQubitBitFlipCode, Gate::X(DATA_QUBITS[1]))?;
-    run_round(&ThreeQubitPhaseFlipCode, Gate::Z(DATA_QUBITS[1]))?;
+    run_round(&ThreeQubitBitFlipCode, Gate::X(DATA_QUBITS[1]), [1, 1])?;
+    run_round(&ThreeQubitPhaseFlipCode, Gate::Z(DATA_QUBITS[1]), [1, 1])?;
 
     Ok(())
 }
