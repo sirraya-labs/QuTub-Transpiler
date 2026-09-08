@@ -19,5 +19,6 @@
   * [vqe_h2_ground_state](examples/vqe_h2_ground_state.md)
   * [qaoa_portfolio_optimization](examples/qaoa_portfolio_optimization.md)
   * [trotter_ising_dynamics](examples/trotter_ising_dynamics.md)
+  * [qec_three_qubit_codes](examples/qec_three_qubit_codes.md)
 * [Architecture](architecture.md)
 * [Contributing](contributing.md)
