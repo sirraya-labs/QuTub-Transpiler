@@ -36,7 +36,9 @@
 //! Pauli type it was built for -- see [`RepetitionCode::new`].
 
 use crate::ir::{Circuit, Gate};
-use crate::qec::decoder::{corrections_from_matching, minimum_weight_perfect_matching, DecodingNode};
+use crate::qec::decoder::{
+    corrections_from_matching, minimum_weight_perfect_matching, DecodingNode,
+};
 use crate::qec::{DecodableCode, PauliCorrection};
 
 pub struct RepetitionCode {
@@ -61,7 +63,10 @@ impl RepetitionCode {
             matches!(corrects, PauliCorrection::X | PauliCorrection::Z),
             "RepetitionCode corrects X or Z, not Y (see RepetitionCode::new's own doc comment)"
         );
-        Self { distance: d, corrects }
+        Self {
+            distance: d,
+            corrects,
+        }
     }
 
     /// Distance between two decoding-graph nodes along the path graph
@@ -125,7 +130,11 @@ impl DecodableCode for RepetitionCode {
     }
 
     fn encode(&self, circuit: &mut Circuit, data_qubits: &[usize]) {
-        assert_eq!(data_qubits.len(), self.distance, "RepetitionCode: wrong data qubit count");
+        assert_eq!(
+            data_qubits.len(),
+            self.distance,
+            "RepetitionCode: wrong data qubit count"
+        );
         let q0 = data_qubits[0];
         for &qi in &data_qubits[1..] {
             circuit.push(Gate::Cx(q0, qi));
@@ -145,9 +154,21 @@ impl DecodableCode for RepetitionCode {
         syndrome_clbits: &[usize],
     ) {
         let d = self.distance;
-        assert_eq!(data_qubits.len(), d, "RepetitionCode: wrong data qubit count");
-        assert_eq!(ancilla_qubits.len(), d - 1, "RepetitionCode: wrong ancilla count");
-        assert_eq!(syndrome_clbits.len(), d - 1, "RepetitionCode: wrong syndrome bit count");
+        assert_eq!(
+            data_qubits.len(),
+            d,
+            "RepetitionCode: wrong data qubit count"
+        );
+        assert_eq!(
+            ancilla_qubits.len(),
+            d - 1,
+            "RepetitionCode: wrong ancilla count"
+        );
+        assert_eq!(
+            syndrome_clbits.len(),
+            d - 1,
+            "RepetitionCode: wrong syndrome bit count"
+        );
         for i in 0..d - 1 {
             let (qi, qj, a) = (data_qubits[i], data_qubits[i + 1], ancilla_qubits[i]);
             match self.corrects {
@@ -158,7 +179,11 @@ impl DecodableCode for RepetitionCode {
                 }
                 PauliCorrection::Z => {
                     // X-type stabilizer: same circuit as phase_flip.rs's.
-                    circuit.push(Gate::H(a)).push(Gate::Cx(a, qi)).push(Gate::Cx(a, qj)).push(Gate::H(a));
+                    circuit
+                        .push(Gate::H(a))
+                        .push(Gate::Cx(a, qi))
+                        .push(Gate::Cx(a, qj))
+                        .push(Gate::H(a));
                 }
                 PauliCorrection::Y => unreachable!("rejected by RepetitionCode::new"),
             }
@@ -167,7 +192,11 @@ impl DecodableCode for RepetitionCode {
     }
 
     fn decode(&self, circuit: &mut Circuit, data_qubits: &[usize]) {
-        assert_eq!(data_qubits.len(), self.distance, "RepetitionCode: wrong data qubit count");
+        assert_eq!(
+            data_qubits.len(),
+            self.distance,
+            "RepetitionCode: wrong data qubit count"
+        );
         if self.corrects == PauliCorrection::Z {
             for &q in data_qubits {
                 circuit.push(Gate::H(q));
@@ -180,15 +209,18 @@ impl DecodableCode for RepetitionCode {
     }
 
     fn decode_syndrome(&self, syndrome: &[u8]) -> Vec<(usize, PauliCorrection)> {
-        assert_eq!(syndrome.len(), self.distance - 1, "RepetitionCode: wrong syndrome length");
+        assert_eq!(
+            syndrome.len(),
+            self.distance - 1,
+            "RepetitionCode: wrong syndrome length"
+        );
         let defects: Vec<DecodingNode> = syndrome
             .iter()
             .enumerate()
             .filter(|&(_, &bit)| bit != 0)
             .map(|(i, _)| DecodingNode::Check(i))
             .collect();
-        let matching =
-            minimum_weight_perfect_matching(&defects, |a, b| self.graph_distance(a, b));
+        let matching = minimum_weight_perfect_matching(&defects, |a, b| self.graph_distance(a, b));
         let qubits = corrections_from_matching(&matching, |a, b| self.path_qubits(a, b));
         qubits.into_iter().map(|q| (q, self.corrects)).collect()
     }
@@ -257,15 +289,27 @@ mod tests {
             let opt = crate::ir_optimize::optimize(&c);
             let native = crate::native::decompose(&opt);
             let (reg, _) = crate::emit::run_with_measurement(&native).unwrap();
-            let old_recovered = reg.to_density_matrix().unwrap().partial_trace(&[0]).unwrap();
+            let old_recovered = reg
+                .to_density_matrix()
+                .unwrap()
+                .partial_trace(&[0])
+                .unwrap();
 
             let new_recovered =
                 run_decodable_round(&bit_flip_new, arbitrary_state_prep, injected.clone()).unwrap();
 
             let old_fid = old_recovered.fidelity(&target).unwrap();
             let new_fid = new_recovered.fidelity(&target).unwrap();
-            assert!((old_fid - 1.0).abs() < 1e-9, "old code failed for {:?}", injected);
-            assert!((new_fid - 1.0).abs() < 1e-9, "new decoder failed for {:?}", injected);
+            assert!(
+                (old_fid - 1.0).abs() < 1e-9,
+                "old code failed for {:?}",
+                injected
+            );
+            assert!(
+                (new_fid - 1.0).abs() < 1e-9,
+                "new decoder failed for {:?}",
+                injected
+            );
             assert!(
                 old_recovered.fidelity(&new_recovered).unwrap() > 1.0 - 1e-9,
                 "old and new decoders disagree for injected error {:?}",
@@ -290,10 +334,15 @@ mod tests {
             let opt = crate::ir_optimize::optimize(&c);
             let native = crate::native::decompose(&opt);
             let (reg, _) = crate::emit::run_with_measurement(&native).unwrap();
-            let old_recovered = reg.to_density_matrix().unwrap().partial_trace(&[0]).unwrap();
+            let old_recovered = reg
+                .to_density_matrix()
+                .unwrap()
+                .partial_trace(&[0])
+                .unwrap();
 
             let new_recovered =
-                run_decodable_round(&phase_flip_new, arbitrary_state_prep, injected.clone()).unwrap();
+                run_decodable_round(&phase_flip_new, arbitrary_state_prep, injected.clone())
+                    .unwrap();
 
             assert!(
                 old_recovered.fidelity(&new_recovered).unwrap() > 1.0 - 1e-9,
@@ -317,13 +366,13 @@ mod tests {
         let target = arbitrary_state_target();
         for q in 0..5 {
             let recovered =
-                run_decodable_round(&code, arbitrary_state_prep, Some(code.error_gate(q)))
-                    .unwrap();
+                run_decodable_round(&code, arbitrary_state_prep, Some(code.error_gate(q))).unwrap();
             let fidelity = recovered.fidelity(&target).unwrap();
             assert!(
                 (fidelity - 1.0).abs() < 1e-9,
                 "distance-5 code failed to correct a single error on qubit {}: fidelity {}",
-                q, fidelity
+                q,
+                fidelity
             );
         }
     }
@@ -382,12 +431,18 @@ mod tests {
                 let opt2 = crate::ir_optimize::optimize(&c2);
                 let native2 = crate::native::decompose(&opt2);
                 crate::emit::apply_to(&native2, &mut reg).unwrap();
-                let recovered = reg.to_density_matrix().unwrap().partial_trace(&[0]).unwrap();
+                let recovered = reg
+                    .to_density_matrix()
+                    .unwrap()
+                    .partial_trace(&[0])
+                    .unwrap();
                 let fidelity = recovered.fidelity(&target).unwrap();
                 assert!(
                     (fidelity - 1.0).abs() < 1e-9,
                     "distance-5 code failed on double error ({}, {}): fidelity {}",
-                    i, j, fidelity
+                    i,
+                    j,
+                    fidelity
                 );
             }
         }
@@ -435,7 +490,11 @@ mod tests {
         let opt2 = crate::ir_optimize::optimize(&c2);
         let native2 = crate::native::decompose(&opt2);
         crate::emit::apply_to(&native2, &mut reg).unwrap();
-        let recovered = reg.to_density_matrix().unwrap().partial_trace(&[0]).unwrap();
+        let recovered = reg
+            .to_density_matrix()
+            .unwrap()
+            .partial_trace(&[0])
+            .unwrap();
         let fidelity = recovered.fidelity(&target).unwrap();
         assert!(
             fidelity < 0.99,
@@ -453,13 +512,13 @@ mod tests {
         let target = arbitrary_state_target();
         for q in 0..7 {
             let recovered =
-                run_decodable_round(&code, arbitrary_state_prep, Some(code.error_gate(q)))
-                    .unwrap();
+                run_decodable_round(&code, arbitrary_state_prep, Some(code.error_gate(q))).unwrap();
             let fidelity = recovered.fidelity(&target).unwrap();
             assert!(
                 (fidelity - 1.0).abs() < 1e-9,
                 "distance-7 code failed to correct a single error on qubit {}: fidelity {}",
-                q, fidelity
+                q,
+                fidelity
             );
         }
     }

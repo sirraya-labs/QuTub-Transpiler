@@ -155,34 +155,41 @@ pub mod route;
 pub mod sequencer;
 pub mod waveform_sim;
 
-pub use backend::{lower, lower_with_coupling, lower_no_restore, lower_with_coupling_no_restore, Backend, BackendCircuit, BackendGate, BackendSpec, RotAxis};
+pub use backend::{
+    lower, lower_no_restore, lower_with_coupling, lower_with_coupling_no_restore, Backend,
+    BackendCircuit, BackendGate, BackendSpec, RotAxis,
+};
 pub use coupling::CouplingMap;
 pub use diagram::{Diagram, DiagramInstr};
+pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
+pub use ibm_export::{lower_ibm_native, to_ibm_qasm, validate_cx_native_basis, IbmInstr};
 pub use ir::{Circuit, Gate};
 pub use ir_optimize::optimize as optimize_ir;
 pub use native::{decompose, NativeCircuit, NativeGate};
+pub use noise::{apply_pauli_error, sample_depolarizing_error, PauliError};
 pub use optimize::optimize;
 pub use pulse::{
-    ibm_heron_r2_pulse_calibration, rigetti_ankaa3_pulse_calibration,
-    trapped_ion_pulse_calibration, schedule, Channel, Envelope, PulseCalibration,
-    PulseInstruction, Schedule, SingleQubitPulseCalibration, TwoQubitContinuousPulseCalibration,
-    TwoQubitPulseCalibration,
+    ibm_heron_r2_pulse_calibration, rigetti_ankaa3_pulse_calibration, schedule,
+    trapped_ion_pulse_calibration, Channel, Envelope, PulseCalibration, PulseInstruction, Schedule,
+    SingleQubitPulseCalibration, TwoQubitContinuousPulseCalibration, TwoQubitPulseCalibration,
 };
-pub use sequencer::{compile as compile_sequencer, execute as execute_sequencer, HardwareTarget, Program, SeqInstr};
-pub use readout::{corrupt_readout, ReadoutCalibration};
-pub use noise::{apply_pauli_error, sample_depolarizing_error, PauliError};
 pub use qec::{
     bit_flip::ThreeQubitBitFlipCode, decoder, phase_flip::ThreeQubitPhaseFlipCode,
     repetition::RepetitionCode, run_decodable_round, DecodableCode, PauliCorrection,
     StabilizerCode,
 };
-pub use fidelity::{estimate_circuit_fidelity, PublishedCalibration};
-pub use route::{route, route_lookahead, route_sabre, route_best, route_best_no_restore, route_qft, restoration_swap_count};
-pub use ibm_export::{to_ibm_qasm, lower_ibm_native, validate_cx_native_basis, IbmInstr};
-pub use waveform_sim::{
-    integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,
-};
+pub use readout::{corrupt_readout, ReadoutCalibration};
 pub use resource_estimate::{
     estimate_circuit_resources, estimate_circuit_resources_with_epsilon, ResourceBudget,
     RotationSynthesis, DEFAULT_ROTATION_EPSILON,
+};
+pub use route::{
+    restoration_swap_count, route, route_best, route_best_no_restore, route_lookahead, route_qft,
+    route_sabre,
+};
+pub use sequencer::{
+    compile as compile_sequencer, execute as execute_sequencer, HardwareTarget, Program, SeqInstr,
+};
+pub use waveform_sim::{
+    integrate, rotation_angle_rad, BlochVector, RABI_RATE_PER_UNIT_AMPLITUDE_RAD_PER_NS,
 };

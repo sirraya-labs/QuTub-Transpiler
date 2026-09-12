@@ -278,7 +278,10 @@ mod tests {
         let optimized = crate::ir_optimize::optimize(&c);
         let native = crate::native::decompose(&optimized);
         let (reg, _clbits) = emit::run_with_measurement(&native).unwrap();
-        reg.to_density_matrix().unwrap().partial_trace(&[data_qubits[0]]).unwrap()
+        reg.to_density_matrix()
+            .unwrap()
+            .partial_trace(&[data_qubits[0]])
+            .unwrap()
     }
 
     fn plus_state_target() -> DensityMatrix {
@@ -307,8 +310,16 @@ mod tests {
     fn bit_flip_code_corrects_any_single_x_error() {
         let code = ThreeQubitBitFlipCode;
         for (prep, target) in [
-            (arbitrary_state_prep as fn(&mut Circuit, usize), arbitrary_state_target()),
-            (|c: &mut Circuit, q: usize| { c.push(Gate::H(q)); }, plus_state_target()),
+            (
+                arbitrary_state_prep as fn(&mut Circuit, usize),
+                arbitrary_state_target(),
+            ),
+            (
+                |c: &mut Circuit, q: usize| {
+                    c.push(Gate::H(q));
+                },
+                plus_state_target(),
+            ),
         ] {
             for injected in [None, Some(Gate::X(0)), Some(Gate::X(1)), Some(Gate::X(2))] {
                 let recovered = run_one_round(&code, prep, injected.clone());
@@ -316,7 +327,8 @@ mod tests {
                 assert!(
                     (fidelity - 1.0).abs() < 1e-9,
                     "bit-flip code, injected error {:?}: expected ~100% recovery fidelity, got {}",
-                    injected, fidelity
+                    injected,
+                    fidelity
                 );
             }
         }
@@ -326,8 +338,16 @@ mod tests {
     fn phase_flip_code_corrects_any_single_z_error() {
         let code = ThreeQubitPhaseFlipCode;
         for (prep, target) in [
-            (arbitrary_state_prep as fn(&mut Circuit, usize), arbitrary_state_target()),
-            (|c: &mut Circuit, q: usize| { c.push(Gate::H(q)); }, plus_state_target()),
+            (
+                arbitrary_state_prep as fn(&mut Circuit, usize),
+                arbitrary_state_target(),
+            ),
+            (
+                |c: &mut Circuit, q: usize| {
+                    c.push(Gate::H(q));
+                },
+                plus_state_target(),
+            ),
         ] {
             for injected in [None, Some(Gate::Z(0)), Some(Gate::Z(1)), Some(Gate::Z(2))] {
                 let recovered = run_one_round(&code, prep, injected.clone());
@@ -467,7 +487,11 @@ mod tests {
         let optimized = crate::ir_optimize::optimize(&c);
         let native = crate::native::decompose(&optimized);
         let (reg, _clbits) = emit::run_with_measurement(&native).unwrap();
-        let recovered = reg.to_density_matrix().unwrap().partial_trace(&[0]).unwrap();
+        let recovered = reg
+            .to_density_matrix()
+            .unwrap()
+            .partial_trace(&[0])
+            .unwrap();
 
         let expected_logical_x_flip: DensityMatrix = {
             let mut reg = QuantumRegister::new(1).unwrap();
