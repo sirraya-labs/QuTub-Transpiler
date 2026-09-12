@@ -174,7 +174,9 @@ pub use pulse::{
     SingleQubitPulseCalibration, TwoQubitContinuousPulseCalibration, TwoQubitPulseCalibration,
 };
 pub use qec::{
-    bit_flip::ThreeQubitBitFlipCode, phase_flip::ThreeQubitPhaseFlipCode, StabilizerCode,
+    bit_flip::ThreeQubitBitFlipCode, decoder, phase_flip::ThreeQubitPhaseFlipCode,
+    repetition::RepetitionCode, run_decodable_round, DecodableCode, PauliCorrection,
+    StabilizerCode,
 };
 pub use readout::{corrupt_readout, ReadoutCalibration};
 pub use resource_estimate::{
