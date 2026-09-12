@@ -51,7 +51,9 @@
 use crate::ir::Circuit;
 
 pub mod bit_flip;
+pub mod decoder;
 pub mod phase_flip;
+pub mod repetition;
 
 /// One quantum error-correcting code: how to encode a single logical
 /// qubit into several physical ones, how to extract a syndrome via
@@ -118,6 +120,118 @@ pub trait StabilizerCode: Send + Sync {
     fn decode(&self, circuit: &mut Circuit, data_qubits: &[usize]);
 }
 
+/// Which single-qubit Pauli a real decoder ([`decoder`]-based code)
+/// applies as a correction -- separate from
+/// [`crate::noise::PauliError`] (that one names a sampled *error*;
+/// this one names a computed *correction* -- same three values,
+/// different role, kept as distinct types so a caller can't
+/// accidentally pass one where the other was meant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauliCorrection {
+    X,
+    Y,
+    Z,
+}
+
+/// A stabilizer code whose syndrome is decoded by a real classical
+/// algorithm ([`decoder::minimum_weight_perfect_matching`]), not a
+/// static [`crate::ir::Gate::If`] lookup table -- the general case for
+/// any code with more syndrome bits than a static branch table could
+/// reasonably enumerate (`2^(num_syndrome_bits)` entries), which is
+/// to say: real QEC at any meaningful scale. See `qec/mod.rs`'s own
+/// doc comment for why this genuinely needs to be a second trait
+/// rather than an extension of [`StabilizerCode`] -- the correction
+/// depends on *runtime-computed* data, which has no
+/// [`crate::ir::Gate::If`]-expressible representation to hand back
+/// from a method like [`StabilizerCode::correct`] does.
+///
+/// [`run_decodable_round`] is the real execution shape this implies:
+/// run the syndrome-extraction circuit for real, read back the real
+/// classical bits, decode them in real software, then apply the
+/// computed correction directly to the (already-executing) register --
+/// two genuine stages, not one static circuit, because the second
+/// stage's content isn't knowable until the first stage's real
+/// measurement outcomes exist.
+pub trait DecodableCode: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn num_data_qubits(&self) -> usize;
+    fn num_syndrome_bits(&self) -> usize;
+    fn encode(&self, circuit: &mut Circuit, data_qubits: &[usize]);
+    fn extract_syndrome(
+        &self,
+        circuit: &mut Circuit,
+        data_qubits: &[usize],
+        ancilla_qubits: &[usize],
+        syndrome_clbits: &[usize],
+    );
+    fn decode(&self, circuit: &mut Circuit, data_qubits: &[usize]);
+
+    /// Given the real classical bits [`extract_syndrome`](Self::extract_syndrome)
+    /// wrote (indexed the same way, `syndrome[i]` for
+    /// `syndrome_clbits[i]`), computes which physical data qubits need
+    /// which correction -- real classical computation, not a static
+    /// circuit. `(qubit, PauliCorrection::X)` means "apply `X` to this
+    /// data qubit," etc.
+    fn decode_syndrome(&self, syndrome: &[u8]) -> Vec<(usize, PauliCorrection)>;
+}
+
+/// Runs one full round for any [`DecodableCode`]: prepare an arbitrary
+/// state via `prep`, encode, optionally inject `injected_error`,
+/// extract syndrome for real, decode the real syndrome bits in real
+/// software, apply the computed correction directly to the executing
+/// register, then run the code's own `decode` circuit to collapse the
+/// logical information back onto the first data qubit -- returning its
+/// reduced density matrix. See [`DecodableCode`]'s own doc comment for
+/// why this needs two real execution stages rather than one static
+/// circuit, and [`qec::tests::run_one_round`](tests) for the
+/// [`StabilizerCode`] (static-table) sibling this mirrors.
+pub fn run_decodable_round(
+    code: &dyn DecodableCode,
+    prep: impl Fn(&mut Circuit, usize),
+    injected_error: Option<crate::ir::Gate>,
+) -> Result<sirraya_qutub::DensityMatrix, String> {
+    let n = code.num_data_qubits();
+    let s = code.num_syndrome_bits();
+    let data_qubits: Vec<usize> = (0..n).collect();
+    let ancilla_qubits: Vec<usize> = (n..n + s).collect();
+    let syndrome_clbits: Vec<usize> = (0..s).collect();
+
+    // Stage 1: prep, encode, (test) error, extract syndrome -- run for
+    // real to get real classical bits.
+    let mut c1 = Circuit::new(n + s);
+    c1.num_clbits = s;
+    prep(&mut c1, data_qubits[0]);
+    code.encode(&mut c1, &data_qubits);
+    if let Some(g) = injected_error {
+        c1.push(g);
+    }
+    code.extract_syndrome(&mut c1, &data_qubits, &ancilla_qubits, &syndrome_clbits);
+    let optimized1 = crate::ir_optimize::optimize(&c1);
+    let native1 = crate::native::decompose(&optimized1);
+    let (mut reg, syndrome) = crate::emit::run_with_measurement(&native1)?;
+
+    // Real classical decoding, on the real syndrome just measured.
+    let corrections = code.decode_syndrome(&syndrome);
+
+    // Stage 2: apply the computed correction directly to the
+    // already-executing register, then run the code's own decode
+    // circuit on top of the same register.
+    for (q, correction) in corrections {
+        match correction {
+            PauliCorrection::X => reg.apply_pauli_x(q)?,
+            PauliCorrection::Y => reg.apply_pauli_y(q)?,
+            PauliCorrection::Z => reg.apply_pauli_z(q)?,
+        }
+    }
+    let mut c2 = Circuit::new(n + s);
+    code.decode(&mut c2, &data_qubits);
+    let optimized2 = crate::ir_optimize::optimize(&c2);
+    let native2 = crate::native::decompose(&optimized2);
+    crate::emit::apply_to(&native2, &mut reg)?;
+
+    reg.to_density_matrix()?.partial_trace(&[data_qubits[0]])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,10 +278,7 @@ mod tests {
         let optimized = crate::ir_optimize::optimize(&c);
         let native = crate::native::decompose(&optimized);
         let (reg, _clbits) = emit::run_with_measurement(&native).unwrap();
-        reg.to_density_matrix()
-            .unwrap()
-            .partial_trace(&[data_qubits[0]])
-            .unwrap()
+        reg.to_density_matrix().unwrap().partial_trace(&[data_qubits[0]]).unwrap()
     }
 
     fn plus_state_target() -> DensityMatrix {
@@ -196,16 +307,8 @@ mod tests {
     fn bit_flip_code_corrects_any_single_x_error() {
         let code = ThreeQubitBitFlipCode;
         for (prep, target) in [
-            (
-                arbitrary_state_prep as fn(&mut Circuit, usize),
-                arbitrary_state_target(),
-            ),
-            (
-                |c: &mut Circuit, q: usize| {
-                    c.push(Gate::H(q));
-                },
-                plus_state_target(),
-            ),
+            (arbitrary_state_prep as fn(&mut Circuit, usize), arbitrary_state_target()),
+            (|c: &mut Circuit, q: usize| { c.push(Gate::H(q)); }, plus_state_target()),
         ] {
             for injected in [None, Some(Gate::X(0)), Some(Gate::X(1)), Some(Gate::X(2))] {
                 let recovered = run_one_round(&code, prep, injected.clone());
@@ -213,8 +316,7 @@ mod tests {
                 assert!(
                     (fidelity - 1.0).abs() < 1e-9,
                     "bit-flip code, injected error {:?}: expected ~100% recovery fidelity, got {}",
-                    injected,
-                    fidelity
+                    injected, fidelity
                 );
             }
         }
@@ -224,16 +326,8 @@ mod tests {
     fn phase_flip_code_corrects_any_single_z_error() {
         let code = ThreeQubitPhaseFlipCode;
         for (prep, target) in [
-            (
-                arbitrary_state_prep as fn(&mut Circuit, usize),
-                arbitrary_state_target(),
-            ),
-            (
-                |c: &mut Circuit, q: usize| {
-                    c.push(Gate::H(q));
-                },
-                plus_state_target(),
-            ),
+            (arbitrary_state_prep as fn(&mut Circuit, usize), arbitrary_state_target()),
+            (|c: &mut Circuit, q: usize| { c.push(Gate::H(q)); }, plus_state_target()),
         ] {
             for injected in [None, Some(Gate::Z(0)), Some(Gate::Z(1)), Some(Gate::Z(2))] {
                 let recovered = run_one_round(&code, prep, injected.clone());
@@ -373,11 +467,7 @@ mod tests {
         let optimized = crate::ir_optimize::optimize(&c);
         let native = crate::native::decompose(&optimized);
         let (reg, _clbits) = emit::run_with_measurement(&native).unwrap();
-        let recovered = reg
-            .to_density_matrix()
-            .unwrap()
-            .partial_trace(&[0])
-            .unwrap();
+        let recovered = reg.to_density_matrix().unwrap().partial_trace(&[0]).unwrap();
 
         let expected_logical_x_flip: DensityMatrix = {
             let mut reg = QuantumRegister::new(1).unwrap();
