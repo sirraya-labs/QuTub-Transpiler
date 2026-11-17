@@ -134,4 +134,82 @@ mod tests {
         assert_eq!(sample_depolarizing_error(p, p), None);
         assert_eq!(sample_depolarizing_error(p, 0.9999), None);
     }
+
+    const EPS: f64 = 1e-12;
+
+    fn assert_amplitude(reg: &QuantumRegister, index: usize, re: f64, im: f64) {
+        let amp = reg.get_state_vector()[index];
+        assert!(
+            (amp.real() - re).abs() < EPS && (amp.imag() - im).abs() < EPS,
+            "amplitude[{index}] = ({}, {}), expected ({re}, {im})",
+            amp.real(),
+            amp.imag()
+        );
+    }
+
+    #[test]
+    fn x_error_flips_zero_to_one() {
+        let mut reg = QuantumRegister::new(1).unwrap();
+        apply_pauli_error(&mut reg, 0, PauliError::X).unwrap();
+        assert_amplitude(&reg, 0, 0.0, 0.0);
+        assert_amplitude(&reg, 1, 1.0, 0.0);
+    }
+
+    #[test]
+    fn y_error_flips_zero_to_one_with_imaginary_phase() {
+        let mut reg = QuantumRegister::new(1).unwrap();
+        apply_pauli_error(&mut reg, 0, PauliError::Y).unwrap();
+        assert_amplitude(&reg, 0, 0.0, 0.0);
+        assert_amplitude(&reg, 1, 0.0, 1.0);
+    }
+
+    #[test]
+    fn z_error_leaves_zero_state_unchanged() {
+        let mut reg = QuantumRegister::new(1).unwrap();
+        apply_pauli_error(&mut reg, 0, PauliError::Z).unwrap();
+        assert_amplitude(&reg, 0, 1.0, 0.0);
+        assert_amplitude(&reg, 1, 0.0, 0.0);
+    }
+
+    #[test]
+    fn z_error_flips_the_sign_of_the_one_state() {
+        let mut reg = QuantumRegister::new(1).unwrap();
+        apply_pauli_error(&mut reg, 0, PauliError::X).unwrap();
+        apply_pauli_error(&mut reg, 0, PauliError::Z).unwrap();
+        assert_amplitude(&reg, 1, -1.0, 0.0);
+    }
+
+    #[test]
+    fn applying_the_same_error_twice_restores_the_original_state() {
+        for err in [PauliError::X, PauliError::Y, PauliError::Z] {
+            let mut reg = QuantumRegister::new(1).unwrap();
+            apply_pauli_error(&mut reg, 0, err).unwrap();
+            apply_pauli_error(&mut reg, 0, err).unwrap();
+            assert_amplitude(&reg, 0, 1.0, 0.0);
+            assert_amplitude(&reg, 1, 0.0, 0.0);
+        }
+    }
+
+    #[test]
+    fn error_only_touches_the_requested_qubit() {
+        let mut reg = QuantumRegister::new(2).unwrap();
+        apply_pauli_error(&mut reg, 1, PauliError::X).unwrap();
+        // Bit `q` of the basis index is qubit `q`, so flipping qubit 1
+        // moves the state from |00> (index 0) to index 2.
+        assert_amplitude(&reg, 0, 0.0, 0.0);
+        assert_amplitude(&reg, 1, 0.0, 0.0);
+        assert_amplitude(&reg, 2, 1.0, 0.0);
+        assert_amplitude(&reg, 3, 0.0, 0.0);
+    }
+
+    #[test]
+    fn out_of_range_qubit_is_an_error_for_every_pauli() {
+        for err in [PauliError::X, PauliError::Y, PauliError::Z] {
+            let mut reg = QuantumRegister::new(1).unwrap();
+            assert!(
+                apply_pauli_error(&mut reg, 5, err).is_err(),
+                "{err:?} on a nonexistent qubit should return Err"
+            );
+        }
+    }
 }
