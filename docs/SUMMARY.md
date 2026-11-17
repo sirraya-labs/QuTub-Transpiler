@@ -4,6 +4,7 @@
 * [Introduction](introduction.md)
 * [Installation](installation.md)
 * [Getting Started](getting-started.md)
+* [FAQ](faq.md)
 * [Examples](examples.md)
   * [bell_state_end_to_end](examples/bell_state_end_to_end.md)
   * [gate_cheatsheet](examples/gate_cheatsheet.md)
