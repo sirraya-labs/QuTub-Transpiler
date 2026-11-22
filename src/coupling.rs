@@ -284,6 +284,22 @@ impl CouplingMap {
     /// If `rows == 0` or `cols == 0` -- there is no such thing as a
     /// 0-row or 0-column grid; use [`CouplingMap::linear`] (or an empty
     /// map) for a topology-free 0/1-qubit case instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // A 2x2 grid has 4 qubits, and every one is a corner with 2 neighbors.
+    /// let map = CouplingMap::square_grid(2, 2);
+    /// assert_eq!(map.num_qubits(), 4);
+    /// assert!((0..4).all(|q| map.neighbors(q).len() == 2));
+    ///
+    /// // A 3x3 grid: 4 corners (2 neighbors), 4 edge qubits (3), 1 interior qubit (4).
+    /// let map = CouplingMap::square_grid(3, 3);
+    /// let degree = |d: usize| (0..9).filter(|&q| map.neighbors(q).len() == d).count();
+    /// assert_eq!((degree(2), degree(3), degree(4)), (4, 4, 1));
+    /// ```
     pub fn square_grid(rows: usize, cols: usize) -> Self {
         assert!(
             rows >= 1 && cols >= 1,
@@ -307,6 +323,18 @@ impl CouplingMap {
     /// `num_qubits <= 1` returns a topology-free map, matching
     /// [`CouplingMap::linear`]/[`CouplingMap::heavy_hex_for`]'s
     /// behavior at the same sizes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sirraya_qutub_transpiler::CouplingMap;
+    ///
+    /// // 10 qubits need a 4x4 grid (3x3 = 9 is too small); the map is cut to exactly 10.
+    /// let map = CouplingMap::square_grid_for(10);
+    /// assert_eq!(map.num_qubits(), 10);
+    /// // DFS numbering keeps consecutive qubits adjacent here.
+    /// assert!((0..9).all(|q| map.is_adjacent(q, q + 1)));
+    /// ```
     pub fn square_grid_for(num_qubits: usize) -> Self {
         if num_qubits <= 1 {
             return Self {
