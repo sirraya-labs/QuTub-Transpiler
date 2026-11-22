@@ -549,3 +549,77 @@ mod if_decompose_tests {
         assert_eq!(nc.gate_counts(), (0, 1));
     }
 }
+
+#[cfg(test)]
+mod decompose_shape_tests {
+    use super::*;
+    use crate::ir::{Circuit, Gate};
+
+    /// Decomposes a single gate on a fresh `num_qubits`-qubit circuit.
+    fn decompose_one(num_qubits: usize, gate: Gate) -> NativeCircuit {
+        let mut c = Circuit::new(num_qubits);
+        c.push(gate);
+        decompose(&c)
+    }
+
+    #[test]
+    fn decompose_preserves_qubit_and_clbit_counts() {
+        let mut c = Circuit::new(3);
+        c.num_clbits = 2;
+        c.push(Gate::H(0));
+        let nc = decompose(&c);
+        assert_eq!(nc.num_qubits, 3);
+        assert_eq!(nc.num_clbits, 2);
+    }
+
+    #[test]
+    fn measure_passes_through_unchanged() {
+        let mut c = Circuit::new(2);
+        c.num_clbits = 1;
+        c.push(Gate::Measure(1, 0));
+        let nc = decompose(&c);
+        assert_eq!(nc.gates, vec![NativeGate::Measure(1, 0)]);
+    }
+
+    #[test]
+    fn native_rotations_pass_through_as_a_single_gate() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rz(0, 0.3));
+        c.push(Gate::Ry(0, 0.4));
+        c.push(Gate::Rzz(0, 1, 0.5));
+        let nc = decompose(&c);
+        assert_eq!(
+            nc.gates,
+            vec![
+                NativeGate::Rz(0, 0.3),
+                NativeGate::Ry(0, 0.4),
+                NativeGate::Rzz(0, 1, 0.5),
+            ]
+        );
+    }
+
+    #[test]
+    fn zero_and_sub_epsilon_angles_are_dropped() {
+        let mut c = Circuit::new(2);
+        c.push(Gate::Rz(0, 0.0));
+        c.push(Gate::Ry(0, 1e-12));
+        c.push(Gate::Rzz(0, 1, 0.0));
+        c.push(Gate::Cp(0, 1, 0.0));
+        let nc = decompose(&c);
+        assert!(nc.gates.is_empty(), "expected no gates, got {:?}", nc.gates);
+    }
+
+    #[test]
+    fn two_qubit_cost_of_entangling_gates() {
+        assert_eq!(decompose_one(2, Gate::Cz(0, 1)).gate_counts().1, 1);
+        assert_eq!(decompose_one(2, Gate::Cx(0, 1)).gate_counts().1, 1);
+        assert_eq!(decompose_one(2, Gate::Swap(0, 1)).gate_counts().1, 3);
+        assert_eq!(decompose_one(2, Gate::Cp(0, 1, 0.7)).gate_counts().1, 1);
+    }
+
+    #[test]
+    fn rxx_and_ryy_with_zero_angle_emit_no_two_qubit_gate() {
+        assert_eq!(decompose_one(2, Gate::Rxx(0, 1, 0.0)).gate_counts().1, 0);
+        assert_eq!(decompose_one(2, Gate::Ryy(0, 1, 0.0)).gate_counts().1, 0);
+    }
+}
